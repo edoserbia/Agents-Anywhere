@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { ArrowDown, ChevronDown, CircleAlert, Loader2, WifiOff } from "lucide-react"
+import { ArrowDown, ChevronDown, CircleAlert, History, Loader2, WifiOff } from "lucide-react"
 import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -46,6 +46,13 @@ import {
   ToolMarkerRowContent,
 } from "@/components/session/session-tool-cards"
 import { timelineRunCounts } from "@/components/session/timeline-summary"
+import {
+  activeProcessBlockKey,
+  buildTimelineRenderBlocks,
+  buildTimelineRequestEntries,
+  type TimelineProcessBlock,
+} from "@/components/session/timeline-turns"
+import { TimelineRequestHistory } from "@/components/session/timeline-request-history"
 import { needsOlderTimelinePage } from "@/components/session/timeline-autofill"
 import { createTimelineScrollFollow } from "@/components/session/timeline-scroll-follow"
 import { createSessionEventBuffer } from "@/components/session/session-event-buffer"
@@ -139,6 +146,8 @@ const INITIAL_SCROLL_LAYOUT_QUIET_MS = 120
 const INITIAL_SCROLL_LAYOUT_FALLBACK_MS = 900
 const SCROLL_TO_BOTTOM_PRUNE_CHECK_MS = 120
 const COMMAND_QUERY_DEBOUNCE_MS = 120
+/** Must match the width class on the request-history panel. */
+const REQUEST_HISTORY_WIDTH = "16rem"
 const COMPOSER_DRAFT_STORAGE_PREFIX = "agents-anywhere.sessionComposerDraft.v1."
 type ComposerDraftState = {
   sessionId: string
@@ -362,6 +371,11 @@ export function SessionDetail({
   const [commandsLoading, setCommandsLoading] = React.useState(false)
   const [blockingInteractionStackHeight, setBlockingInteractionStackHeight] = React.useState(0)
   const [composerHeight, setComposerHeight] = React.useState(144)
+  // Which folded process blocks the reader opened. Absent means collapsed,
+  // which is the default the request asked for.
+  const [processOpenByKey, setProcessOpenByKey] = React.useState<Record<string, boolean>>({})
+  const [requestHistoryOpen, setRequestHistoryOpen] = React.useState(false)
+  const [activeRequestId, setActiveRequestId] = React.useState<string | null>(null)
   const [timelineGroupOpenByKey, setTimelineGroupOpenByKey] = React.useState<Record<string, boolean>>({})
   const [timelineItemOpenById, setTimelineItemOpenById] = React.useState<Record<string, boolean>>({})
   const [composerDraftState, setComposerDraftState] = React.useState<ComposerDraftState>(() => ({
@@ -491,6 +505,28 @@ export function SessionDetail({
       return { ...current, [itemId]: open }
     })
   }, [])
+  const handleProcessOpenChange = React.useCallback((key: string, open: boolean) => {
+    setProcessOpenByKey((current) => {
+      if (current[key] === open) return current
+      return { ...current, [key]: open }
+    })
+  }, [])
+  /**
+   * Scroll the timeline to a past request and remember it as the active entry.
+   * The target is looked up by data attribute rather than a stored offset so
+   * it stays correct after the timeline grows or folds above it.
+   */
+  const handleJumpToRequest = React.useCallback((entry: { id: string }) => {
+    setActiveRequestId(entry.id)
+    const viewport = timelineRef.current
+    if (!viewport) return
+    const target = viewport.querySelector(`[data-timeline-request-id="${CSS.escape(entry.id)}"]`)
+    if (!(target instanceof HTMLElement)) return
+    timelineFollowRef.current?.pause()
+    const viewportTop = viewport.getBoundingClientRect().top
+    const targetTop = target.getBoundingClientRect().top
+    viewport.scrollTo({ top: viewport.scrollTop + (targetTop - viewportTop) - 16, behavior: "smooth" })
+  }, [])
 
   const handleSelectionChange = async (
     selections: { model?: string; permission?: string },
@@ -580,6 +616,8 @@ export function SessionDetail({
   React.useEffect(() => {
     setTimelineGroupOpenByKey({})
     setTimelineItemOpenById({})
+    setProcessOpenByKey({})
+    setActiveRequestId(null)
     catalogFetchKeyRef.current = null
   }, [sessionId])
 
@@ -1595,6 +1633,34 @@ export function SessionDetail({
     () => groupTimelineItems((state?.items ?? []).filter(isVisibleTimelineItem), interactionTargetIds),
     [interactionTargetIds, state?.items],
   )
+  // Fold each turn's process (reasoning, tools, file changes, sub-agents) into
+  // a single collapsible block so only the request and its answer stay visible.
+  const timelineBlocks = React.useMemo(
+    () => buildTimelineRenderBlocks(timelineGroups),
+    [timelineGroups],
+  )
+  const liveProcessKey = React.useMemo(
+    () => (turnInProgress ? activeProcessBlockKey(timelineBlocks) : null),
+    [timelineBlocks, turnInProgress],
+  )
+  const requestEntries = React.useMemo(
+    () => buildTimelineRequestEntries(timelineBlocks, (item) => messageText(item)),
+    [timelineBlocks],
+  )
+
+  /**
+   * Whether a folded process block is open.
+   *
+   * An explicit choice by the reader always wins. Without one, only the block
+   * belonging to the turn that is currently running is open, so progress is
+   * visible while it happens and the block folds itself back to a single row
+   * the moment the turn finishes. Every finished turn is therefore collapsed
+   * by default and expands on click.
+   */
+  const isProcessOpen = React.useCallback(
+    (key: string) => processOpenByKey[key] ?? key === liveProcessKey,
+    [liveProcessKey, processOpenByKey],
+  )
   const turnReviewDisplay = React.useMemo(() => {
     return buildTurnReviewDisplay(state?.session.id === sessionId ? state.items.filter(isVisibleTimelineItem) : [], {
       root: state?.session.cwd,
@@ -1654,12 +1720,13 @@ export function SessionDetail({
         </Alert>
       ) : null}
 
-      <div className="relative min-h-0 flex-1 overflow-hidden">
-        <ScrollArea
-          viewportRef={timelineRef}
-          className="h-full"
-          viewportProps={{ onScroll: handleTimelineScroll }}
-        >
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+          <ScrollArea
+            viewportRef={timelineRef}
+            className="h-full"
+            viewportProps={{ onScroll: handleTimelineScroll }}
+          >
           <div
             ref={timelineContentRef}
             aria-busy={runtimeStatus === "waiting" || runtimeStatus === "pending" || runtimeStatus === "running"}
@@ -1681,29 +1748,58 @@ export function SessionDetail({
             blockingInteractionList.length === 0 ? (
               <p className="py-12 text-center text-sm text-muted-foreground">{tSession("noActivity")}</p>
             ) : null}
-            {timelineGroups.map((group) => {
-              const groupKey = timelineGroupKey(group)
-              const turnAction = turnActionsByGroupKey.get(groupKey)
-              const completedTurnReview = timelineGroupItems(group)
-                .map((item) => completedTurnReviewsByEndItemId.get(item.id))
-                .find((turn) => turn !== undefined)
-              return (
-                <React.Fragment key={groupKey}>
-                  <TimelineGroupEntry
-                    group={group}
+            {timelineBlocks.map((block) => {
+              if (block.kind === "process") {
+                return (
+                  <TimelineProcessBlockEntry
+                    key={block.key}
+                    block={block}
                     token={token}
                     session={session}
                     interactionByTarget={interactionByTarget}
                     resolvingNoticeId={resolvingNoticeId}
                     resolvingActionId={resolvingActionId}
-                    groupOpen={group.kind === "single" ? false : timelineGroupOpenByKey[group.key] ?? false}
+                    open={isProcessOpen(block.key)}
+                    onOpenChange={(open) => handleProcessOpenChange(block.key, open)}
+                    groupOpenByKey={timelineGroupOpenByKey}
                     itemOpenById={timelineItemOpenById}
-                    onGroupOpenChange={group.kind === "single"
-                      ? undefined
-                      : (open) => handleTimelineGroupOpenChange(group.key, open)}
+                    onGroupOpenChange={handleTimelineGroupOpenChange}
                     onItemOpenChange={handleTimelineItemOpenChange}
                     onRespondInteraction={handleRespondInteraction}
                   />
+                )
+              }
+              const group = block.group
+              const groupKey = timelineGroupKey(group)
+              const turnAction = turnActionsByGroupKey.get(groupKey)
+              const completedTurnReview = timelineGroupItems(group)
+                .map((item) => completedTurnReviewsByEndItemId.get(item.id))
+                .find((turn) => turn !== undefined)
+              // A request anchors the history navigator to its position.
+              const requestItem = timelineGroupItems(group)
+                .find((item) => item.type === "message" && item.role === "user")
+              return (
+                <React.Fragment key={groupKey}>
+                  <div
+                    data-timeline-request-id={requestItem?.id}
+                    className="flex min-w-0 flex-col gap-3 [&>*]:min-w-0"
+                  >
+                    <TimelineGroupEntry
+                      group={group}
+                      token={token}
+                      session={session}
+                      interactionByTarget={interactionByTarget}
+                      resolvingNoticeId={resolvingNoticeId}
+                      resolvingActionId={resolvingActionId}
+                      groupOpen={group.kind === "single" ? false : timelineGroupOpenByKey[group.key] ?? false}
+                      itemOpenById={timelineItemOpenById}
+                      onGroupOpenChange={group.kind === "single"
+                        ? undefined
+                        : (open) => handleTimelineGroupOpenChange(group.key, open)}
+                      onItemOpenChange={handleTimelineItemOpenChange}
+                      onRespondInteraction={handleRespondInteraction}
+                    />
+                  </div>
                   {completedTurnReview && onOpenReview ? (
                     <SessionReviewCard
                       key={completedTurnReview.review.key}
@@ -1761,9 +1857,37 @@ export function SessionDetail({
             {tSession("bottom")}
           </Button>
         ) : null}
+        </div>
+
+        {!requestHistoryOpen ? (
+          <Button
+            type="button"
+            size="icon-sm"
+            variant="secondary"
+            aria-label={tSession("requestHistory.open")}
+            aria-pressed={requestHistoryOpen}
+            data-slot="timeline-request-history-toggle"
+            onClick={() => setRequestHistoryOpen(true)}
+            className="absolute right-3 top-16 z-30 rounded-full border bg-background/95 shadow-lg backdrop-blur"
+          >
+            <History className="size-4" />
+          </Button>
+        ) : null}
+
+        <TimelineRequestHistory
+          open={requestHistoryOpen}
+          onOpenChange={setRequestHistoryOpen}
+          entries={requestEntries}
+          activeId={activeRequestId}
+          onSelect={handleJumpToRequest}
+        />
       </div>
 
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
+      <div
+        className="pointer-events-none absolute inset-x-0 bottom-0 z-10"
+        // Keep the composer clear of the request navigator when it is open.
+        style={requestHistoryOpen ? { right: REQUEST_HISTORY_WIDTH } : undefined}
+      >
         <BlockingInteractionStack
           notices={blockingInteractionList}
           resolvingNoticeId={resolvingNoticeId}
@@ -2170,6 +2294,94 @@ function isToolRunBarItem(item: TimelineItem): boolean {
   if (item.type === "tool") return true
   if (item.type !== "artifact") return false
   return (item.content.kind ?? "artifact") !== "diff"
+}
+
+/**
+ * One turn's process detail, folded behind a single row.
+ *
+ * Everything the runtime did between a request and its answer collapses here,
+ * so the conversation shows request -> answer by default and the process is one
+ * click away. The row summarises what is inside instead of hiding it silently.
+ */
+function TimelineProcessBlockEntry({
+  block,
+  token,
+  session,
+  interactionByTarget,
+  resolvingNoticeId,
+  resolvingActionId,
+  open,
+  onOpenChange,
+  groupOpenByKey,
+  itemOpenById,
+  onGroupOpenChange,
+  onItemOpenChange,
+  onRespondInteraction,
+}: {
+  block: TimelineProcessBlock
+  token: string
+  session: SessionView
+  interactionByTarget: ReadonlyMap<string | null, Notice>
+  resolvingNoticeId: string | null
+  resolvingActionId: string | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  groupOpenByKey: Record<string, boolean>
+  itemOpenById: Record<string, boolean>
+  onGroupOpenChange: (key: string, open: boolean) => void
+  onItemOpenChange: (itemId: string, open: boolean) => void
+  onRespondInteraction: (noticeId: string, actionId: string, input?: Record<string, unknown>) => void
+}) {
+  const tSession = useTranslations("dashboard.session")
+  const status = toolRunStatus(block.items)
+  const active = timelineItemStatusIsActive(status)
+  const title = toolRunSummary(block.items, tSession)
+
+  return (
+    <Collapsible open={open} onOpenChange={onOpenChange} className="min-w-0 max-w-full overflow-hidden">
+      <div className="flex min-w-0 max-w-full flex-col gap-2 overflow-hidden">
+        <CollapsibleTrigger asChild>
+          <Marker asChild className="w-full">
+            <button
+              type="button"
+              className="text-left"
+              data-slot="timeline-process-toggle"
+              data-state={open ? "open" : "closed"}
+            >
+              <ToolMarkerRowContent collapsible kind="tool" status={status} title={title} />
+            </button>
+          </Marker>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="min-w-0 max-w-full overflow-hidden">
+          <div className="flex flex-col gap-3 border-l border-border/60 pl-3">
+            {block.groups.map((group) => (
+              <TimelineGroupEntry
+                key={timelineGroupKey(group)}
+                group={group}
+                token={token}
+                session={session}
+                interactionByTarget={interactionByTarget}
+                resolvingNoticeId={resolvingNoticeId}
+                resolvingActionId={resolvingActionId}
+                groupOpen={group.kind === "single" ? false : groupOpenByKey[group.key] ?? false}
+                itemOpenById={itemOpenById}
+                onGroupOpenChange={group.kind === "single"
+                  ? undefined
+                  : (nextOpen) => onGroupOpenChange(group.key, nextOpen)}
+                onItemOpenChange={onItemOpenChange}
+                onRespondInteraction={onRespondInteraction}
+              />
+            ))}
+          </div>
+        </CollapsibleContent>
+      </div>
+      {active ? (
+        <span className="sr-only" data-slot="timeline-process-active">
+          {tSession("processRunning", { count: block.items.length })}
+        </span>
+      ) : null}
+    </Collapsible>
+  )
 }
 
 export function TimelineGroupEntry({

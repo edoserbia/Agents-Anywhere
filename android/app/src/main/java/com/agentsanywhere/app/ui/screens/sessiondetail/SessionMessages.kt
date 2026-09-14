@@ -10,6 +10,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -40,6 +41,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -270,6 +272,11 @@ internal fun MessageList(
     onShareReply: (List<String>) -> Unit,
     onOpenFile: (String) -> Unit,
     onRespondNotice: (RuntimeNotice, RuntimeNoticeAction, Map<String, Any?>?) -> Unit = { _, _, _ -> },
+    /** Message id to scroll to on request; cleared through [onJumpHandled]. */
+    jumpToMessageId: String? = null,
+    onJumpHandled: () -> Unit = {},
+    /** Reports the navigable requests so the header can open the history sheet. */
+    onRequestEntriesChange: (List<TimelineRequestEntry>) -> Unit = {},
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -288,6 +295,17 @@ internal fun MessageList(
     val timelineItems = remember(displayMessages, interactionTargetIds) {
         groupTimelineMessages(displayMessages, interactionTargetIds)
     }
+    // Fold each turn's process (reasoning, tools, file changes, sub-agents) into
+    // a single collapsible row so only the request and its answer stay visible.
+    val timelineBlocks = remember(timelineItems) { buildTimelineBlocks(timelineItems) }
+    val liveProcessKey = remember(timelineBlocks, turnInProgress) {
+        if (turnInProgress) activeProcessBlockKey(timelineBlocks) else null
+    }
+    val requestEntries = remember(timelineBlocks) { buildTimelineRequestEntries(timelineBlocks) }
+    // Publish the navigable requests so the header can offer the history sheet.
+    LaunchedEffect(requestEntries) { onRequestEntriesChange(requestEntries) }
+    // Explicit open/close choices by the reader, keyed by process block key.
+    val processOpenByKey = remember(sessionId) { mutableStateMapOf<String, Boolean>() }
     val agentActionsByTurnEnd = remember(timelineItems, turnInProgress) {
         buildAgentActionsByTurnEnd(timelineItems, turnInProgress)
     }
@@ -301,6 +319,14 @@ internal fun MessageList(
     DisposableEffect(sessionId) {
         onDispose { returnToLatestJob?.cancel() }
     }
+
+    /*
+     * Prefix rows rendered before the timeline blocks. They are conditional, so
+     * the count is derived from the same values the LazyColumn uses; a fixed
+     * constant would land a jump on the wrong row whenever a working indicator
+     * or detached notice is present.
+     */
+    val timelinePrefixCount = 1 + (if (displayWorkingLabel != null) 1 else 0) + detachedNotices.size
 
     fun releaseReadLock() {
         userPausedAutoFollow = false
@@ -320,6 +346,32 @@ internal fun MessageList(
         // This LazyColumn is reversed: a downward finger motion reveals older items.
         userScrollDirection = if (deltaY > 0f) 1 else -1
         pauseAutoFollowWithSnapshot()
+    }
+
+    /*
+     * Scroll to a past request chosen in the history sheet.
+     *
+     * The list is reversed (index 0 is the newest block), so displayed order is
+     * the reverse of [timelineBlocks]; the prefix count computed above turns the
+     * block index into a LazyColumn index.
+     */
+    LaunchedEffect(jumpToMessageId, timelineBlocks, timelinePrefixCount) {
+        val targetId = jumpToMessageId ?: return@LaunchedEffect
+        val index = timelineBlocks.indexOfFirst { block ->
+            block.messages.any { it.id == targetId || it.sourceItemId == targetId }
+        }
+        if (index < 0) {
+            onJumpHandled()
+            return@LaunchedEffect
+        }
+        // Jumping to history is a deliberate read: stop auto-following the
+        // newest item while the reader looks at an older turn.
+        pauseAutoFollowWithSnapshot()
+        listState.animateScrollToItemWithOffset(
+            itemIndex = timelinePrefixCount + (timelineBlocks.size - 1 - index),
+            offset = 16,
+        )
+        onJumpHandled()
     }
 
     val scrollInput = remember(sessionId) {
@@ -455,43 +507,47 @@ internal fun MessageList(
                         notificationOnly = notice.type == "notification",
                     )
                 }
-                items(timelineItems.asReversed(), key = { it.key }) { item ->
+                items(timelineBlocks.asReversed(), key = { it.key }) { block ->
                     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                        when (item) {
-                            is TimelineRenderItem.Single -> TimelineMessageRow(
-                                message = item.message,
+                        when (block) {
+                            is TimelineBlock.Entry -> TimelineBlockEntries(
+                                item = block.item,
                                 darkMode = darkMode,
                                 listState = listState,
                                 sessionId = sessionId,
                                 workspaceRoot = workspaceRoot,
                                 controller = controller,
-                                onPreviewAttachment = onPreviewAttachment,
-                                onOpenAttachment = onOpenAttachment,
-                                onCopyMessage = onCopyMessage,
-                                onOpenFile = onOpenFile,
-                                interaction = interactionByTarget[item.message.sourceItemId],
+                                interactionByTarget = interactionByTarget,
                                 canRespondToNotices = canRespondToNotices,
                                 respondingNoticeIds = respondingNoticeIds,
                                 noticeResponseErrors = noticeResponseErrors,
                                 onRespondNotice = onRespondNotice,
-                            )
-                            is TimelineRenderItem.ToolRun -> ToolRunGroup(
-                                messages = item.messages,
-                                darkMode = darkMode,
-                                listState = listState,
-                                workspaceRoot = workspaceRoot,
+                                onPreviewAttachment = onPreviewAttachment,
+                                onOpenAttachment = onOpenAttachment,
+                                onCopyMessage = onCopyMessage,
                                 onOpenFile = onOpenFile,
                             )
-                            is TimelineRenderItem.Reconnect -> ReconnectGroup(
-                                messages = item.messages,
+                            is TimelineBlock.Process -> TimelineProcessBlock(
+                                block = block,
                                 darkMode = darkMode,
-                            )
-                            is TimelineRenderItem.AgentCalls -> AgentCallGroup(
-                                messages = item.messages,
-                                darkMode = darkMode,
+                                listState = listState,
+                                sessionId = sessionId,
+                                workspaceRoot = workspaceRoot,
+                                controller = controller,
+                                interactionByTarget = interactionByTarget,
+                                canRespondToNotices = canRespondToNotices,
+                                respondingNoticeIds = respondingNoticeIds,
+                                noticeResponseErrors = noticeResponseErrors,
+                                onRespondNotice = onRespondNotice,
+                                onPreviewAttachment = onPreviewAttachment,
+                                onOpenAttachment = onOpenAttachment,
+                                onCopyMessage = onCopyMessage,
+                                onOpenFile = onOpenFile,
+                                open = processOpenByKey[block.key] ?: (block.key == liveProcessKey),
+                                onOpenChange = { open -> processOpenByKey[block.key] = open },
                             )
                         }
-                        agentActionsByTurnEnd[item.key]?.let { action ->
+                        agentActionsByTurnEnd[block.key]?.let { action ->
                             DisableSelection {
                                 AgentReplyActions(
                                     darkMode = darkMode,
@@ -539,6 +595,201 @@ private suspend fun LazyListState.animateToLatestFromAnywhere() {
     }
     animateScrollToItem(0)
 }
+
+/**
+ * Scroll so [itemIndex] sits [offset] pixels below the top of the viewport.
+ *
+ * [LazyListState.animateScrollToItem] only accepts a pixel offset relative to
+ * the item's own start, and in a reversed list the leading padding would push
+ * the target off-screen, so the item is brought to the top first and then
+ * nudged by the requested offset.
+ */
+private suspend fun LazyListState.animateScrollToItemWithOffset(itemIndex: Int, offset: Int) {
+    val bounded = itemIndex.coerceAtLeast(0)
+    if (firstVisibleItemIndex > bounded + RETURN_TO_LATEST_ANIMATION_WINDOW) {
+        // Land near the target first so a long jump does not animate through
+        // every intermediate row.
+        scrollToItem(bounded + RETURN_TO_LATEST_ANIMATION_WINDOW)
+    }
+    animateScrollToItem(bounded)
+    if (offset != 0) animateScrollBy(offset.toFloat())
+}
+
+/** Render one non-folded timeline item (request, answer or standalone row). */
+@Composable
+private fun TimelineBlockEntries(
+    item: TimelineRenderItem,
+    darkMode: Boolean,
+    listState: LazyListState,
+    sessionId: String,
+    workspaceRoot: String?,
+    controller: SessionDetailController,
+    interactionByTarget: Map<String, RuntimeNotice>,
+    canRespondToNotices: Boolean,
+    respondingNoticeIds: Set<String>,
+    noticeResponseErrors: Map<String, String>,
+    onRespondNotice: (RuntimeNotice, RuntimeNoticeAction, Map<String, Any?>?) -> Unit,
+    onPreviewAttachment: (TimelineAttachment) -> Unit,
+    onOpenAttachment: (TimelineAttachment) -> Unit,
+    onCopyMessage: (String) -> Unit,
+    onOpenFile: (String) -> Unit,
+) {
+    when (item) {
+        is TimelineRenderItem.Single -> TimelineMessageRow(
+            message = item.message,
+            darkMode = darkMode,
+            listState = listState,
+            sessionId = sessionId,
+            workspaceRoot = workspaceRoot,
+            controller = controller,
+            onPreviewAttachment = onPreviewAttachment,
+            onOpenAttachment = onOpenAttachment,
+            onCopyMessage = onCopyMessage,
+            onOpenFile = onOpenFile,
+            interaction = interactionByTarget[item.message.sourceItemId],
+            canRespondToNotices = canRespondToNotices,
+            respondingNoticeIds = respondingNoticeIds,
+            noticeResponseErrors = noticeResponseErrors,
+            onRespondNotice = onRespondNotice,
+        )
+        is TimelineRenderItem.ToolRun -> ToolRunGroup(
+            messages = item.messages,
+            darkMode = darkMode,
+            listState = listState,
+            workspaceRoot = workspaceRoot,
+            onOpenFile = onOpenFile,
+        )
+        is TimelineRenderItem.Reconnect -> ReconnectGroup(
+            messages = item.messages,
+            darkMode = darkMode,
+        )
+        is TimelineRenderItem.AgentCalls -> AgentCallGroup(
+            messages = item.messages,
+            darkMode = darkMode,
+        )
+    }
+}
+
+/**
+ * One turn's process detail, folded behind a single row.
+ *
+ * Everything the runtime did between a request and its answer collapses here,
+ * so the conversation reads as request then answer, with the process one tap
+ * away. A block that is still running reports its status on the collapsed row.
+ */
+@Composable
+private fun TimelineProcessBlock(
+    block: TimelineBlock.Process,
+    darkMode: Boolean,
+    listState: LazyListState,
+    sessionId: String,
+    workspaceRoot: String?,
+    controller: SessionDetailController,
+    interactionByTarget: Map<String, RuntimeNotice>,
+    canRespondToNotices: Boolean,
+    respondingNoticeIds: Set<String>,
+    noticeResponseErrors: Map<String, String>,
+    onRespondNotice: (RuntimeNotice, RuntimeNoticeAction, Map<String, Any?>?) -> Unit,
+    onPreviewAttachment: (TimelineAttachment) -> Unit,
+    onOpenAttachment: (TimelineAttachment) -> Unit,
+    onCopyMessage: (String) -> Unit,
+    onOpenFile: (String) -> Unit,
+    open: Boolean,
+    onOpenChange: (Boolean) -> Unit,
+) {
+    val colors = LocalAAColors.current
+    val muted = colors.muted
+    val surface = colors.sessionTimelineActivitySurface
+    val haptic = LocalHapticFeedback.current
+    val active = block.messages.any { it.status in setOf("pending", "running", "waiting_approval") }
+    val failed = block.messages.any { it.status in setOf("failed", "cancelled", "interrupted") }
+    var cardTop by remember(block.key) { mutableStateOf<Float?>(null) }
+    var lockedTop by remember(block.key) { mutableStateOf<Float?>(null) }
+
+    // Keep the row under the finger while the block expands or collapses.
+    val modifier = Modifier
+        .fillMaxWidth()
+        .padding(horizontal = 4.dp)
+        .onGloballyPositioned {
+            val nextTop = it.positionInWindow().y
+            val delta = (lockedTop ?: nextTop) - nextTop
+            if (abs(delta) > 1f) listState.dispatchRawDelta(delta)
+            lockedTop = null
+            cardTop = nextTop
+        }
+
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 34.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(surface)
+                .noRippleClickable {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    lockedTop = cardTop
+                    onOpenChange(!open)
+                }
+                .padding(horizontal = 6.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TimelineChevron(expanded = open, tint = muted)
+            Icon(
+                imageVector = Lucide.Hammer,
+                contentDescription = null,
+                tint = if (failed) colors.errorIcon else muted,
+                modifier = Modifier.size(16.dp),
+            )
+            Text(
+                text = if (active) {
+                    stringResource(R.string.session_process_running, toolRunSummary(block.messages))
+                } else {
+                    toolRunSummary(block.messages)
+                },
+                modifier = Modifier.weight(1f),
+                color = if (failed) colors.errorIcon else colors.ink,
+                fontSize = 13.sp,
+                fontWeight = TimelineActivityLabelWeight,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (active) {
+                WorkingSpinner(color = muted)
+            }
+        }
+        if (open) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                block.items.forEach { item ->
+                    TimelineBlockEntries(
+                        item = item,
+                        darkMode = darkMode,
+                        listState = listState,
+                        sessionId = sessionId,
+                        workspaceRoot = workspaceRoot,
+                        controller = controller,
+                        interactionByTarget = interactionByTarget,
+                        canRespondToNotices = canRespondToNotices,
+                        respondingNoticeIds = respondingNoticeIds,
+                        noticeResponseErrors = noticeResponseErrors,
+                        onRespondNotice = onRespondNotice,
+                        onPreviewAttachment = onPreviewAttachment,
+                        onOpenAttachment = onOpenAttachment,
+                        onCopyMessage = onCopyMessage,
+                        onOpenFile = onOpenFile,
+                    )
+                }
+            }
+        }
+    }
+}
+
 
 internal fun shouldAutoFollowRealtime(
     hasRealtimeUpdate: Boolean,

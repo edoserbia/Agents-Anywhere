@@ -503,6 +503,11 @@
     <string name="session_tool_summary_changed_files">Changed %1$d files</string>
     <string name="session_tool_summary_created_files">Created %1$d files</string>
     <string name="session_tool_summary_items">%1$d activities</string>
+    <string name="session_process_running">Working · %1$s</string>
+    <string name="session_request_history_title">Requests</string>
+    <string name="session_request_history_empty">No requests in this session yet</string>
+    <string name="session_request_history_untitled">(empty request)</string>
+    <string name="session_request_history_index">Request %1$d</string>
     <string name="session_tool_ran">Ran %1$s</string>
     <string name="session_tool_changed_file">Changed %1$s</string>
     <string name="session_tool_changed_files">Changed files</string>

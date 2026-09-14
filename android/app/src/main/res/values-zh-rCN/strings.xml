@@ -502,6 +502,11 @@
     <string name="session_tool_summary_changed_files">修改了 %1$d 个文件</string>
     <string name="session_tool_summary_created_files">创建了 %1$d 个文件</string>
     <string name="session_tool_summary_items">%1$d 条活动</string>
+    <string name="session_process_running">正在处理 · %1$s</string>
+    <string name="session_request_history_title">历史请求</string>
+    <string name="session_request_history_empty">本次会话还没有请求</string>
+    <string name="session_request_history_untitled">（空请求）</string>
+    <string name="session_request_history_index">第 %1$d 次请求</string>
     <string name="session_tool_ran">执行了 %1$s</string>
     <string name="session_tool_changed_file">修改了 %1$s</string>
     <string name="session_tool_changed_files">修改了文件</string>

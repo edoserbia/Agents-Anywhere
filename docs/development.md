@@ -88,3 +88,18 @@ yarn dist:win   # 在 Windows 构建 x64 NSIS 安装包
 ```
 
 签名、公证、架构选择及缓存重试见 [Desktop Packaging](../desktop-workbench/README.md#packaging)。凭据从环境或安全存储注入，不能提交到源码或文档。Android 的命令和签名边界见 [Android README](../android/README.md)。发布步骤见 [2.0.0 发布说明](releases/2.0.0.md)。
+
+## 客户端版本号
+
+每次修改客户端都必须提升版本号，两端要一起改，不能只改其中一端：
+
+| 位置 | 字段 | 说明 |
+| --- | --- | --- |
+| `desktop-workbench/package.json` | `version` | 决定 DMG 文件名与 `app.getVersion()`。 |
+| `android/app/build.gradle.kts` | `versionName` | 用户可见版本，与 Desktop 保持一致。 |
+| `android/app/build.gradle.kts` | `versionCode` | 必须每次递增，否则 Android 不把新包当作升级。 |
+
+补丁位每次加一，按十进制递增：`2.0.1` → `2.0.2` → … → `2.0.9` → `2.0.10` → `2.0.11`。不要用 `2.0.10` 表示 `2.0.1` 之后的下一个"十位"，也不要把 `versionCode` 直接等同于版本号字符串。
+
+改完版本号后重新构建安装包，并按 [升级指南](upgrading.md) 与发布记录说明分发方式。只改源码不重新打包不会影响已发布的二进制。
+

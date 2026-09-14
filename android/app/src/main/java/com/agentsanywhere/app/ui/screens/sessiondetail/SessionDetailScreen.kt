@@ -186,6 +186,9 @@ fun SessionDetailScreen(
     }
     var draft by remember(composerDraftSessionId) { mutableStateOf(restoredComposerDraft.text) }
     var showRuntimeSettings by remember(sessionId) { mutableStateOf(false) }
+    var showRequestHistory by remember(sessionId) { mutableStateOf(false) }
+    var requestEntries by remember(sessionId) { mutableStateOf<List<TimelineRequestEntry>>(emptyList()) }
+    var jumpToMessageId by remember(sessionId) { mutableStateOf<String?>(null) }
     var noticeResponseErrors by remember(sessionId) { mutableStateOf(emptyMap<String, String>()) }
     var forceLatestRequest by remember(sessionId) { mutableStateOf(0) }
     var streamLatestRequest by remember(sessionId) { mutableStateOf(0) }
@@ -1640,6 +1643,9 @@ fun SessionDetailScreen(
                                 onShareReply = ::requestShare,
                                 onOpenFile = ::openReferencedFile,
                                 onRespondNotice = ::respondNotice,
+                                jumpToMessageId = jumpToMessageId,
+                                onJumpHandled = { jumpToMessageId = null },
+                                onRequestEntriesChange = { requestEntries = it },
                             )
                         }
                         ComposerVeil(
@@ -1729,8 +1735,19 @@ fun SessionDetailScreen(
                                 }
                             },
                             onRightClick = { scope.launch { pagerState.animateScrollToPage(1) } },
+                            onHistoryClick = { showRequestHistory = true },
                             modifier = Modifier.align(Alignment.TopCenter),
                         )
+                        if (showRequestHistory) {
+                            SessionRequestHistorySheet(
+                                entries = requestEntries,
+                                onSelect = { entry ->
+                                    showRequestHistory = false
+                                    jumpToMessageId = entry.id
+                                },
+                                onDismissRequest = { showRequestHistory = false },
+                            )
+                        }
                         if (previewImage == null) {
                             AAToastHost(
                                 hostState = snackbarHostState,

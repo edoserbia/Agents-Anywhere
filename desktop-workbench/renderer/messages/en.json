@@ -1064,6 +1064,16 @@
       "fileChangeUnknown": "Changed",
       "showCode": "Show code",
       "hideCode": "Hide code",
+      "requestHistory": {
+        "title": "Requests",
+        "close": "Close request history",
+        "empty": "No requests in this session yet",
+        "untitled": "(empty request)",
+        "open": "Show request history"
+      },
+      "processSummary": "Folded {count} process entries",
+      "processRunning": "Working · {count} entries",
+      "jumpToRequest": "Jump to this request",
       "loadCodeFailed": "Failed to load code"
     },
     "sessionStatus": {
