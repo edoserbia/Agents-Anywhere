@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
+import com.agentsanywhere.app.R
 import io.github.rosemoe.sora.lang.EmptyLanguage
 import io.github.rosemoe.sora.lang.Language
 import io.github.rosemoe.sora.lang.analysis.AnalyzeManager
@@ -54,6 +55,7 @@ import io.github.rosemoe.sora.langs.textmate.registry.model.ThemeModel
 import io.github.rosemoe.sora.langs.textmate.registry.provider.AssetsFileResolver
 import io.github.rosemoe.sora.text.CharPosition
 import io.github.rosemoe.sora.text.ContentReference
+import io.github.rosemoe.sora.util.EditorHandler
 import io.github.rosemoe.sora.widget.CodeEditor
 import io.github.rosemoe.sora.widget.EditorSearcher
 import io.github.rosemoe.sora.widget.SymbolPairMatch
@@ -80,6 +82,7 @@ internal fun SoraCodeBlock(
     verticalScrollEnabled: Boolean = true,
     horizontalTouchOnly: Boolean = false,
     scalable: Boolean = true,
+    alwaysShowScrollbar: Boolean = false,
 ) {
     val context = LocalContext.current
     val shape = RoundedCornerShape(12.dp)
@@ -101,6 +104,7 @@ internal fun SoraCodeBlock(
                     verticalScrollEnabled = verticalScrollEnabled,
                     horizontalTouchOnly = horizontalTouchOnly,
                     scalable = scalable,
+                    alwaysShowScrollbar = alwaysShowScrollbar,
                 )
             }
         },
@@ -119,6 +123,7 @@ internal fun SoraCodeBlock(
                 verticalScrollEnabled = verticalScrollEnabled,
                 horizontalTouchOnly = horizontalTouchOnly,
                 scalable = scalable,
+                alwaysShowScrollbar = alwaysShowScrollbar,
             )
             if (textChanged) {
                 editor.setText(text)
@@ -317,12 +322,47 @@ internal enum class DiffLineTone {
     Deleted,
 }
 
+/**
+ * Keeps the code editor's scrollbars drawn without requiring a recent scroll.
+ *
+ * sora only renders a scrollbar for 3200ms after the last scroll or while the
+ * bar is being dragged. For a read-only snippet taller than its box that means
+ * the only affordance telling the reader "there is more code below" disappears
+ * before they ever touch it, so tall blocks look like they simply end.
+ *
+ * Re-notifying a scroll at a low rate keeps the built-in fade timer alive. It
+ * is deliberately slower than the render loop: the goal is a persistent
+ * scrollbar, not continuous redraws.
+ */
+private const val SCROLLBAR_KEEPALIVE_MS = 1500L
+
+private fun CodeEditor.applyAlwaysVisibleScrollbar(alwaysVisible: Boolean) {
+    val existing = getTag(R.id.sora_scrollbar_keepalive) as? Runnable
+    // Cancel through the same main-looper queue the runnable was posted on.
+    if (existing != null) EditorHandler.removeCallbacks(existing)
+    setTag(R.id.sora_scrollbar_keepalive, null)
+    if (!alwaysVisible) return
+    val keepAlive = object : Runnable {
+        override fun run() {
+            // Arm the next tick before doing work so a single failed pass does
+            // not stop the loop; posting is main-looper based and safe even
+            // before this view is attached.
+            postDelayedInLifecycle(this, SCROLLBAR_KEEPALIVE_MS)
+            eventHandler.notifyScrolled()
+            invalidate()
+        }
+    }
+    setTag(R.id.sora_scrollbar_keepalive, keepAlive)
+    postDelayedInLifecycle(keepAlive, SCROLLBAR_KEEPALIVE_MS)
+}
+
 private fun CodeEditor.configureReadOnlyCodeEditor(
     darkMode: Boolean,
     editorBackground: Color? = null,
     verticalScrollEnabled: Boolean = true,
     horizontalTouchOnly: Boolean = false,
     scalable: Boolean = true,
+    alwaysShowScrollbar: Boolean = false,
 ) {
     setEditable(false)
     isFocusable = false
@@ -333,6 +373,7 @@ private fun CodeEditor.configureReadOnlyCodeEditor(
     setScrollBarEnabled(true)
     setHorizontalScrollBarEnabled(true)
     setVerticalScrollBarEnabled(verticalScrollEnabled)
+    applyAlwaysVisibleScrollbar(alwaysShowScrollbar)
     setScalable(scalable)
     setHighlightCurrentLine(false)
     setHighlightCurrentBlock(false)

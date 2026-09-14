@@ -30,6 +30,13 @@ function ScrollArea({
         {...restViewportProps}
         className={cn(
           "size-full min-w-0 max-w-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1",
+          // A `max-h-*` on the root alone bounds only the root box: the viewport
+          // keeps `height: 100%`, which resolves against a parent with no
+          // definite height and therefore falls back to `auto`. The viewport
+          // then grows to the full content height, so nothing overflows it and
+          // no scrollbar ever appears. Inheriting the root's max-height keeps
+          // the viewport bounded so tall content actually scrolls.
+          "max-h-[inherit]",
           // Radix wraps viewport children in a measurement div with
           // `display: table`; that can make vertical scroll areas expand
           // horizontally when descendants contain long unbroken content.

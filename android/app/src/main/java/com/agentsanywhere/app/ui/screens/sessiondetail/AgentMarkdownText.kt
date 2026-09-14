@@ -534,12 +534,19 @@ private fun MarkdownCodePanel(label: String, code: String, darkMode: Boolean, st
         return
     }
 
+    val metrics = markdownCodePanelMetrics(code)
     SelectableMarkdownCodeBlock(
         label = normalizedLabel,
         code = code,
-        height = markdownCodePanelHeight(code),
+        height = metrics.panelHeight,
     ) {
-        MarkdownCodePanelContent(label = normalizedLabel, code = code, darkMode = darkMode, styles = styles)
+        MarkdownCodePanelContent(
+            label = normalizedLabel,
+            code = code,
+            darkMode = darkMode,
+            styles = styles,
+            metrics = metrics,
+        )
     }
 }
 
@@ -599,8 +606,62 @@ private fun markdownCodePanelHeight(code: String): Dp {
     return (lineCount * 15 + 73).dp.coerceAtLeast(112.dp)
 }
 
+/** Natural height of just the code text area inside the panel. */
+private fun markdownCodeAreaHeight(code: String): Dp {
+    val lineCount = code.lineSequence().count().coerceAtLeast(1)
+    return (lineCount * 15 + 12).dp
+}
+
+/**
+ * Upper bound for an inline code block before it scrolls internally.
+ *
+ * Without a cap, a long snippet grows the timeline entry to its full height:
+ * the block then has nothing to scroll, so no scrollbar is drawn and the reader
+ * must scroll the whole conversation to reach the end of the code.
+ */
+private val MarkdownCodePanelMaxHeight = 360.dp
+
+/**
+ * Geometry for one rendered code block.
+ *
+ * [panelHeight] is the space the message layout reserves, [codeHeight] is what
+ * the embedded editor receives, and [scrolls] is true when the snippet was too
+ * tall to show at once. They are derived together so the editor can never be
+ * handed more room than the panel reserved for it — that mismatch would clip
+ * the code instead of scrolling it.
+ */
+internal data class MarkdownCodePanelMetrics(
+    val panelHeight: Dp,
+    val codeHeight: Dp,
+    val scrolls: Boolean,
+)
+
+internal fun markdownCodePanelMetrics(
+    code: String,
+    maxPanelHeight: Dp = MarkdownCodePanelMaxHeight,
+): MarkdownCodePanelMetrics {
+    val naturalPanel = markdownCodePanelHeight(code)
+    val naturalCode = markdownCodeAreaHeight(code)
+    // The panel spends a fixed amount on chrome (label row, spacer, padding).
+    // Subtract it so the cap applies to the whole panel, not just the code area.
+    val chrome = naturalPanel - naturalCode
+    val codeCap = (maxPanelHeight - chrome).coerceAtLeast(1.dp)
+    val codeHeight = naturalCode.coerceAtMost(codeCap)
+    return MarkdownCodePanelMetrics(
+        panelHeight = naturalPanel.coerceAtMost(codeHeight + chrome),
+        codeHeight = codeHeight,
+        scrolls = naturalCode > codeHeight,
+    )
+}
+
 @Composable
-private fun MarkdownCodePanelContent(label: String, code: String, darkMode: Boolean, styles: MarkdownStyles) {
+private fun MarkdownCodePanelContent(
+    label: String,
+    code: String,
+    darkMode: Boolean,
+    styles: MarkdownStyles,
+    metrics: MarkdownCodePanelMetrics,
+) {
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     var copied by remember(code) { mutableStateOf(false) }
@@ -609,7 +670,6 @@ private fun MarkdownCodePanelContent(label: String, code: String, darkMode: Bool
     val labelColor = if (darkMode) Color(0xFFFAFAFA) else Color(0xFF191A18)
     val copyIcon = if (darkMode) R.drawable.ic_copy_bash_command_light else R.drawable.ic_copy_bash_command_dark
     val shadow = if (darkMode) Color(0x66000000) else Color(0x0A000000)
-    val codeHeight = (code.lineSequence().count().coerceAtLeast(1) * 15 + 12).dp
 
     Column(
         modifier = Modifier
@@ -660,10 +720,14 @@ private fun MarkdownCodePanelContent(label: String, code: String, darkMode: Bool
             languageHint = label,
             darkMode = darkMode,
             editorBackground = panelBackground,
-            fixedHeight = codeHeight,
+            fixedHeight = metrics.codeHeight,
             framed = false,
-            verticalScrollEnabled = false,
-            horizontalTouchOnly = true,
+            // A capped snippet has to scroll inside the panel, so the editor
+            // needs vertical scrolling and a persistent scrollbar to advertise
+            // that there is more code below the fold.
+            verticalScrollEnabled = metrics.scrolls,
+            alwaysShowScrollbar = metrics.scrolls,
+            horizontalTouchOnly = false,
             scalable = false,
         )
     }

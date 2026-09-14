@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- View-tag key holding the scrollbar keep-alive Runnable on a CodeEditor. -->
+    <item name="sora_scrollbar_keepalive" type="id" />
+</resources>
