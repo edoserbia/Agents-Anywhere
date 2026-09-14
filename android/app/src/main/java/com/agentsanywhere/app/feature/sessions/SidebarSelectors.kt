@@ -1,5 +1,6 @@
 package com.agentsanywhere.app.feature.sessions
 
+import com.agentsanywhere.app.model.AgentDevice
 import com.agentsanywhere.app.model.AgentProject
 import com.agentsanywhere.app.model.AgentSession
 import com.agentsanywhere.app.model.SessionStatus
@@ -65,4 +66,58 @@ fun sortProjectsByActivity(projects: List<AgentProject>, sessions: Collection<Ag
             .thenByDescending { timestampMillis(it.createdAt) }
             .thenBy { it.name }.thenBy { it.id },
     )
+}
+
+/** Projects that live on one device, in the order the project list already uses. */
+data class DeviceProjectGroup(
+    val connectorId: String,
+    val deviceName: String,
+    val deviceOs: String?,
+    val online: Boolean,
+    val projects: List<AgentProject>,
+)
+
+/**
+ * Groups projects by their owning device so same-named projects on different
+ * devices stay distinguishable.
+ *
+ * Devices follow [devices] order, which is what the rest of the UI shows.
+ * Projects whose device is unknown keep a trailing group instead of being
+ * dropped. Input order inside each group is preserved, so callers keep their
+ * activity-based sorting.
+ */
+fun groupProjectsByDevice(
+    projects: List<AgentProject>,
+    devices: List<AgentDevice>,
+): List<DeviceProjectGroup> {
+    if (projects.isEmpty()) return emptyList()
+    val deviceById = devices.associateBy(AgentDevice::id)
+    val grouped = LinkedHashMap<String, MutableList<AgentProject>>()
+    projects.forEach { project ->
+        grouped.getOrPut(project.connectorId) { mutableListOf() }.add(project)
+    }
+
+    val ordered = devices.mapNotNull { device ->
+        grouped[device.id]?.let { members ->
+            DeviceProjectGroup(
+                connectorId = device.id,
+                deviceName = device.name,
+                deviceOs = device.deviceOs,
+                online = device.online,
+                projects = members.toList(),
+            )
+        }
+    }
+    val knownIds = devices.mapTo(mutableSetOf(), AgentDevice::id)
+    val unknown = grouped.filterKeys { it !in knownIds }.map { (connectorId, members) ->
+        DeviceProjectGroup(
+            connectorId = connectorId,
+            // Fall back to the raw id so an unknown device is still identifiable.
+            deviceName = deviceById[connectorId]?.name ?: connectorId,
+            deviceOs = null,
+            online = false,
+            projects = members.toList(),
+        )
+    }
+    return ordered + unknown
 }

@@ -14,9 +14,13 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSub,
-  DropdownMenuSubContent,
   DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu"
+import {
+  WideDropdownMenuContent,
+  WideDropdownMenuSubContent,
+  WideOptionLabel,
+} from "@/components/ui/wide-dropdown"
 import { CascadingSelector } from "@/components/cascading-selector"
 import { useSessionToolSidebarStore } from "@/components/session-tool-sidebar-state"
 import { DashboardSidebarToggle } from "@/components/dashboard-sidebar-toggle"
@@ -956,14 +960,14 @@ export function TaskComposer() {
                     {hasOnlineDevice && models.length > 0 ? (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="sm" className="min-w-0 shrink max-w-72 gap-1.5 text-muted-foreground">
+                          <Button variant="ghost" size="sm" className="min-w-0 shrink gap-1.5 text-muted-foreground">
                             {reasoningOptions.length > 0 ? <span className="text-foreground">{effortLabel}</span> : null}
                             {reasoningOptions.length > 0 ? <span className="text-muted-foreground/50">·</span> : null}
                             <span className="min-w-0 truncate text-foreground">{modelLabel}</span>
                             <ChevronDown className="size-3.5 shrink-0 opacity-50" />
                           </Button>
                         </DropdownMenuTrigger>
-                        <DropdownMenuContent align="start" className="w-56">
+                        <WideDropdownMenuContent align="start" className="p-1">
                           {models.map((modelItem) => {
                             const modelEfforts = modelItem.reasoningItems
                             if (modelEfforts.length === 0) {
@@ -978,9 +982,9 @@ export function TaskComposer() {
                                 >
                                   <Check className={cn("size-3.5", selectedModel === modelItem.id ? "opacity-100" : "opacity-0")} />
                                   <span className="min-w-0 flex-1">
-                                    <span className="block truncate">{modelItem.label}</span>
+                                    <WideOptionLabel>{modelItem.label}</WideOptionLabel>
                                     {!modelItem.enabled && modelItem.disabledReason ? (
-                                      <span className="block truncate text-xs text-muted-foreground">
+                                      <span className="block whitespace-nowrap text-xs text-muted-foreground">
                                         {modelItem.disabledReason}
                                       </span>
                                     ) : null}
@@ -992,11 +996,11 @@ export function TaskComposer() {
                               <DropdownMenuSub key={modelItem.id}>
                                 <DropdownMenuSubTrigger className="gap-2" disabled={!modelItem.enabled}>
                                   <Check className={cn("size-3.5", selectedModel === modelItem.id ? "opacity-100" : "opacity-0")} />
-                                  <span className="max-w-40 truncate" title={modelItem.disabledReason ?? undefined}>
+                                  <WideOptionLabel title={modelItem.disabledReason ?? undefined}>
                                     {modelItem.label}
-                                  </span>
+                                  </WideOptionLabel>
                                 </DropdownMenuSubTrigger>
-                                <DropdownMenuSubContent className="w-56">
+                                <WideDropdownMenuSubContent>
                                   {modelEfforts.map((item) => (
                                     <DropdownMenuItem
                                       key={item.id}
@@ -1011,20 +1015,20 @@ export function TaskComposer() {
                                         selectedModel === modelItem.id && selectedReasoning === item.id ? "opacity-100" : "opacity-0",
                                       )} />
                                       <span className="min-w-0 flex-1">
-                                        <span className="block truncate">{item.label}</span>
+                                        <WideOptionLabel>{item.label}</WideOptionLabel>
                                         {!item.enabled && item.disabledReason ? (
-                                          <span className="block truncate text-xs text-muted-foreground">
+                                          <span className="block whitespace-nowrap text-xs text-muted-foreground">
                                             {item.disabledReason}
                                           </span>
                                         ) : null}
                                       </span>
                                     </DropdownMenuItem>
                                   ))}
-                                </DropdownMenuSubContent>
+                                </WideDropdownMenuSubContent>
                               </DropdownMenuSub>
                             )
                           })}
-                        </DropdownMenuContent>
+                        </WideDropdownMenuContent>
                       </DropdownMenu>
                     ) : null}
                   </>

@@ -214,7 +214,7 @@ function SelectionRow({
     >
       <Check className={cn("size-4 shrink-0", selected ? "opacity-100" : "opacity-0")} />
       <span className="min-w-0 flex-1">
-        <span className="block truncate font-medium">{label}</span>
+        <span className="block break-words font-medium">{label}</span>
         {helper ? <span className="block truncate text-xs opacity-70">{helper}</span> : null}
       </span>
       {trailing ? <span className="shrink-0 text-muted-foreground">{trailing}</span> : null}

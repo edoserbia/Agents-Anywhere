@@ -241,7 +241,10 @@ test("the composer footers keep the send button on the option row", () => {
   // Wrapping is what pushed the send button onto a row of its own.
   assert.doesNotMatch(footer, /flex-wrap/)
   assert.match(footer, /className="min-w-0 shrink gap-1\.5 text-muted-foreground"/)
-  assert.match(footer, /className="min-w-0 shrink max-w-72 gap-1\.5 text-muted-foreground"/)
+  // The model trigger still truncates so the send button stays on the row, but
+  // it must not cap its own width: a long model name has to fit when there is
+  // room, and the dropdown widens to show it in full.
+  assert.doesNotMatch(footer, /max-w-72/)
   assert.match(footer, /<span className="min-w-0 truncate text-foreground">\{modelLabel\}<\/span>/)
   assert.match(source, /className="ml-auto shrink-0 rounded-full"/)
 
@@ -265,7 +268,9 @@ test("the composer footers keep the send button on the option row", () => {
   )
   assert.doesNotMatch(sessionFooter, /flex-wrap/)
   assert.match(sessionFooter, /className="h-8 min-w-0 shrink gap-1\.5 rounded-xl px-2\.5 text-muted-foreground"/)
-  assert.match(sessionFooter, /<span className="min-w-0 max-w-40 truncate text-foreground">\{modelLabel\}<\/span>/)
+  // No fixed cap here either; the dropdown below widens to fit the full name.
+  assert.doesNotMatch(sessionFooter, /max-w-40/)
+  assert.match(sessionFooter, /<span className="min-w-0 truncate text-foreground">\{modelLabel\}<\/span>/)
   assert.match(sessionFooter, /"ml-auto flex h-8 shrink-0 items-center gap-2 rounded-xl/)
 })
 

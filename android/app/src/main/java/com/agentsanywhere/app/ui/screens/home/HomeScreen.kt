@@ -617,6 +617,7 @@ private fun HomeProjectModeList(
                 onNewSession = onNewSessionInProject,
                 onSessionLongPress = onSessionLongPress,
                 onOpenSession = onOpenSession,
+                devices = state.devices,
             )
         }
     }

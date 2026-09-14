@@ -33,9 +33,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpOffset
@@ -57,6 +61,59 @@ private val MenuWidth = 286.dp
 private val MenuMaxHeight = 328.dp
 private val MenuVerticalPadding = 14.dp
 private val MenuGap = 4.dp
+
+/** Text style of an option's primary label; shared with [AADropdownMenuItem]. */
+private val MenuItemTextStyle = TextStyle(
+    fontSize = 14.sp,
+    lineHeight = 19.sp,
+    fontWeight = FontWeight.SemiBold,
+)
+
+/** Horizontal space an option needs beyond its label: padding, icon, check. */
+private val MenuItemChrome = 84.dp
+
+/**
+ * Width for a dropdown that must fit its longest option label without clipping.
+ *
+ * Model names can be far longer than the default [MenuWidth], so menus size
+ * themselves to the widest label while staying within the screen and never
+ * shrinking below [MenuWidth].
+ */
+@Composable
+fun rememberMenuWidth(
+    labels: List<String>,
+    style: TextStyle = MenuItemTextStyle,
+    minWidth: Dp = MenuWidth,
+    chrome: Dp = MenuItemChrome,
+): Dp {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val configuration = LocalConfiguration.current
+    val screenWidthDp = configuration.screenWidthDp
+
+    return remember(labels, style, minWidth, chrome, density, screenWidthDp) {
+        val widestPx = labels.maxOfOrNull { label ->
+            if (label.isBlank()) {
+                0
+            } else {
+                measurer.measure(
+                    text = AnnotatedString(label),
+                    style = style,
+                    maxLines = 1,
+                    softWrap = false,
+                ).size.width
+            }
+        } ?: 0
+        val targetPx = widestPx + with(density) { chrome.toPx() }
+        val minPx = with(density) { minWidth.toPx() }
+        // Leave a margin so the menu never touches the screen edge.
+        val maxPx = with(density) { (screenWidthDp.dp - MenuScreenMargin).toPx() }
+        with(density) { targetPx.coerceIn(minPx, maxOf(minPx, maxPx)).toDp() }
+    }
+}
+
+/** Keeps an over-wide menu clear of the screen edges. */
+private val MenuScreenMargin = 24.dp
 
 /** Place inside the selector's anchor Box. Selection and dismissal stay with the caller. */
 @Composable
@@ -140,9 +197,7 @@ fun AADropdownMenuItem(
             Text(
                 text = text,
                 color = textColor,
-                fontSize = 14.sp,
-                lineHeight = 19.sp,
-                fontWeight = FontWeight.SemiBold,
+                style = MenuItemTextStyle,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

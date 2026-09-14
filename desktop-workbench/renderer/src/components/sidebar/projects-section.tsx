@@ -1,6 +1,6 @@
 "use client"
 
-import { MoreHorizontal, Plus } from "lucide-react"
+import { ChevronRight, MoreHorizontal, Monitor, Plus } from "lucide-react"
 import * as React from "react"
 import { ProjectSidebarItem } from "@/components/sidebar/project-sidebar-item"
 import { SidebarLoadingItem } from "@/components/sidebar/sidebar-loading-item"
@@ -8,6 +8,7 @@ import { SidebarSectionTrigger } from "@/components/sidebar/sidebar-section-trig
 import {
   Collapsible,
   CollapsibleContent,
+  CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import {
   SidebarGroup,
@@ -31,6 +32,11 @@ import {
 } from "@/components/ui/tooltip"
 import type { WorkspaceSessionView } from "@/components/workspace-context"
 import type { ProjectSessionStatusFilter } from "@/components/sidebar/sidebar-selectors"
+import {
+  groupProjectsByDevice,
+  type DeviceProjectGroup,
+  type ProjectDeviceInfo,
+} from "@/components/sidebar/project-device-groups"
 import type { ProjectView } from "@/features/dashboard/types"
 import { cn } from "@/lib/utils"
 import { useTranslations } from "next-intl"
@@ -86,6 +92,55 @@ export function ProjectList({
   )
 }
 
+type DeviceGroup = DeviceProjectGroup
+
+function DeviceGroupHeader({
+  group,
+  expanded,
+  controller,
+  sessionStatus,
+  onExpandedChange,
+}: {
+  group: DeviceGroup
+  expanded: boolean
+  controller: ProjectListController
+  sessionStatus: ProjectSessionStatusFilter
+  onExpandedChange: (expanded: boolean) => void
+}) {
+  return (
+    <Collapsible open={expanded} onOpenChange={onExpandedChange}>
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            "flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs font-medium",
+            "text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+          )}
+        >
+          <ChevronRight
+            className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")}
+          />
+          <Monitor className="size-3.5 shrink-0" />
+          <span className="truncate">{group.deviceName}</span>
+          <span
+            className={cn(
+              "size-1.5 shrink-0 rounded-full",
+              group.online ? "bg-emerald-500" : "bg-muted-foreground/40",
+            )}
+            aria-hidden
+          />
+          <span className="ml-auto shrink-0 tabular-nums text-[10px] text-muted-foreground/70">
+            {group.projects.length}
+          </span>
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <ProjectList projects={group.projects} controller={controller} sessionStatus={sessionStatus} />
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
 type ProjectsSectionProps = {
   projects: ProjectView[]
   isLoading: boolean
@@ -95,6 +150,8 @@ type ProjectsSectionProps = {
   onExpandedChange: (expanded: boolean) => void
   onSessionStatusChange: (status: ProjectSessionStatusFilter) => void
   onAddProject: () => void
+  /** Devices used to group projects; grouping is skipped when omitted or empty. */
+  devices?: ProjectDeviceInfo[]
 }
 
 export function ProjectsSection({
@@ -106,9 +163,20 @@ export function ProjectsSection({
   onExpandedChange,
   onSessionStatusChange,
   onAddProject,
+  devices = [],
 }: ProjectsSectionProps) {
   const t = useTranslations("dashboard")
   const [filterOpen, setFilterOpen] = React.useState(false)
+
+  // Devices start expanded so a project stays one click away, matching the flat
+  // list this section showed before grouping.
+  const [collapsedDeviceIds, setCollapsedDeviceIds] = React.useState<string[]>([])
+
+  const groups = React.useMemo(
+    () => (devices.length > 0 ? groupProjectsByDevice(projects, devices) : []),
+    [devices, projects],
+  )
+  const useGroups = groups.length > 0
 
   return (
     <SidebarGroup>
@@ -184,6 +252,25 @@ export function ProjectsSection({
                 <SidebarLoadingItem label={t("status.loadingProjects")} />
               ) : projects.length === 0 ? (
                 <p className="px-3 py-2 text-xs text-muted-foreground">{t("projects.empty")}</p>
+              ) : useGroups ? (
+                <div className="flex flex-col gap-0.5">
+                  {groups.map((group) => (
+                    <DeviceGroupHeader
+                      key={group.connectorId}
+                      group={group}
+                      expanded={!collapsedDeviceIds.includes(group.connectorId)}
+                      controller={controller}
+                      sessionStatus={sessionStatus}
+                      onExpandedChange={(open) => {
+                        setCollapsedDeviceIds((current) => open
+                          ? current.filter((id) => id !== group.connectorId)
+                          : current.includes(group.connectorId)
+                            ? current
+                            : [...current, group.connectorId])
+                      }}
+                    />
+                  ))}
+                </div>
               ) : (
                 <ProjectList
                   projects={projects}

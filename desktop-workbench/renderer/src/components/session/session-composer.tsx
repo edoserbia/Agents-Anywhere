@@ -9,10 +9,14 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSub,
-  DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import {
+  WideDropdownMenuContent,
+  WideDropdownMenuSubContent,
+  WideOptionLabel,
+} from "@/components/ui/wide-dropdown"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import {
@@ -533,11 +537,11 @@ export function SessionComposer({
                       >
                         {effortItems.length > 0 ? <span className="text-foreground">{effortLabel}</span> : null}
                         {effortItems.length > 0 ? <span className="text-muted-foreground/50">·</span> : null}
-                        <span className="min-w-0 max-w-40 truncate text-foreground">{modelLabel}</span>
+                        <span className="min-w-0 truncate text-foreground">{modelLabel}</span>
                         <ChevronDown className="size-3.5 opacity-60" />
                       </Button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className="w-56">
+                    <WideDropdownMenuContent align="start" className="p-1">
                       {modelItems.length > 0 ? (
                         modelItems.map((modelItem) => {
                           const modelEfforts = modelItem.reasoningItems
@@ -551,9 +555,9 @@ export function SessionComposer({
                               >
                                 <Check className={cn("size-3.5", selectedModel === modelItem.id ? "opacity-100" : "opacity-0")} />
                                 <span className="min-w-0 flex-1">
-                                  <span className="block truncate">{modelItem.label}</span>
+                                  <WideOptionLabel>{modelItem.label}</WideOptionLabel>
                                   {!modelItem.enabled && modelItem.disabledReason ? (
-                                    <span className="block truncate text-xs text-muted-foreground">
+                                    <span className="block whitespace-nowrap text-xs text-muted-foreground">
                                       {modelItem.disabledReason}
                                     </span>
                                   ) : null}
@@ -568,11 +572,11 @@ export function SessionComposer({
                                 disabled={effortSelectorDisabled || !modelItem.enabled}
                               >
                                 <Check className={cn("size-3.5", selectedModel === modelItem.id ? "opacity-100" : "opacity-0")} />
-                                <span className="max-w-40 truncate" title={modelItem.disabledReason ?? undefined}>
+                                <WideOptionLabel title={modelItem.disabledReason ?? undefined}>
                                   {modelItem.label}
-                                </span>
+                                </WideOptionLabel>
                               </DropdownMenuSubTrigger>
-                              <DropdownMenuSubContent className="w-56">
+                              <WideDropdownMenuSubContent>
                                 {modelEfforts.map((item) => (
                                   <DropdownMenuItem
                                     key={item.id}
@@ -585,21 +589,21 @@ export function SessionComposer({
                                       selectedModel === modelItem.id && selectedReasoning === item.id ? "opacity-100" : "opacity-0",
                                     )} />
                                     <span className="min-w-0 flex-1">
-                                      <span className="block truncate">{item.label}</span>
+                                      <WideOptionLabel>{item.label}</WideOptionLabel>
                                       {!item.enabled && item.disabledReason ? (
-                                        <span className="block truncate text-xs text-muted-foreground">
+                                        <span className="block whitespace-nowrap text-xs text-muted-foreground">
                                           {item.disabledReason}
                                         </span>
                                       ) : null}
                                     </span>
                                   </DropdownMenuItem>
                                 ))}
-                              </DropdownMenuSubContent>
+                              </WideDropdownMenuSubContent>
                             </DropdownMenuSub>
                           )
                         })
                       ) : null}
-                    </DropdownMenuContent>
+                    </WideDropdownMenuContent>
                   </DropdownMenu>
                 ) : null}
                 </>

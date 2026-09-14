@@ -64,17 +64,21 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.agentsanywhere.app.R
+import com.agentsanywhere.app.feature.sessions.DeviceProjectGroup
 import com.agentsanywhere.app.feature.sessions.ProjectSessionStatusFilter
+import com.agentsanywhere.app.model.AgentDevice
 import com.agentsanywhere.app.model.AgentProject
 import com.agentsanywhere.app.model.AgentSession
 import com.agentsanywhere.app.ui.designsystem.LocalAAColors
 import com.agentsanywhere.app.ui.screens.common.AppEmptyState
 import com.composables.icons.lucide.Archive
 import com.composables.icons.lucide.ChevronDown
+import com.composables.icons.lucide.ChevronRight
 import com.composables.icons.lucide.Folder
 import com.composables.icons.lucide.FolderOpen
 import com.composables.icons.lucide.Ellipsis
 import com.composables.icons.lucide.Lucide
+import com.composables.icons.lucide.Monitor
 import com.composables.icons.lucide.Pencil
 import com.composables.icons.lucide.Pin
 import com.composables.icons.lucide.Plus
@@ -87,6 +91,9 @@ internal data class HomeProjectActionMenu(
     val anchorBounds: Rect? = null,
     val expanded: Boolean = false,
 )
+
+/** Matches the online indicator used by the device list. */
+private val DeviceOnlineColor = Color(0xFF10B981)
 
 @Composable
 internal fun HomeProjectList(
@@ -108,15 +115,21 @@ internal fun HomeProjectList(
     onNewSession: (AgentProject) -> Unit,
     onSessionLongPress: (AgentSession, Rect) -> Unit,
     onOpenSession: (AgentSession) -> Unit,
+    devices: List<AgentDevice> = emptyList(),
 ) {
     var pinnedExpanded by remember { mutableStateOf(true) }
     var filterAnchor by remember { mutableStateOf<Rect?>(null) }
+    // Device sections start expanded and remember only what the user collapsed.
+    var collapsedDeviceIds by remember { mutableStateOf(emptySet<String>()) }
     val projectsExpanded = projectPreferences.projectsExpanded
     val ordered = remember(projects, allSessions) {
         com.agentsanywhere.app.feature.sessions.sortProjectsByActivity(projects, allSessions)
     }
     val pinnedProjects = ordered.filter(AgentProject::pinned)
     val regularProjects = ordered.filterNot(AgentProject::pinned)
+    val deviceGroups = remember(regularProjects, devices) {
+        com.agentsanywhere.app.feature.sessions.groupProjectsByDevice(regularProjects, devices)
+    }
 
     if (projects.isEmpty() && pinnedSessions.isEmpty()) {
         Box(Modifier.fillMaxSize()) {
@@ -191,6 +204,42 @@ internal fun HomeProjectList(
             if (regularProjects.isEmpty()) {
                 item("projects-empty") {
                     HomeProjectEmptyText(stringResource(R.string.home_no_projects))
+                }
+            } else if (deviceGroups.size > 1) {
+                // More than one device: group by device so identical project
+                // names on different machines stay tellable apart.
+                deviceGroups.forEach { group ->
+                    val groupKey = "device:${group.connectorId}"
+                    item("$groupKey-header") {
+                        HomeProjectDeviceHeader(
+                            group = group,
+                            expanded = group.connectorId !in collapsedDeviceIds,
+                            onClick = {
+                                collapsedDeviceIds = if (group.connectorId in collapsedDeviceIds) {
+                                    collapsedDeviceIds - group.connectorId
+                                } else {
+                                    collapsedDeviceIds + group.connectorId
+                                }
+                            },
+                        )
+                    }
+                    if (group.connectorId !in collapsedDeviceIds) {
+                        items(group.projects, key = { "project-${it.id}" }) { project ->
+                            HomeProjectTreeItem(
+                                project = project,
+                                sessions = sessionsByProject[project.id].orEmpty(),
+                                expanded = project.id in expandedProjectIds,
+                                loading = project.id in loadingProjectIds,
+                                onExpandedChange = { onProjectExpandedChange(project, it) },
+                                onMenu = onProjectMenu,
+                                error = projectErrors[project.id],
+                                onRetry = { onRetryProject(project.id) },
+                                onNewSession = { onNewSession(project) },
+                                onSessionLongPress = onSessionLongPress,
+                                onOpenSession = onOpenSession,
+                            )
+                        }
+                    }
                 }
             } else {
                 items(regularProjects, key = { "project-${it.id}" }) { project ->
@@ -427,6 +476,62 @@ private fun HomeProjectIconButton(icon: ImageVector, description: String, onClic
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, contentDescription = description, tint = LocalAAColors.current.faint, modifier = Modifier.size(19.dp))
+    }
+}
+
+/**
+ * Device heading for a grouped project list. Shows the device name, its online
+ * state and how many projects sit under it.
+ */
+@Composable
+private fun HomeProjectDeviceHeader(
+    group: DeviceProjectGroup,
+    expanded: Boolean,
+    onClick: () -> Unit,
+) {
+    val colors = LocalAAColors.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(start = 6.dp, end = 12.dp, top = 10.dp, bottom = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = if (expanded) Lucide.ChevronDown else Lucide.ChevronRight,
+            contentDescription = null,
+            tint = colors.muted,
+            modifier = Modifier.size(15.dp),
+        )
+        Icon(
+            imageVector = Lucide.Monitor,
+            contentDescription = null,
+            tint = colors.inkSoft.copy(alpha = 0.8f),
+            modifier = Modifier.size(15.dp),
+        )
+        Text(
+            text = group.deviceName,
+            color = colors.inkSoft.copy(alpha = 0.9f),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .background(if (group.online) DeviceOnlineColor else colors.muted.copy(alpha = 0.45f)),
+        )
+        Text(
+            text = group.projects.size.toString(),
+            color = colors.muted.copy(alpha = 0.8f),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+        )
     }
 }
 

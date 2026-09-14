@@ -26,6 +26,7 @@ import com.agentsanywhere.app.ui.designsystem.AADropdownMenuItem
 import com.agentsanywhere.app.ui.designsystem.DownGlyph
 import com.agentsanywhere.app.ui.designsystem.LocalAAColors
 import com.agentsanywhere.app.ui.designsystem.noRippleClickable
+import com.agentsanywhere.app.ui.designsystem.rememberMenuWidth
 import com.valentinilk.shimmer.shimmer
 
 internal enum class NewSessionConfigurationKey {
@@ -174,9 +175,17 @@ private fun NewSessionConfigurationMenu(
     onDismiss: () -> Unit,
     onSelect: (String) -> Unit,
 ) {
+    // Model names are the longest labels here, so the menu grows to fit the
+    // widest one instead of clipping it at the default width.
+    val menuWidth = rememberMenuWidth(
+        labels = options.flatMap { option ->
+            listOfNotNull(option.label, option.description?.takeIf(String::isNotBlank))
+        },
+    )
     AADropdownMenu(
         expanded = expanded,
         onDismissRequest = onDismiss,
+        width = menuWidth,
     ) {
         options.forEach { option ->
             AADropdownMenuItem(
