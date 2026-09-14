@@ -197,6 +197,10 @@ function mapConnector(connector: RealConnectorView): ConnectorView {
     connectorKind: connector.connectorKind,
     status: connector.status,
     lastSeenAt: connector.lastSeenAt,
+    // Needed to keep device order stable: the server sorts by updated_at, so
+    // without this the list reshuffles whenever a device reports activity.
+    createdAt: connector.createdAt,
+    updatedAt: connector.updatedAt,
   }
 }
 

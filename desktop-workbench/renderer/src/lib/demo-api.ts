@@ -16,6 +16,9 @@ export type ConnectorView = {
   connectorKind?: "desktop" | "cli" | null
   status: ConnectorStatus
   lastSeenAt?: string | null
+  /** Pairing time; pins the device to its position instead of following activity. */
+  createdAt?: string
+  updatedAt?: string
 }
 
 export type SessionStatus =

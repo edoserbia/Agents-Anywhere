@@ -3,7 +3,7 @@
 import * as React from "react"
 import { Plus } from "lucide-react"
 import { DeviceSidebarItem } from "@/components/sidebar/device-sidebar-item"
-import { sortDevicesByName } from "@/components/sidebar/device-list-order"
+import { sortDevicesByCreation } from "@/components/sidebar/device-list-order"
 import { SidebarLoadingItem } from "@/components/sidebar/sidebar-loading-item"
 import { SidebarSectionTrigger } from "@/components/sidebar/sidebar-section-trigger"
 import {
@@ -41,7 +41,9 @@ export function DevicesSection({
 }: DevicesSectionProps) {
   const t = useTranslations("dashboard")
   const [expanded, setExpanded] = React.useState(true)
-  const orderedConnectors = React.useMemo(() => sortDevicesByName(connectors), [connectors])
+  // Creation order, matching the Projects grouping below it, so the sidebar
+  // never shows two different device orders. Activity must not reorder this.
+  const orderedConnectors = React.useMemo(() => sortDevicesByCreation(connectors), [connectors])
 
   return (
     <SidebarGroup>

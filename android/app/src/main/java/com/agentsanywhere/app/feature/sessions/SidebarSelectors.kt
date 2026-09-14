@@ -78,13 +78,35 @@ data class DeviceProjectGroup(
 )
 
 /**
+ * Orders devices by when they were paired, oldest first, and never by activity.
+ *
+ * The server lists connectors by `updated_at`, so a device that reports
+ * presence, runs a session or reconnects jumps to the top and the list
+ * reshuffles. Sorting on [AgentDevice.createdAt] instead pins each device to the
+ * position it had when it was added.
+ *
+ * Devices without a usable timestamp sort last, and the id breaks ties, so the
+ * result is total and identical between refreshes.
+ */
+fun sortDevicesByCreation(devices: List<AgentDevice>): List<AgentDevice> {
+    // A missing or unparsable timestamp yields 0, which is pushed to the end so
+    // incomplete records never interleave with known positions.
+    fun pairingOrder(device: AgentDevice): Long =
+        timestampMillis(device.createdAt).takeIf { millis -> millis > 0L } ?: Long.MAX_VALUE
+
+    return devices.sortedWith(
+        compareBy<AgentDevice> { pairingOrder(it) }.thenBy { it.id },
+    )
+}
+
+/**
  * Groups projects by their owning device so same-named projects on different
  * devices stay distinguishable.
  *
- * Devices follow [devices] order, which is what the rest of the UI shows.
- * Projects whose device is unknown keep a trailing group instead of being
- * dropped. Input order inside each group is preserved, so callers keep their
- * activity-based sorting.
+ * Groups are ordered by pairing time via [sortDevicesByCreation], never by
+ * activity, so a device that comes online keeps its position. Projects whose
+ * device is unknown keep a trailing group instead of being dropped. Input order
+ * inside each group is preserved, so callers keep their activity-based sorting.
  */
 fun groupProjectsByDevice(
     projects: List<AgentProject>,
@@ -97,7 +119,7 @@ fun groupProjectsByDevice(
         grouped.getOrPut(project.connectorId) { mutableListOf() }.add(project)
     }
 
-    val ordered = devices.mapNotNull { device ->
+    val ordered = sortDevicesByCreation(devices).mapNotNull { device ->
         grouped[device.id]?.let { members ->
             DeviceProjectGroup(
                 connectorId = device.id,
