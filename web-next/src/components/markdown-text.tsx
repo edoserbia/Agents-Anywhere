@@ -547,7 +547,12 @@ function MarkdownCodeBlock({ code, language }: { code: string; language: string 
           {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
         </button>
       </div>
-      <ScrollArea contentWide className="max-h-96 min-w-0 max-w-full overflow-hidden">
+      {/*
+        `type="always"` keeps the scrollbar thumb mounted whenever the code
+        overflows, instead of only while the pointer hovers the block, so tall
+        snippets visibly advertise that they scroll.
+      */}
+      <ScrollArea type="always" contentWide className="max-h-96 min-w-0 max-w-full overflow-hidden">
         <pre className="w-max min-w-full p-3 text-sm leading-relaxed">
           <code>{highlightCode(code, language)}</code>
         </pre>
