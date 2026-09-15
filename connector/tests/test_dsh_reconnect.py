@@ -152,7 +152,7 @@ def test_initially_offline_runtime_recovers_through_supervisor(monkeypatch):
         )
         monkeypatch.setattr(runtime_module.discovery, "load_endpoint", load_endpoint)
         monkeypatch.setattr(runtime_module, "BridgeClient", make_client)
-        monkeypatch.setattr(runtime_module, "SyncRelay", lambda *args: relay)
+        monkeypatch.setattr(runtime_module, "SyncRelay", lambda *args, **kwargs: relay)
         monkeypatch.setattr(runtime_module, "BRIDGE_POLL_INTERVAL_SECONDS", 0.001)
         try:
             from connector.server.runtime_rpc import RuntimeRpcHandler

@@ -26,6 +26,24 @@ from connector.runtimes.dsh.bridge.models import (
 from connector.runtimes.dsh.bridge.models import notice as session_notice
 
 
+class RelayHealth:
+    """Whether one runtime instance has already been announced as running.
+
+    A relay is replaced whenever the bridge reconnects, but the instance itself
+    keeps serving requests. The supervisor refuses every session operation while
+    an instance is not running, and "running" is only published after a full
+    inventory has been ingested — which can take minutes on a large history.
+    Re-announcing "starting" for every replacement feed would therefore take
+    working sessions offline on each reconnect. The flag is shared by all relays
+    of one instance and cleared only when the bridge actually exits.
+    """
+
+    __slots__ = ("announced",)
+
+    def __init__(self, announced: bool = False) -> None:
+        self.announced = announced
+
+
 class SyncRelay:
     """Reassemble transport pages, then forward existing platform notifications.
 
@@ -34,7 +52,14 @@ class SyncRelay:
     their coalescing and WebSocket/HTTP fallback. Snapshots await HTTP ingestion.
     """
 
-    def __init__(self, client: BridgeClient, host: RuntimeHostClient, *, retry_delay: float = 1.0) -> None:
+    def __init__(
+        self,
+        client: BridgeClient,
+        host: RuntimeHostClient,
+        *,
+        retry_delay: float = 1.0,
+        health: RelayHealth | None = None,
+    ) -> None:
         self.client, self.host = client, host
         self.queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=2)
         self.stream_id: str | None = None
@@ -46,6 +71,7 @@ class SyncRelay:
         self.items: list[dict[str, Any]] = []
         self.item_bytes = 0
         self.item_ids: set[str] = set()
+        self.health = RelayHealth() if health is None else health
 
     def start(self) -> None:
         self.task = asyncio.create_task(self.run(), name="dsh-event-sync")
@@ -203,6 +229,7 @@ class SyncRelay:
         elif method in {"session.inventory.begin", "session.inventory.complete"}:
             await self.host.publish_runtime_notifications("dsh", [notice])
             if method == "session.inventory.complete" and params.get("complete") is True:
+                self.health.announced = True
                 await self.host.runtime_health_update("running")
         else:
             raise ValueError(f"Unsupported runtime notification: {method}")
@@ -216,9 +243,10 @@ class SyncRelay:
                     raise
                 except Exception as error:  # noqa: BLE001 - isolate and recover a failed feed
                     logger.warning("DSH event sync interrupted; resubscribing for history calibration ({})", type(error).__name__)
-                    await self.host.runtime_health_update("starting", {
-                        "code": "runtime_sync_interrupted", "message": "DSH 会话同步中断，正在重试…", "retryable": True,
-                    })
+                    if not self.health.announced:
+                        await self.host.runtime_health_update("starting", {
+                            "code": "runtime_sync_interrupted", "message": "DSH 会话同步中断，正在重试…", "retryable": True,
+                        })
                     if not self.client.connected:
                         return
                     self.clear_snapshot()
@@ -232,9 +260,10 @@ class SyncRelay:
         # Subscription replaces only this feed. Concurrent RPC requests keep
         # their connection and are never cancelled by an ingest/sync failure.
         try:
-            await self.host.runtime_health_update("starting", {
-                "code": "runtime_initializing", "message": "正在同步 DSH 会话…", "retryable": True,
-            })
+            if not self.health.announced:
+                await self.host.runtime_health_update("starting", {
+                    "code": "runtime_initializing", "message": "正在同步 DSH 会话…", "retryable": True,
+                })
             subscription = await self.client.request("runtime.sync.subscribe")
             if subscription.get("projectionVersion") != 2:
                 raise ValueError("Unsupported DSH projection version")

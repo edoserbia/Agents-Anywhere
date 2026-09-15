@@ -29,7 +29,7 @@ from connector.runtimes.dsh import discovery, provider_config
 from connector.runtimes.dsh.attachments import staged_attachments
 from connector.runtimes.dsh.bridge import models
 from connector.runtimes.dsh.bridge.client import BridgeClient, BridgeRpcError
-from connector.runtimes.dsh.bridge.sync import SyncRelay
+from connector.runtimes.dsh.bridge.sync import RelayHealth, SyncRelay
 
 
 BRIDGE_POLL_INTERVAL_SECONDS = 5.0
@@ -56,6 +56,9 @@ class DshRuntime(AgentRuntime):
         self._restart_task: asyncio.Task[None] | None = None
         self._sync: SyncRelay | None = None
         self._sync_mode = "events"
+        # Shared by every replacement feed: a reconnect must not take an
+        # already-announced instance offline while the new feed re-syncs.
+        self._health = RelayHealth()
 
     @property
     def sync_mode(self) -> str:
@@ -70,7 +73,7 @@ class DshRuntime(AgentRuntime):
             if self._sync is not None:
                 await self._sync.close()
             if not self._stopping and self._client is not None and self.sync_mode == "events":
-                self._sync = SyncRelay(self._client, self.host)
+                self._sync = SyncRelay(self._client, self.host, health=self._health)
                 self._sync.start()
 
     @property
@@ -402,7 +405,7 @@ class DshRuntime(AgentRuntime):
                 await self.host.runtime_health_update("starting", {
                     "code": "runtime_initializing", "message": "正在同步 DSH 会话…", "retryable": True,
                 })
-                self._sync = SyncRelay(client, self.host)
+                self._sync = SyncRelay(client, self.host, health=self._health)
                 self._sync.start()
             else:
                 with suppress(Exception):
@@ -475,6 +478,9 @@ class DshRuntime(AgentRuntime):
         if self._sync is not None:
             await self._sync.close()
             self._sync = None
+        # A real bridge exit invalidates the previous announcement: the next
+        # connection must re-ingest a full inventory before serving again.
+        self._health.announced = False
         if self._stopping:
             return
         with suppress(Exception):

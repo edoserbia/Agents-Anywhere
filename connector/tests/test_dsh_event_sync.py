@@ -7,11 +7,12 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from connector.runtime_protocol import (
+    RuntimeConfig,
     RuntimeInstanceHost,
     RuntimeInstanceSpec,
     timeline_content_hash,
 )
-from connector.runtimes.dsh.bridge.sync import SyncRelay
+from connector.runtimes.dsh.bridge.sync import RelayHealth, SyncRelay
 from connector.runtimes.dsh.runtime import DshRuntime
 from connector.server.runtime_host import ConnectorRuntimeHost
 from connector.server.runtime_sync import RuntimeSyncRunner
@@ -297,4 +298,88 @@ def test_inventory_does_not_report_healthy_while_delivery_is_pending_or_incomple
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             await relay.close()
+    asyncio.run(run())
+
+
+def test_healthy_instance_keeps_running_across_feed_recalibration():
+    """A transient feed failure must not take a healthy instance out of service.
+
+    The supervisor refuses every session operation unless the instance is
+    running, so demoting an already-healthy instance to "starting" wedges it:
+    the only promotion back to "running" is a completed inventory that the
+    interrupted feed has already delivered.
+    """
+    async def run():
+        receiver = host()
+        # connected=False ends the retry loop after the first failed subscription.
+        client = SimpleNamespace(connected=False, request=AsyncMock(side_effect=RuntimeError("feed dropped")))
+        relay = SyncRelay(client, receiver, retry_delay=0.01)
+        await relay.publish_notification({
+            "method": "session.inventory.complete", "params": {"complete": True, "sessions": []},
+        })
+        receiver.runtime_health_update.assert_awaited_once_with("running")
+        receiver.runtime_health_update.reset_mock()
+        await relay.run()
+        receiver.runtime_health_update.assert_not_awaited()
+        assert relay.health.announced is True
+
+    asyncio.run(run())
+
+
+def test_replacement_feed_reuses_announced_health():
+    """A reconnect builds a new relay; it must not un-announce the instance.
+
+    Each bridge reconnect replaces the feed, and a full inventory can take
+    minutes on a large history. Re-announcing "starting" would take every
+    session offline for that whole window on every reconnect.
+    """
+    async def run():
+        health = RelayHealth()
+        receiver = host()
+        first = SyncRelay(Mock(), receiver, health=health)
+        await first.publish_notification({
+            "method": "session.inventory.complete", "params": {"complete": True, "sessions": []},
+        })
+        receiver.runtime_health_update.assert_awaited_once_with("running")
+
+        # A replacement feed for the same instance re-subscribes quietly.
+        receiver.runtime_health_update.reset_mock()
+        replacement = SimpleNamespace(connected=False, request=AsyncMock(side_effect=RuntimeError("feed dropped")))
+        second = SyncRelay(replacement, receiver, retry_delay=0.01, health=health)
+        await second.run()
+        receiver.runtime_health_update.assert_not_awaited()
+        assert second.health is health
+
+    asyncio.run(run())
+
+
+def test_bridge_exit_requires_a_fresh_inventory_before_serving_again():
+    """A genuine outage must re-announce only after the next full inventory."""
+    async def run():
+        runtime = DshRuntime(
+            RuntimeConfig("dsh", 3),
+            SimpleNamespace(runtime_error=AsyncMock(), runtime_health_update=AsyncMock()),
+        )
+        runtime._health.announced = True
+        await runtime._handle_exit(None)
+        assert runtime._health.announced is False
+        task = runtime._restart_task
+        runtime._stopping = True
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_unhealthy_instance_still_reports_starting_while_recovering():
+    async def run():
+        receiver = host()
+        client = SimpleNamespace(connected=False, request=AsyncMock(side_effect=RuntimeError("feed dropped")))
+        relay = SyncRelay(client, receiver, retry_delay=0.01)
+        await relay.run()
+        assert receiver.runtime_health_update.await_count >= 1
+        assert receiver.runtime_health_update.call_args.args[0] == "starting"
+        assert relay.health.announced is False
+
     asyncio.run(run())
