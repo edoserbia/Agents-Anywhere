@@ -43,6 +43,7 @@ from agent_server.core.api_namespace import API_V2_PREFIX
 from agent_server.core.process_settings import ProcessSettings
 from agent_server.core.setup_token import SetupToken
 from agent_server.core.utc import utc_now
+from agent_server.core.version import SERVER_VERSION
 from agent_server.infra.connector_rpc import ConnectorRpcManager
 from agent_server.infra.db.migrations import (
     database_schema_version,
@@ -170,7 +171,7 @@ def create_app(
                                 finally:
                                     await app.state.store.close()
 
-    app = FastAPI(title="Agent Server", version="2.0.0", lifespan=lifespan)
+    app = FastAPI(title="Agent Server", version=SERVER_VERSION, lifespan=lifespan)
     app.add_exception_handler(
         ConnectorServiceError,
         error_handlers.connector_service_error_handler,
