@@ -15,6 +15,7 @@ from agent_server.core.capabilities import (
     SESSION_INTERRUPT,
     SESSION_SEND_MESSAGE,
     SESSION_STEER,
+    capability_unavailable_detail,
 )
 from agent_server.core.models import (
     InlineAttachmentRef,
@@ -762,8 +763,12 @@ class SessionRunService:
         if capability is None or not (
             capability.supported and capability.available and capability.allowed
         ):
+            # Preserve the machine-readable reason so clients can explain why
+            # the action is blocked. A bare string flattened "runtime is not
+            # running", "not taken over" and "connector offline" into one
+            # message the user could not act on.
             raise SessionRunConflictError(
-                f"session capability is unavailable: {capability_id}"
+                capability_unavailable_detail(effective, capability_id)
             )
 
         if attachment_media_types:

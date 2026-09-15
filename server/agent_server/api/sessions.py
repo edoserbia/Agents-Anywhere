@@ -31,6 +31,7 @@ from agent_server.core.capabilities import (
     SESSION_COMMANDS,
     SESSION_INTERACTION_APPROVAL,
     capability_is_usable,
+    capability_unavailable_detail,
 )
 from agent_server.core.events import (
     EventCursorError,
@@ -1228,7 +1229,7 @@ async def _require_session_action_capability(
     if not capability_is_usable(effective, capability_id):
         raise HTTPException(
             status_code=409,
-            detail=f"session capability is unavailable: {capability_id}",
+            detail=capability_unavailable_detail(effective, capability_id),
         )
 
 

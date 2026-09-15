@@ -280,12 +280,17 @@ def platform_unavailable_reason(
         return "runtime_capability_unsupported"
     if not online:
         return "connector_offline"
+    # A runtime that cannot perform the action at all is worth reporting before
+    # takeover: enabling takeover would not make the action possible, so naming
+    # takeover here would point the user at a remedy that cannot work.
+    if not available:
+        if capability is not None and capability.unavailableReason:
+            return capability.unavailableReason
+        return "runtime_capability_unavailable"
     if not takeover and not allowed:
         return "session_not_taken_over"
-    if available and allowed:
+    if allowed:
         return None
     if capability is not None and capability.unavailableReason:
         return capability.unavailableReason
-    if not available:
-        return "runtime_capability_unavailable"
-    return None
+    return "runtime_capability_unavailable"

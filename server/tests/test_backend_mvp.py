@@ -4693,7 +4693,10 @@ def test_session_snapshot_includes_effective_capabilities(tmp_path):
     }
     assert idle_caps["session.send_message"]["available"] is True
     assert idle_caps["session.interrupt"]["available"] is False
-    assert idle_caps["session.interrupt"]["unavailableReason"] == "session_not_taken_over"
+    # The runtime is idle, so interrupt is unavailable for a reason takeover
+    # cannot fix. Reporting session_not_taken_over here would name a remedy
+    # that leaves the capability just as unavailable.
+    assert idle_caps["session.interrupt"]["unavailableReason"] == "session_not_interruptible"
     assert idle_caps["session.steer"]["available"] is False
     assert idle_caps["catalog.model"]["available"] is True
     assert idle_body["catalogs"]["model"]["models"][0]["reasoningItems"][0]["selectionId"] == model_selection_id

@@ -5,6 +5,7 @@ from typing import Any
 
 from agent_server.app import create_app
 from agent_server.infra.connector_rpc import ConnectorRpcError
+from agent_server.core.models import ConnectorIngestRequest, ConnectorNotification
 from agent_server.services.connector_ingest import ConnectorIngestService
 from agent_server.services.connector_notifications import ConnectorNotificationService
 from agent_server.services.device_runtimes import DeviceRuntimeService
@@ -837,3 +838,50 @@ def test_explicit_discovery_stops_runtime_that_server_has_not_activated(tmp_path
         "runtime.stop",
     ]
     assert rpc.requests[0][2] == {}
+def test_runtime_status_change_republishes_session_capabilities(tmp_path):
+    """A runtime recovering must republish capabilities, not only dashboard state.
+
+    An already-open client holds the capability facts that decide whether it may
+    send. Without a publication on status change it keeps a disabled composer
+    until it happens to reconnect, even though the runtime is healthy again.
+    """
+    client, rpc, connector_id, headers = _make_client(tmp_path)
+    store = client.app.state.store
+    service = ConnectorIngestService(
+        store,
+        ConnectorNotificationService(store, None),
+        client.app.state.timeline_broker,
+        client.app.state.device_runtime_service,
+        client.app.state.rpc,
+        client.app.state.session_runtime_state_cache,
+    )
+    published: list[str] = []
+
+    async def record_publish(*args, **kwargs):
+        published.append("published")
+
+    import agent_server.services.connector_ingest as ingest_module
+
+    original = ingest_module.publish_connector_session_capabilities
+    ingest_module.publish_connector_session_capabilities = record_publish
+    try:
+        asyncio.run(
+            service.ingest(
+                connector_id=connector_id,
+                payload=ConnectorIngestRequest(
+                    notifications=[
+                        ConnectorNotification(
+                            method="runtime.statusChanged",
+                            params={"runtimeId": "codex", "status": "running"},
+                        )
+                    ]
+                ),
+            )
+        )
+    finally:
+        ingest_module.publish_connector_session_capabilities = original
+
+    assert published == ["published"], (
+        "a runtime status change must republish session capabilities so open "
+        "clients stop holding stale facts"
+    )

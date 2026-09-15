@@ -88,6 +88,11 @@ class ConnectorIngestService:
         rejected: list[ConnectorIngestRejectedNotification] = []
         protocol_capabilities_changed = False
         runtime_scoped_capabilities_changed = False
+        # A runtime changing status changes what its sessions can do. Capability
+        # publication is what tells an already-open client to re-enable its
+        # composer, so a runtime that recovers must republish rather than leave
+        # the client holding stale "cannot send" facts until it reconnects.
+        runtime_status_changed = False
         unconfigured_runtimes = await self._store.get_unconfigured_runtime_ids(connector_id)
         for index, notification in enumerate(payload.notifications):
             if not runtime_notification_is_allowed(notification.method, notification.params, unconfigured_runtimes):
@@ -121,6 +126,7 @@ class ConnectorIngestService:
                 continue
             accepted += 1
             if notification.method == "runtime.statusChanged":
+                runtime_status_changed = True
                 continue
             effects.append(effect)
             if notification.method == "protocol.capabilitiesUpdated":
@@ -136,14 +142,9 @@ class ConnectorIngestService:
                     )
                 )
         dashboard_changed = await self._publish_effects(effects)
-        if protocol_capabilities_changed:
-            await publish_connector_session_capabilities(
-                self._store,
-                self._presence,
-                self._timeline_broker,
-                connector_id,
-            )
-        if runtime_scoped_capabilities_changed:
+        # Republish whenever a runtime's capability-affecting status changed, so a
+        # runtime that recovers does not leave open clients holding stale facts.
+        if runtime_status_changed or protocol_capabilities_changed or runtime_scoped_capabilities_changed:
             await publish_connector_session_capabilities(
                 self._store,
                 self._presence,

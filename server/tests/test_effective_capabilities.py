@@ -446,3 +446,108 @@ def test_capability_batch_reads_once_and_newer_batch_supersedes_old_work():
                    for payload in publisher.sent)
 
     asyncio.run(exercise())
+
+
+def test_unavailable_runtime_reports_its_own_reason_before_takeover() -> None:
+    """A runtime that cannot act must not be reported as merely "not taken over".
+
+    Enabling takeover cannot fix a capability the runtime itself cannot serve,
+    so naming takeover here would point the user at a remedy that cannot work.
+    """
+    session = _session(takeover=False)
+    runtime_capabilities = ProtocolCapabilitySet(
+        revision=3,
+        capabilities=[
+            ProtocolCapability(
+                capabilityId=SESSION_SEND_MESSAGE,
+                scope="session",
+                runtime="codex",
+                sessionId=session.id,
+                supported=True,
+                available=False,
+                allowed=False,
+                unavailableReason="runtime_turn_running",
+            ),
+        ],
+    )
+
+    effective = derive_session_effective_capabilities(
+        session=session,
+        runtime_capabilities=runtime_capabilities,
+    )
+
+    send = find_capability(effective, SESSION_SEND_MESSAGE)
+    assert send is not None
+    assert send.available is False
+    assert send.unavailableReason == "runtime_turn_running"
+
+
+def test_unavailable_runtime_without_a_reason_is_not_reported_as_takeover() -> None:
+    session = _session(takeover=False)
+    runtime_capabilities = ProtocolCapabilitySet(
+        revision=3,
+        capabilities=[
+            ProtocolCapability(
+                capabilityId=SESSION_SEND_MESSAGE,
+                scope="session",
+                runtime="codex",
+                sessionId=session.id,
+                supported=True,
+                available=False,
+                allowed=False,
+            ),
+        ],
+    )
+
+    effective = derive_session_effective_capabilities(
+        session=session,
+        runtime_capabilities=runtime_capabilities,
+    )
+
+    send = find_capability(effective, SESSION_SEND_MESSAGE)
+    assert send is not None
+    assert send.unavailableReason == "runtime_capability_unavailable"
+
+
+def test_available_but_not_taken_over_still_reports_takeover() -> None:
+    """Takeover stays the reason when it is genuinely the only blocker."""
+    session = _session(takeover=False)
+    runtime_capabilities = ProtocolCapabilitySet(
+        revision=3,
+        capabilities=[
+            ProtocolCapability(
+                capabilityId=SESSION_SEND_MESSAGE,
+                scope="session",
+                runtime="codex",
+                sessionId=session.id,
+                supported=True,
+                available=True,
+                allowed=True,
+            ),
+        ],
+    )
+
+    effective = derive_session_effective_capabilities(
+        session=session,
+        runtime_capabilities=runtime_capabilities,
+    )
+
+    send = find_capability(effective, SESSION_SEND_MESSAGE)
+    assert send is not None
+    assert send.allowed is False
+    assert send.unavailableReason == "session_not_taken_over"
+
+
+def test_unsupported_capability_is_not_masked_by_takeover() -> None:
+    session = _session(takeover=False)
+    runtime_capabilities = ProtocolCapabilitySet(revision=3, capabilities=[])
+
+    effective = derive_session_effective_capabilities(
+        session=session,
+        runtime_capabilities=runtime_capabilities,
+    )
+
+    send = find_capability(effective, SESSION_SEND_MESSAGE)
+    assert send is not None
+    assert send.supported is False
+    assert send.unavailableReason == "runtime_capability_unsupported"
