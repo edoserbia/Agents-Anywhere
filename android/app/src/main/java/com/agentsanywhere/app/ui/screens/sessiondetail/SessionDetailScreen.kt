@@ -107,6 +107,7 @@ import com.agentsanywhere.app.feature.sessiondetail.SESSION_PERMISSION_CATALOG_C
 import com.agentsanywhere.app.feature.sessiondetail.SESSION_SEND_MESSAGE_CAPABILITY
 import com.agentsanywhere.app.feature.sessiondetail.SESSION_STEER_CAPABILITY
 import com.agentsanywhere.app.feature.sessiondetail.selectionOptions
+import com.agentsanywhere.app.feature.sessiondetail.sendUnavailableReason
 import com.agentsanywhere.app.feature.sessiondetail.sessionComposerEnabled
 import com.agentsanywhere.app.feature.sessiondetail.validatedSelection
 import com.agentsanywhere.app.feature.sessions.mergeAuthoritativeSessionMetadata
@@ -1558,9 +1559,25 @@ fun SessionDetailScreen(
             stringResource(R.string.session_waiting_approval_placeholder)
         runtimeStatus == SessionRuntimeStatus.Error -> stringResource(R.string.session_error_placeholder)
         runtimeStatus == SessionRuntimeStatus.Disconnected -> stringResource(R.string.session_device_offline_placeholder)
-        !canUseSendMessage && !canUseCommands -> stringResource(R.string.session_send_unavailable)
+        // Capability facts decide what the composer may offer, so a fetch that
+        // has not returned yet, or that failed, must not be reported as a
+        // runtime-state problem: neither is something the runtime did.
+        !state.capabilities.isLoaded -> stringResource(R.string.session_capabilities_loading)
+        state.capabilities.errorMessage != null ->
+            stringResource(R.string.session_capabilities_unavailable)
+        // The server states why a capability cannot be used, and the remedies
+        // differ: takeover is something the reader can enable, while an offline
+        // connector or an unsupported runtime is not. Fall back to the generic
+        // string only when no reason was sent.
+        !canUseSendMessage && !canUseCommands -> sessionSendUnavailableMessage(
+            reason = sendUnavailableReason(state.capabilities, runtimeId, runtimeType),
+            takeoverEnabled = takeoverEnabled,
+        )
         inputEnabled -> stringResource(R.string.session_reply_to, replyTarget)
-        else -> stringResource(R.string.session_send_unavailable)
+        else -> sessionSendUnavailableMessage(
+            reason = sendUnavailableReason(state.capabilities, runtimeId, runtimeType),
+            takeoverEnabled = takeoverEnabled,
+        )
     }
     val density = LocalDensity.current
     val imeBottomPx = WindowInsets.ime.getBottom(density)
@@ -2312,3 +2329,29 @@ private fun uniqueGalleryFile(directory: File, displayName: String): File {
 
 private const val MAX_ATTACHMENT_FILES = 6
 private const val MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+
+/**
+ * Turn the server's capability reason into something the reader can act on.
+ *
+ * The previous wording ("cannot send in the current runtime state") was shown
+ * for every failure, including ones the runtime had nothing to do with — a
+ * disabled takeover, an offline connector, or a runtime that simply does not
+ * support sending. Naming the actual cause tells the reader whether there is
+ * anything they can do about it.
+ */
+@Composable
+private fun sessionSendUnavailableMessage(reason: String?, takeoverEnabled: Boolean): String {
+    return when (reason) {
+        "session_not_taken_over" -> stringResource(R.string.session_send_needs_takeover)
+        "connector_offline" -> stringResource(R.string.session_device_offline_placeholder)
+        "runtime_capability_unsupported" -> stringResource(R.string.session_send_unsupported)
+        "runtime_capability_unavailable" -> stringResource(R.string.session_send_runtime_unavailable)
+        null -> if (takeoverEnabled) {
+            stringResource(R.string.session_send_unavailable)
+        } else {
+            stringResource(R.string.session_send_needs_takeover)
+        }
+        else -> stringResource(R.string.session_send_unavailable)
+    }
+}
+

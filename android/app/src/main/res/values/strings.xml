@@ -409,6 +409,11 @@
     <string name="session_runtime_state_unknown">Runtime state is unavailable. Refresh to try again.</string>
     <string name="session_runtime_state_error">The session encountered an error. Please try again.</string>
     <string name="session_send_unavailable">Sending is unavailable for the current runtime state.</string>
+    <string name="session_send_needs_takeover">Read-only. Turn on takeover to send messages.</string>
+    <string name="session_send_unsupported">This runtime cannot send messages.</string>
+    <string name="session_send_runtime_unavailable">The runtime cannot accept messages right now.</string>
+    <string name="session_capabilities_loading">Checking what this session supports…</string>
+    <string name="session_capabilities_unavailable">Could not confirm what this session supports. Check your connection and reopen the session.</string>
     <string name="session_steer_unavailable">The runtime cannot accept another instruction right now.</string>
     <string name="session_runtime_catalog_loading">Loading the live runtime catalog…</string>
     <string name="session_runtime_catalog_stale">Showing the last successful catalog.</string>

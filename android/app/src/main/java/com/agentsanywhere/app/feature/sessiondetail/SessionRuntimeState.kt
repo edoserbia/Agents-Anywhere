@@ -540,6 +540,32 @@ internal fun sessionComposerEnabled(
     canUseCommands: Boolean,
 ): Boolean = takeoverEnabled && capabilityFactsFresh && (canSendMessage || canSteer || canUseCommands)
 
+/**
+ * Why the composer cannot send, as reported by the server.
+ *
+ * The platform tells the client which of `supported` / `available` / `allowed`
+ * failed, and the remedies differ: takeover is a switch the reader controls,
+ * while an offline connector or a runtime that cannot send at all is not. The
+ * send capability is preferred, then steering, so the reason describes the
+ * action the reader is most likely attempting.
+ */
+internal fun sendUnavailableReason(
+    capabilities: EffectiveCapabilities,
+    runtimeId: String?,
+    runtimeType: String?,
+): String? {
+    val candidates = listOf(SESSION_SEND_MESSAGE_CAPABILITY, SESSION_STEER_CAPABILITY)
+    for (capabilityId in candidates) {
+        val capability = capabilities.find(capabilityId, runtimeId, runtimeType) ?: continue
+        if (capability.usable) continue
+        capability.unavailableReason?.takeIf(String::isNotBlank)?.let { return it }
+    }
+    // No reason on a specific capability: report the freshest hint available.
+    return capabilities.capabilities
+        .firstOrNull { !it.usable && !it.unavailableReason.isNullOrBlank() }
+        ?.unavailableReason
+}
+
 internal fun runtimeSelectionEnabled(takeoverEnabled: Boolean, capabilityUsable: Boolean): Boolean =
     takeoverEnabled && capabilityUsable
 
