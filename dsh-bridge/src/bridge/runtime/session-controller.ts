@@ -24,6 +24,10 @@ export class SessionController {
   private serialTail: Promise<void> = Promise.resolve()
   private stateRevision = 0
   private currentStatus: RuntimeStatus = 'idle'
+  // DSH can emit the terminal idle event while an interaction is still open.
+  // Keep that observation so closing the interaction cannot restore a stale
+  // running state.
+  private observedAgentStatus: RuntimeStatus = 'idle'
   private currentOwnership: AgentOwnership = 'detached'
 
   /**
@@ -148,6 +152,11 @@ export class SessionController {
     await this.publishState()
   }
 
+  /** Remember the latest native Agent status, even while an interaction masks it. */
+  observeAgentStatus(status: RuntimeStatus): void {
+    this.observedAgentStatus = status
+  }
+
   /** Add one pending interaction and expose its blocking status. */
   async openInteraction(id: string, kind: 'approval' | 'user_question'): Promise<void> {
     this.pendingInteractionIds.add(id)
@@ -158,7 +167,7 @@ export class SessionController {
   async closeInteraction(id: string): Promise<void> {
     this.pendingInteractionIds.delete(id)
     if (this.pendingInteractionIds.size > 0) return
-    await this.transition(this.agent?.status === 'running' ? 'running' : 'idle')
+    await this.transition(this.observedAgentStatus === 'running' ? 'running' : 'idle')
   }
 
   /** Materialize the public state DTO when the AA binding is known. */

@@ -18,8 +18,10 @@ from agent_server.core.capabilities import (
     capability_unavailable_detail,
 )
 from agent_server.core.models import (
+    AttachmentRef,
     InlineAttachmentRef,
     MessageCreateRequest,
+    QueueItemUpdateRequest,
     RpcResponsePayload,
     SessionCreateAndStartRequest,
     SessionCreateRequest,
@@ -45,6 +47,11 @@ from agent_server.services.device_runtimes import (
     DeviceRuntimeError,
     DeviceRuntimeService,
 )
+from agent_server.services.message_queue import (
+    MessageQueueError,
+    MessageQueueService,
+)
+from agent_server.services.message_queue_dispatch import QueueDispatchBusy
 from agent_server.services.effective_capabilities import (
     derive_session_effective_capabilities,
     read_session_capability_facts,
@@ -103,10 +110,14 @@ class SessionRunService:
         store: SessionRunRepository,
         manager: ConnectorRpcManager,
         device_runtimes: DeviceRuntimeService,
+        message_queue: MessageQueueService | None = None,
     ) -> None:
         self._store = store
         self._manager = manager
         self._device_runtimes = device_runtimes
+        # Optional so tests and callers that never queue keep working; the API
+        # always passes one.
+        self._message_queue = message_queue or MessageQueueService(store)
 
     async def create_session(
         self,
@@ -401,6 +412,21 @@ class SessionRunService:
         await self._ensure_session_runtime_running(session, user_id=user_id)
         runtime_status = await self._read_runtime_status(session)
         if runtime_status not in {"idle", "error"}:
+            # The runtime is mid-turn. With queueing requested, keep the message
+            # instead of rejecting it; it is dispatched as this turn finishes.
+            # Capabilities are still checked, because a runtime that cannot send
+            # at all will not be able to send the queued message either.
+            if payload.queueWhenBusy:
+                await self._require_session_capability(
+                    session,
+                    SESSION_SEND_MESSAGE,
+                    user_id=user_id,
+                )
+                return await self._enqueue_message(
+                    session,
+                    payload,
+                    user_id=user_id,
+                )
             raise SessionRunConflictError(f"session is {runtime_status}")
         await self._require_session_capability(
             session,
@@ -850,6 +876,140 @@ class SessionRunService:
             )
         return payloads
 
+    async def _enqueue_message(
+        self,
+        session: SessionView,
+        payload: MessageCreateRequest,
+        *,
+        user_id: str,
+    ) -> RpcResponsePayload:
+        """Accept a message for later dispatch while the runtime is busy.
+
+        Attachments are persisted now rather than at dispatch time: the client is
+        about to drop its local copy, and the queued item must survive a restart.
+        """
+        persisted_refs: list[dict[str, Any]] = []
+        if payload.attachments:
+            persisted = await self._persist_inline_attachments(
+                session_id=session.id,
+                user_id=user_id,
+                attachments=payload.attachments,
+            )
+            persisted_refs = [
+                _timeline_payload_from_persisted_inline_attachment(attachment)
+                for attachment in persisted
+            ]
+        try:
+            item = await self._message_queue.enqueue(
+                session_id=session.id,
+                user_id=user_id,
+                content=payload.content,
+                attachments=persisted_refs,
+                client_message_id=payload.clientMessageId,
+            )
+        except MessageQueueError as exc:
+            raise SessionRunConflictError(exc.detail()) from None
+        return RpcResponsePayload(
+            ok=True,
+            result={
+                "queued": True,
+                "item": item.to_payload(),
+            },
+        )
+
+    async def list_queue(self, session_id: str, *, user_id: str) -> list[dict[str, Any]]:
+        await self._require_session(session_id, user_id=user_id)
+        items = await self._message_queue.list(session_id)
+        return [item.to_payload() for item in items]
+
+    async def update_queue_item(
+        self,
+        session_id: str,
+        item_id: str,
+        payload: QueueItemUpdateRequest,
+        *,
+        user_id: str,
+    ) -> dict[str, Any]:
+        session = await self._require_session(session_id, user_id=user_id)
+        attachments: list[dict[str, Any]] | None = None
+        if payload.attachments is not None:
+            persisted = await self._persist_inline_attachments(
+                session_id=session.id,
+                user_id=user_id,
+                attachments=payload.attachments,
+            )
+            attachments = [
+                _timeline_payload_from_persisted_inline_attachment(attachment)
+                for attachment in persisted
+            ]
+        try:
+            item = await self._message_queue.update(
+                session_id=session_id,
+                item_id=item_id,
+                content=payload.content,
+                attachments=attachments,
+            )
+        except MessageQueueError as exc:
+            raise _queue_error_to_run_error(exc) from None
+        return item.to_payload()
+
+    async def remove_queue_item(
+        self,
+        session_id: str,
+        item_id: str,
+        *,
+        user_id: str,
+    ) -> dict[str, Any]:
+        await self._require_session(session_id, user_id=user_id)
+        try:
+            item = await self._message_queue.remove(session_id=session_id, item_id=item_id)
+        except MessageQueueError as exc:
+            raise _queue_error_to_run_error(exc) from None
+        return item.to_payload()
+
+    async def _require_session(self, session_id: str, *, user_id: str) -> SessionView:
+        try:
+            return await self._store.get_session(session_id, user_id=user_id)
+        except KeyError:
+            raise SessionRunNotFoundError("session not found") from None
+
+    async def send_queued_message(
+        self,
+        session_id: str,
+        item: dict[str, Any],
+        *,
+        user_id: str | None,
+    ) -> None:
+        """Dispatch one queued item as a normal turn.
+
+        This is the queue dispatcher's sender. It re-enters the ordinary send
+        path so a queued message is indistinguishable from one the user sent
+        directly: same capability checks, same runtime call, same timeline.
+        """
+        if user_id is None:
+            raise SessionRunConflictError("queued message has no owner to send as")
+        attachments = item.get("attachments")
+        refs = [
+            AttachmentRef(fileId=str(entry["fileId"]))
+            for entry in attachments or []
+            if isinstance(entry, dict) and entry.get("fileId")
+        ]
+        payload = MessageCreateRequest(
+            content=str(item.get("content") or ""),
+            attachments=refs,
+            clientMessageId=item.get("clientMessageId"),
+        )
+        # A busy runtime here means the session picked up other work between the
+        # turn ending and this dispatch. The dispatcher requeues on this signal
+        # instead of failing the message.
+        try:
+            await self.send_message(session_id, payload, user_id=user_id)
+        except SessionRunConflictError as exc:
+            detail = str(getattr(exc, "detail", "") or exc)
+            if "session is " in detail:
+                raise QueueDispatchBusy(detail) from None
+            raise
+
     async def _persist_inline_attachments(
         self,
         *,
@@ -1090,3 +1250,15 @@ def _validate_attachment_mime_types(metadata: dict[str, Any], media_types: list[
         normalized = media_type.split(";", 1)[0].strip().lower()
         if normalized not in allowed:
             raise SessionRunConflictError(f"attachment type is not supported by this runtime: {normalized}")
+
+
+def _queue_error_to_run_error(error: MessageQueueError) -> SessionRunError:
+    """Map a queue failure onto the HTTP status the client should see.
+
+    A missing or already-dispatched item is a conflict rather than a 404: the
+    item may have existed and been sent, which the client resolves by refreshing
+    the queue rather than treating the id as invalid.
+    """
+    if error.code == "session/queue-item-not-found":
+        return SessionRunConflictError(error.detail())
+    return SessionRunInvalidConfigError(error.detail())

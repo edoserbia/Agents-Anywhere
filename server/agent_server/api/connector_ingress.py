@@ -52,6 +52,7 @@ from agent_server.infra.fs_downloads import FsDownloadRelayManager
 from agent_server.infra.repositories.facade import Store
 from agent_server.infra.terminal_broker import TerminalBroker
 from agent_server.infra.timeline_broker import TimelineBroker
+from agent_server.services.message_queue_dispatch import build_queue_dispatcher
 from agent_server.services.attachments import AttachmentService
 from agent_server.services.connector_ingest import ConnectorIngestService
 from agent_server.services.connector_notifications import (
@@ -539,6 +540,7 @@ async def connector_ws(
                 db, ConnectorNotificationService(db, realtime, timeline_write_buffer),
                 timeline_broker, runtime_service, manager,
                 websocket.app.state.session_runtime_state_cache,
+                build_queue_dispatcher(websocket.app.state, db, manager),
             )
             notification_pump = _ConnectorNotificationPump(
                 connector_id, ingest_service,

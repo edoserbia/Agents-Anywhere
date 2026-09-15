@@ -28,6 +28,10 @@ from agent_server.services.device_runtimes import (
     DeviceRuntimeNotFoundError,
     DeviceRuntimeService,
 )
+from agent_server.services.message_queue_dispatch import (
+    DISPATCHABLE_STATUSES,
+    MessageQueueDispatcher,
+)
 from agent_server.services.effective_capabilities import (
     project_session_capabilities,
     publish_connector_session_capabilities,
@@ -68,6 +72,7 @@ class ConnectorIngestService:
         device_runtimes: DeviceRuntimeService,
         presence: ConnectorPresencePort,
         runtime_state_cache: SessionRuntimeStateCache,
+        queue_dispatcher: MessageQueueDispatcher | None = None,
     ) -> None:
         self._store = store
         self._notifications = notifications
@@ -75,6 +80,8 @@ class ConnectorIngestService:
         self._device_runtimes = device_runtimes
         self._presence = presence
         self._runtime_state_cache = runtime_state_cache
+        # Optional: ingest still works without queueing wired in.
+        self._queue_dispatcher = queue_dispatcher
 
     async def ingest(
         self,
@@ -434,6 +441,7 @@ class ConnectorIngestService:
             await self._timeline_broker.publish(session_id, envelope)
             return status_changed
 
+        settled: list[str] = []
         for session_id, bucket in by_session.items():
             if not (
                 bucket["items"]
@@ -453,11 +461,39 @@ class ConnectorIngestService:
                 )
                 continue
             async with self._store.session_revision_fence(session_id):
-                dashboard_changed = (
+                if (
                     await publish_bucket(session_id, bucket)
-                    or dashboard_changed
-                )
+                ):
+                    dashboard_changed = True
+            # A turn just ended, so this session's queue may have work waiting.
+            runtime_state = bucket["runtime_state"]
+            if runtime_state is not None and runtime_state.status in DISPATCHABLE_STATUSES:
+                settled.append(session_id)
+        await self._dispatch_queues(settled)
         return dashboard_changed
+
+    async def _dispatch_queues(self, settled: list[str]) -> None:
+        """Hand the next queued message to each session whose turn just ended.
+
+        Dispatch runs after the timeline and status changes for this batch have
+        been published, so clients already see the finished turn before the next
+        one starts.
+
+        Failures are logged rather than raised: a queue problem must not fail the
+        ingest that observed the status change.
+        """
+        dispatcher = self._queue_dispatcher
+        if dispatcher is None or not settled:
+            return
+        for session_id in settled:
+            try:
+                await dispatcher.dispatch_next(session_id)
+            except Exception as error:  # noqa: BLE001 - never break ingest
+                logger.warning(
+                    "queued message dispatch error session_id={} error={}",
+                    session_id,
+                    error,
+                )
 
     async def _apply_runtime_status(
         self,

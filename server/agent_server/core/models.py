@@ -1097,6 +1097,43 @@ class MessageCreateRequest(BaseModel):
     # the connector tags the resulting timeline item so the frontend can
     # dedupe its optimistic placeholder against the real server item.
     clientMessageId: str | None = None
+    # When the runtime is busy, accept the message into the session queue
+    # instead of rejecting it. The queue dispatches it as the current turn ends.
+    queueWhenBusy: bool = False
+
+
+class QueuedMessageView(BaseModel):
+    """One message waiting for the session's current turn to finish."""
+
+    id: str
+    sessionId: str
+    position: int
+    status: str
+    content: str
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    clientMessageId: str | None = None
+    errorCode: str | None = None
+    errorMessage: str | None = None
+    createdAt: str
+    updatedAt: str
+
+
+class SessionQueueResponse(BaseModel):
+    sessionId: str
+    items: list[QueuedMessageView] = Field(default_factory=list)
+    serverTime: str
+
+
+class QueueItemResponse(BaseModel):
+    item: QueuedMessageView
+    serverTime: str
+
+
+class QueueItemUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str | None = None
+    attachments: list[AttachmentRef] | None = Field(default=None, max_length=10)
 
 
 class SessionCommandRequest(BaseModel):

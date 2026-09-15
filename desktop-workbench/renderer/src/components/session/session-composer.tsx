@@ -137,6 +137,7 @@ export function SessionComposer({
     !isWaitingApproval &&
     !isBlocked
   const canUseSendMessage = capabilityIsUsable(effectiveCapabilities, CAPABILITY.sendMessage, runtimeScope)
+  const canUseSteer = capabilityIsUsable(effectiveCapabilities, CAPABILITY.steer, runtimeScope)
   const canUseInterrupt = capabilityIsUsable(effectiveCapabilities, CAPABILITY.interrupt, runtimeScope)
   const interruptCapability = findCapability(effectiveCapabilities, CAPABILITY.interrupt, runtimeScope)
   const canUseModelCatalog = capabilityIsUsable(effectiveCapabilities, CAPABILITY.modelCatalog, runtimeScope)
@@ -165,7 +166,7 @@ export function SessionComposer({
     onDrop,
   } = useAttachments({ sessionId: creatingSession ? undefined : session.id, token, enabled: canUseAttachments, allowedMimeTypes })
   const canSend =
-    canUseSendMessage &&
+    (canUseSendMessage || (isRunning && canUseSteer)) &&
     !creatingSession &&
     !sending &&
     !interrupting &&
@@ -310,8 +311,10 @@ export function SessionComposer({
         ? tSession("waitingApprovalPlaceholder")
         : isWaiting
           ? tSession("pendingPlaceholder")
-          : isStopping || isRunning
+          : isStopping
             ? tSession("busyPlaceholder")
+            : isRunning && !canUseSteer
+              ? tSession("busyPlaceholder")
             : isWaitingApproval || isBlocked
               ? tSession("waitingApprovalPlaceholder")
               : isError

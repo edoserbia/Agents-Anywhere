@@ -476,6 +476,36 @@ session_active_runs = Table(
 )
 
 
+# Messages accepted while a turn is running, dispatched in `position` order as
+# each turn finishes. Kept in the database so a connector or server restart does
+# not lose what the user already submitted.
+session_message_queue = Table(
+    "session_message_queue",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column(
+        "session_id",
+        Text,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("user_id", Text),
+    Column("position", Integer, nullable=False),
+    # queued | sending | sent | failed
+    Column("status", Text, nullable=False, server_default="queued"),
+    Column("content", Text, nullable=False),
+    Column("attachments_json", Text, nullable=False, server_default="[]"),
+    Column("selections_json", Text, nullable=False, server_default="{}"),
+    Column("client_message_id", Text),
+    Column("error_code", Text),
+    Column("error_message", Text),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("updated_seq", Integer, nullable=False, server_default="0"),
+    Index("idx_session_message_queue_position", "session_id", "position"),
+)
+
+
 timeline_items = Table(
     "timeline_items",
     metadata,

@@ -12,6 +12,7 @@ from agent_server.infra.repositories.device_runtimes import DeviceRuntimeReposit
 from agent_server.infra.repositories.instance_settings_facade import (
     InstanceSettingsRepositoryMixin,
 )
+from agent_server.infra.repositories.message_queue import MessageQueueRepository
 from agent_server.infra.repositories.oauth import OAuthRepositoryMixin
 from agent_server.infra.repositories.projects import ProjectRepositoryMixin
 from agent_server.infra.repositories.protocol_catalogs import (
@@ -58,6 +59,7 @@ class Store(
         )
         self.instance_settings = InstanceSettingsRepository(engine)
         self.active_runs = ActiveRunRepository(engine)
+        self.message_queue = MessageQueueRepository(engine)
         self.attachments = AttachmentService(self, self.files)
 
         self._timeline_locks: dict[str, asyncio.Lock] = {}

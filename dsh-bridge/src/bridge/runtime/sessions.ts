@@ -103,6 +103,7 @@ export class SessionManager {
     const disposeStatus = this.ctx.on('agent/status', ({ agent, status }) => {
       const controller = this.controllerForAgent(agent)
       if (controller !== undefined) {
+        controller.observeAgentStatus(status)
         void this.publishHostReplica(agent.id, bridgeHostEnvelope({
           type: 'host/session-status',
           sessionId: agent.id,

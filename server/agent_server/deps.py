@@ -20,6 +20,8 @@ from agent_server.services.connector_realtime import ConnectorRealtimeService
 from agent_server.services.connector_shell import ConnectorShellService
 from agent_server.services.device_runtimes import DeviceRuntimeService
 from agent_server.services.event_recovery import EventRecoveryService
+from agent_server.services.message_queue import MessageQueueService
+from agent_server.services.message_queue_dispatch import build_queue_dispatcher
 from agent_server.services.session_run import SessionRunService
 from agent_server.services.session_runtime_state_cache import SessionRuntimeStateCache
 from agent_server.services.terminal import TerminalService
@@ -60,6 +62,7 @@ def get_connector_ingest_service(conn: HTTPConnection) -> ConnectorIngestService
         conn.app.state.device_runtime_service,
         conn.app.state.rpc,
         conn.app.state.session_runtime_state_cache,
+        build_queue_dispatcher(conn.app.state, conn.app.state.store, conn.app.state.rpc),
     )
 
 
@@ -90,6 +93,7 @@ def get_session_run_service(conn: HTTPConnection) -> SessionRunService:
         conn.app.state.store,
         conn.app.state.rpc,
         conn.app.state.device_runtime_service,
+        MessageQueueService(conn.app.state.store.message_queue),
     )
 
 

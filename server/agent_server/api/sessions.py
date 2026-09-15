@@ -43,6 +43,10 @@ from agent_server.core.models import (
     InteractionRespondRequest,
     MessageCreateRequest,
     NoticeIn,
+    QueueItemResponse,
+    QueueItemUpdateRequest,
+    QueuedMessageView,
+    SessionQueueResponse,
     RpcError,
     RpcResponsePayload,
     RuntimeNoticeListResponse,
@@ -1345,6 +1349,60 @@ async def execute_session_command(
         result=result.get("result"),
         serverTime=utc_now(),
     )
+
+
+@router.get("/{session_id}/runtime/queue", response_model=SessionQueueResponse)
+async def list_session_queue(
+    session_id: str,
+    user_id: str = Depends(current_user_id),
+    run_service: SessionRunService = Depends(get_session_run_service),
+) -> SessionQueueResponse:
+    """Messages accepted while the runtime was busy, in dispatch order."""
+    try:
+        items = await run_service.list_queue(session_id, user_id=user_id)
+    except SessionRunError as exc:
+        _raise_session_run_error(exc)
+    return SessionQueueResponse(
+        sessionId=session_id,
+        items=[QueuedMessageView(**item) for item in items],
+        serverTime=utc_now(),
+    )
+
+
+@router.patch("/{session_id}/runtime/queue/{item_id}", response_model=QueueItemResponse)
+async def update_session_queue_item(
+    session_id: str,
+    item_id: str,
+    payload: QueueItemUpdateRequest,
+    user_id: str = Depends(current_user_id),
+    run_service: SessionRunService = Depends(get_session_run_service),
+) -> QueueItemResponse:
+    """Edit a queued message that has not been dispatched yet."""
+    try:
+        item = await run_service.update_queue_item(
+            session_id,
+            item_id,
+            payload,
+            user_id=user_id,
+        )
+    except SessionRunError as exc:
+        _raise_session_run_error(exc)
+    return QueueItemResponse(item=QueuedMessageView(**item), serverTime=utc_now())
+
+
+@router.delete("/{session_id}/runtime/queue/{item_id}", response_model=QueueItemResponse)
+async def remove_session_queue_item(
+    session_id: str,
+    item_id: str,
+    user_id: str = Depends(current_user_id),
+    run_service: SessionRunService = Depends(get_session_run_service),
+) -> QueueItemResponse:
+    """Drop a queued message that has not been dispatched yet."""
+    try:
+        item = await run_service.remove_queue_item(session_id, item_id, user_id=user_id)
+    except SessionRunError as exc:
+        _raise_session_run_error(exc)
+    return QueueItemResponse(item=QueuedMessageView(**item), serverTime=utc_now())
 
 
 @router.post("/{session_id}/runtime/messages", response_model=RpcResponsePayload)
