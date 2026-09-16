@@ -1428,9 +1428,8 @@ fun SessionDetailScreen(
     LaunchedEffect(sessionId, capabilitiesLookWrong, state.capabilities.revision) {
         val activeSessionId = sessionId ?: return@LaunchedEffect
         if (!capabilitiesLookWrong) return@LaunchedEffect
-        controller.refreshCapabilities(activeSessionId, state)?.let { healed ->
-            if (sessionId == activeSessionId) state = healed
-        }
+        val healed = controller.refreshCapabilities(activeSessionId, state)
+        healed?.let { if (sessionId == activeSessionId) state = it }
     }
     val inputEnabled = if (isPreparedSession) {
         true

@@ -369,10 +369,21 @@ internal fun SessionDetailState.applyRuntimeObservation(
 internal fun SessionDetailState.applyCapabilitiesObservation(
     observed: EffectiveCapabilities,
 ): SessionDetailState {
-    val nextCapabilities = if (!capabilities.isLoaded || observed.revision >= capabilities.revision) {
-        observed
-    } else {
-        capabilities.copy(isLoading = false, errorMessage = null)
+    // Revision ordering is only meaningful between two real observations. A set
+    // that reports nothing usable is the server's placeholder for "could not
+    // reach the connector"; it carries a session timestamp as its revision,
+    // which is orders of magnitude larger than the connector's own counter. It
+    // must therefore never outrank facts that name something usable, or the
+    // placeholder would win permanently and leave a healthy session's composer
+    // disabled. Accepted whenever it is strictly more informative.
+    val isPlaceholder = observed.capabilities.none { it.usable }
+    val heldIsPlaceholder = capabilities.capabilities.none { it.usable }
+    val nextCapabilities = when {
+        !capabilities.isLoaded -> observed
+        isPlaceholder && !heldIsPlaceholder -> capabilities.copy(isLoading = false, errorMessage = null)
+        heldIsPlaceholder && !isPlaceholder -> observed
+        observed.revision >= capabilities.revision -> observed
+        else -> capabilities.copy(isLoading = false, errorMessage = null)
     }
     return copy(capabilities = nextCapabilities)
 }

@@ -176,22 +176,24 @@ class SessionDetailController(
                     connectorId = response.connectorId,
                     serverTime = response.serverTime,
                 )
-                // Only accept facts that actually say something is usable, so a
-                // failing read cannot make the state worse.
-                if (observed.capabilities.none { it.usable }) return@runCatching null
                 // The revision guard exists to stop an older read from undoing a
-                // newer one, but a state that reports nothing usable while the
-                // runtime reports otherwise is not "newer" in any useful sense:
-                // it is the persisted-fact placeholder the server publishes when
-                // it cannot reach the connector. Accepting the healthier facts is
-                // a strict improvement, so the guard is bypassed for it.
-                if (current.capabilities.capabilities.none { it.usable }) {
-                    current.copy(
-                        capabilities = observed.copy(isLoading = false, errorMessage = null),
-                    )
-                } else {
-                    current.applyCapabilitiesObservation(observed)
+                // newer one, but revisions are not comparable across sources: a
+                // set the server persisted carries a timestamp, while a live read
+                // carries the connector's own counter, so the stale set always
+                // looks newer. A live read that makes a capability usable where
+                // the held facts said it was not is strictly more informative, so
+                // it is accepted regardless of revision. This only ever adds
+                // usability, so a failing read cannot make the state worse.
+                val observedMakesSomethingUsable = observed.capabilities.any { candidate ->
+                    candidate.usable &&
+                        current.capabilities.capabilities
+                            .firstOrNull { it.capabilityId == candidate.capabilityId }
+                            ?.usable == false
                 }
+                if (!observedMakesSomethingUsable) return@runCatching null
+                current.copy(
+                    capabilities = observed.copy(isLoading = false, errorMessage = null),
+                )
             }.getOrNull()
         }
     }
