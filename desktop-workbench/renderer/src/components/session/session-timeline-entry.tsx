@@ -25,9 +25,30 @@ import { firstTextOf, messageText, recordsOf, textOf } from "@/components/sessio
 import { extractAttachments, stripInjectedAttachmentMentions } from "@/features/dashboard/attachments"
 import { MessageAttachments } from "@/components/session/message-attachments"
 import { CollapsibleUserMessage } from "@/components/session/collapsible-user-message"
+import { formatTimelineTimestamp } from "@/components/session/timeline-timestamp"
 
 const MarkdownText = dynamic(() => import("../markdown-text").then((mod) => ({ default: mod.MarkdownText })), { ssr: false })
 const INLINE_REASONING_SUMMARY_MAX_CHARS = 80
+
+/**
+ * The moment this item was first seen, shown above the entry.
+ *
+ * Rendered outside the entry's own chrome so it applies uniformly to replies,
+ * tool calls and system notices, and so a collapsed entry still shows when it
+ * started.
+ */
+function TimelineTimestamp({ item }: { item: TimelineItem }) {
+  const stamp = formatTimelineTimestamp(item.createdAt)
+  if (!stamp) return null
+  return (
+    <div
+      className="select-none pt-1 text-[11px] font-medium tabular-nums text-muted-foreground/70"
+      data-timeline-timestamp
+    >
+      {stamp}
+    </div>
+  )
+}
 
 export function TimelineEntry({
   token,
@@ -57,9 +78,15 @@ export function TimelineEntry({
   onRespondInteraction: (noticeId: string, actionId: string, input?: Record<string, unknown>) => void
 }) {
   let entry: React.ReactNode
+  const withTimestamp = (node: React.ReactNode) => (
+    <>
+      <TimelineTimestamp item={item} />
+      {node}
+    </>
+  )
   if (item.type === "message") {
     entry = <MessageCard token={token} session={session} item={item} readOnly={readOnly} attachmentUrl={attachmentUrl} />
-    return <TimelineEntryContextMenu item={item}>{entry}</TimelineEntryContextMenu>
+    return <TimelineEntryContextMenu item={item}>{withTimestamp(entry)}</TimelineEntryContextMenu>
   }
   if (item.type === "tool" || isFileChangeArtifact(item)) {
     entry = (
@@ -78,13 +105,13 @@ export function TimelineEntry({
         />
       </div>
     )
-    return <TimelineEntryContextMenu item={item}>{entry}</TimelineEntryContextMenu>
+    return <TimelineEntryContextMenu item={item}>{withTimestamp(entry)}</TimelineEntryContextMenu>
   }
   if (item.type === "marker") entry = <MarkerCard item={item} />
   else if (item.type === "system") entry = <SystemCard token={readOnly ? "" : token} session={session} item={item} />
   else if (item.type === "artifact") entry = <ArtifactCard token={token} session={session} item={item} readOnly={readOnly} />
   else entry = <UnknownTimelineItem item={item} />
-  return <TimelineEntryContextMenu item={item}>{entry}</TimelineEntryContextMenu>
+  return <TimelineEntryContextMenu item={item}>{withTimestamp(entry)}</TimelineEntryContextMenu>
 }
 
 function isFileChangeArtifact(item: TimelineItem): boolean {
