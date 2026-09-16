@@ -53,6 +53,7 @@ class MessageQueueRepository:
         selections: dict[str, Any] | None,
         client_message_id: str | None,
         created_at: str,
+        updated_at: str | None = None,
     ) -> dict[str, Any]:
         async with self._engine.begin() as conn:
             await conn.execute(
@@ -67,7 +68,7 @@ class MessageQueueRepository:
                     selections_json=json.dumps(selections or {}, ensure_ascii=False),
                     client_message_id=client_message_id,
                     created_at=created_at,
-                    updated_at=created_at,
+                    updated_at=updated_at or created_at,
                     updated_seq=0,
                 )
             )
