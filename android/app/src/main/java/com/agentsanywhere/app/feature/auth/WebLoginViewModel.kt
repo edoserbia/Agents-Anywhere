@@ -152,7 +152,10 @@ class WebLoginViewModel(application: Application) : AndroidViewModel(application
 
     private fun hostChoiceState() = WebLoginState.HostChoice(
         officialServiceAvailable = AppConfig.OFFICIAL_SERVER_URL.isNotBlank(),
-        serverUrl = controller.savedServerUrl(),
+        // Pre-fill the built-in server so a fresh install can connect with one
+        // tap. A previously used address still wins, since that is the server
+        // this device's sessions actually live on.
+        serverUrl = controller.savedServerUrl().ifBlank { AppConfig.OFFICIAL_SERVER_URL },
     )
 
     private fun showHostChoice(form: WebLoginState.HostChoice) {
