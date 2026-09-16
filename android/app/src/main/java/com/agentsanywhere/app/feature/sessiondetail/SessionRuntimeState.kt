@@ -58,28 +58,48 @@ data class EffectiveCapabilities(
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
 ) {
+    /**
+     * Resolve the capability that governs [capabilityId] for this session.
+     *
+     * Candidates are tried most-specific first: an exact instance match, then a
+     * session-scoped fact, then anything published for the same runtime type.
+     * The session-scoped and same-runtime-type fallbacks matter because a
+     * session can outlive the runtime instance the facts were published under —
+     * the instance id moves on, and the capability payload may carry the older
+     * one. Requiring the ids to agree made the lookup return `null`, which the
+     * composer reports as "This runtime cannot send messages" even when the
+     * runtime supports sending, leaving an idle session unable to send.
+     */
     fun find(
         capabilityId: String,
         runtimeId: String? = null,
         runtimeType: String? = null,
     ): EffectiveCapability? {
         val matches = capabilities.filter { it.capabilityId == capabilityId }
-        return if (runtimeId == null && runtimeType == null) {
-            matches.firstOrNull()
-        } else {
-            matches.firstOrNull { runtimeId != null && it.runtimeId == runtimeId }
-                ?: matches.firstOrNull {
-                    runtimeId != null && it.runtimeId == null && it.runtime == runtimeId
+        if (matches.isEmpty()) return null
+        if (runtimeId == null && runtimeType == null) return matches.first()
+
+        return matches.firstOrNull { runtimeId != null && it.runtimeId == runtimeId }
+            ?: matches.firstOrNull {
+                runtimeId != null && it.runtimeId == null && it.runtime == runtimeId
+            }
+            // A session-scoped fact describes this session regardless of which
+            // instance published it.
+            ?: matches.firstOrNull { it.scope == "session" && it.sessionId != null }
+            ?: matches.firstOrNull { it.scope == "session" }
+            ?: runtimeType?.let { expectedType ->
+                matches.firstOrNull {
+                    it.runtimeId == null && (it.runtimeType ?: it.runtime) == expectedType
                 }
-                ?: runtimeType?.let { expectedType ->
-                    matches.firstOrNull {
-                        it.runtimeId == null && (it.runtimeType ?: it.runtime) == expectedType
-                    }
-                }
-                ?: matches.firstOrNull {
-                    it.runtimeId == null && it.runtimeType == null && it.runtime == null
-                }
-        }
+            }
+            ?: matches.firstOrNull {
+                it.runtimeId == null && it.runtimeType == null && it.runtime == null
+            }
+            // Last resort: the runtime type matches even if the instance id has
+            // moved on.
+            ?: runtimeType?.let { expectedType ->
+                matches.firstOrNull { (it.runtimeType ?: it.runtime) == expectedType }
+            }
     }
 
     fun isUsable(
