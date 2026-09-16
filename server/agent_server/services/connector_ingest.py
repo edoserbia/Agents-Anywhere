@@ -466,8 +466,11 @@ class ConnectorIngestService:
                 ):
                     dashboard_changed = True
             # A turn just ended, so this session's queue may have work waiting.
+            # The bucket holds the serialized effect payload, so status is read
+            # from the mapping rather than an attribute.
             runtime_state = bucket["runtime_state"]
-            if runtime_state is not None and runtime_state.status in DISPATCHABLE_STATUSES:
+            status = runtime_state.get("status") if isinstance(runtime_state, dict) else None
+            if status in DISPATCHABLE_STATUSES:
                 settled.append(session_id)
         await self._dispatch_queues(settled)
         return dashboard_changed

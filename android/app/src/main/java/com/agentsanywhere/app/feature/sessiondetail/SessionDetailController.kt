@@ -6,6 +6,7 @@ import com.agentsanywhere.app.api.RemoteSessionEventEnvelope
 import com.agentsanywhere.app.api.RemoteSessionShareResponse
 import com.agentsanywhere.app.api.RemoteRuntimeModelCatalog
 import com.agentsanywhere.app.api.RemoteRuntimePermissionCatalog
+import com.agentsanywhere.app.api.RemoteSessionQueue
 import com.agentsanywhere.app.api.SessionsApi
 import com.agentsanywhere.app.api.UploadFilePart
 import com.agentsanywhere.app.feature.auth.AuthSessionReader
@@ -424,6 +425,7 @@ class SessionDetailController(
         clientMessageId: String,
         attachments: List<UploadFilePart> = emptyList(),
         uploadedAttachments: List<TimelineAttachment> = emptyList(),
+        queueWhenBusy: Boolean = false,
     ): Result<SendMessageResult> {
         return performMessageAction(
             sessionId = sessionId,
@@ -431,6 +433,7 @@ class SessionDetailController(
             clientMessageId = clientMessageId,
             attachments = attachments,
             uploadedAttachments = uploadedAttachments,
+            queueWhenBusy = queueWhenBusy,
             steer = false,
         )
     }
@@ -452,6 +455,59 @@ class SessionDetailController(
         )
     }
 
+    /** Read the session's pending message queue. */
+    suspend fun loadQueue(sessionId: String): Result<SessionMessageQueue> {
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val auth = authSession()
+                sessionsApi.getSessionQueue(auth.serverUrl, auth.accessToken, sessionId)
+                    .toSessionMessageQueue()
+            }
+        }
+    }
+
+    /** Replace the text of a still-pending queued message. */
+    suspend fun updateQueuedMessage(
+        sessionId: String,
+        itemId: String,
+        content: String,
+    ): Result<SessionMessageQueue> {
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val auth = authSession()
+                sessionsApi.updateQueuedMessage(
+                    serverUrl = auth.serverUrl,
+                    authorizationToken = auth.accessToken,
+                    sessionId = sessionId,
+                    itemId = itemId,
+                    content = content,
+                )
+                sessionsApi.getSessionQueue(auth.serverUrl, auth.accessToken, sessionId)
+                    .toSessionMessageQueue()
+            }
+        }
+    }
+
+    /** Drop a still-pending queued message. */
+    suspend fun deleteQueuedMessage(
+        sessionId: String,
+        itemId: String,
+    ): Result<SessionMessageQueue> {
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val auth = authSession()
+                sessionsApi.deleteQueuedMessage(
+                    serverUrl = auth.serverUrl,
+                    authorizationToken = auth.accessToken,
+                    sessionId = sessionId,
+                    itemId = itemId,
+                )
+                sessionsApi.getSessionQueue(auth.serverUrl, auth.accessToken, sessionId)
+                    .toSessionMessageQueue()
+            }
+        }
+    }
+
     private suspend fun performMessageAction(
         sessionId: String,
         content: String,
@@ -459,6 +515,7 @@ class SessionDetailController(
         attachments: List<UploadFilePart>,
         uploadedAttachments: List<TimelineAttachment>,
         steer: Boolean,
+        queueWhenBusy: Boolean = false,
     ): Result<SendMessageResult> {
         return withContext(Dispatchers.IO) {
             runCatching {
@@ -487,6 +544,7 @@ class SessionDetailController(
                         content = content,
                         clientMessageId = clientMessageId,
                         attachments = uploaded.map { it.toRemoteAttachmentRef() },
+                        queueWhenBusy = queueWhenBusy,
                     )
                 }
                 if (!response.ok) {
@@ -878,3 +936,23 @@ data class CommandExecutionResult(
     val message: String?,
     val result: Any?,
 )
+
+
+/** Map the transport DTO onto the queue the UI reads. */
+private fun RemoteSessionQueue.toSessionMessageQueue(): SessionMessageQueue {
+    return SessionMessageQueue(
+        items = items.map { item ->
+            QueuedMessage(
+                id = item.id,
+                sessionId = item.sessionId,
+                position = item.position,
+                status = item.status,
+                content = item.content,
+                clientMessageId = item.clientMessageId,
+                errorCode = item.errorCode,
+                errorMessage = item.errorMessage,
+            )
+        },
+        isLoaded = true,
+    )
+}

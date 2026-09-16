@@ -473,10 +473,14 @@ class SessionsApi(
         content: String,
         clientMessageId: String,
         attachments: List<RemoteAttachmentRef> = emptyList(),
+        queueWhenBusy: Boolean = false,
     ): RemoteRpcResponse {
         val body = JSONObject()
             .put("content", content)
             .put("clientMessageId", clientMessageId)
+        // Ask the server to keep the message when the runtime is mid-turn
+        // instead of rejecting it; the queue dispatches it as the turn ends.
+        if (queueWhenBusy) body.put("queueWhenBusy", true)
         if (attachments.isNotEmpty()) {
             body.put(
                 "attachments",
@@ -489,6 +493,47 @@ class SessionsApi(
             body = body,
             authorizationToken = authorizationToken,
         ).toRemoteRpcResponse()
+    }
+
+    fun getSessionQueue(
+        serverUrl: String,
+        authorizationToken: String,
+        sessionId: String,
+    ): RemoteSessionQueue {
+        return client.getJson(
+            serverUrl = serverUrl,
+            path = "/sessions/${sessionId.urlEncode()}/runtime/queue",
+            authorizationToken = authorizationToken,
+        ).toRemoteSessionQueue()
+    }
+
+    fun updateQueuedMessage(
+        serverUrl: String,
+        authorizationToken: String,
+        sessionId: String,
+        itemId: String,
+        content: String,
+    ): RemoteQueuedMessageResponse {
+        val body = JSONObject().put("content", content)
+        return client.patchJson(
+            serverUrl = serverUrl,
+            path = "/sessions/${sessionId.urlEncode()}/runtime/queue/${itemId.urlEncode()}",
+            body = body,
+            authorizationToken = authorizationToken,
+        ).toRemoteQueuedMessageResponse()
+    }
+
+    fun deleteQueuedMessage(
+        serverUrl: String,
+        authorizationToken: String,
+        sessionId: String,
+        itemId: String,
+    ): RemoteQueuedMessageResponse {
+        return client.deleteJson(
+            serverUrl = serverUrl,
+            path = "/sessions/${sessionId.urlEncode()}/runtime/queue/${itemId.urlEncode()}",
+            authorizationToken = authorizationToken,
+        ).toRemoteQueuedMessageResponse()
     }
 
     fun steerSession(
@@ -836,6 +881,34 @@ class SessionsApi(
             runtimeId = runtimeId,
             runtimeType = runtimeType,
             runtimeName = runtimeName,
+        )
+    }
+
+    private fun JSONObject.toRemoteSessionQueue(): RemoteSessionQueue {
+        return RemoteSessionQueue(
+            sessionId = optString("sessionId", ""),
+            items = optJSONArray("items").toObjectList { toRemoteQueuedMessage() },
+            serverTime = optNullableString("serverTime"),
+        )
+    }
+
+    private fun JSONObject.toRemoteQueuedMessageResponse(): RemoteQueuedMessageResponse {
+        return RemoteQueuedMessageResponse(
+            item = optJSONObject("item").toRemoteQueuedMessage(),
+            serverTime = optNullableString("serverTime"),
+        )
+    }
+
+    private fun JSONObject?.toRemoteQueuedMessage(): RemoteQueuedMessage {
+        return RemoteQueuedMessage(
+            id = this?.optString("id", "").orEmpty(),
+            sessionId = this?.optString("sessionId", "").orEmpty(),
+            position = this?.optInt("position", 0) ?: 0,
+            status = this?.optString("status", "queued").orEmpty().ifBlank { "queued" },
+            content = this?.optString("content", "").orEmpty(),
+            clientMessageId = this?.optNullableString("clientMessageId"),
+            errorCode = this?.optNullableString("errorCode"),
+            errorMessage = this?.optNullableString("errorMessage"),
         )
     }
 

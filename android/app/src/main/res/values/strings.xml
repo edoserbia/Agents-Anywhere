@@ -510,6 +510,14 @@
     <string name="session_tool_summary_items">%1$d activities</string>
     <string name="session_process_running">Working · %1$s</string>
     <string name="session_request_history_title">Requests</string>
+    <string name="session_queue_title">Queued · %1$d</string>
+    <string name="session_queue_edit">Edit queued message</string>
+    <string name="session_queue_delete">Remove queued message</string>
+    <string name="session_queue_save">Save</string>
+    <string name="session_queue_cancel">Cancel</string>
+    <string name="session_queue_update_failed">Could not update the queued message.</string>
+    <string name="session_queue_delete_failed">Could not remove the queued message.</string>
+    <string name="session_queue_failed_item">This queued message could not be sent.</string>
     <string name="session_request_history_empty">No requests in this session yet</string>
     <string name="session_request_history_untitled">(empty request)</string>
     <string name="session_request_history_index">Request %1$d</string>

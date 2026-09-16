@@ -110,6 +110,7 @@ import com.agentsanywhere.app.feature.sessiondetail.selectionOptions
 import com.agentsanywhere.app.feature.sessiondetail.sendUnavailableReason
 import com.agentsanywhere.app.feature.sessiondetail.sessionComposerEnabled
 import com.agentsanywhere.app.feature.sessiondetail.runtimeBlocksComposerSubmission
+import com.agentsanywhere.app.feature.sessiondetail.runtimeQueuesWhileRunning
 import com.agentsanywhere.app.feature.sessiondetail.validatedSelection
 import com.agentsanywhere.app.feature.sessions.mergeAuthoritativeSessionMetadata
 import com.agentsanywhere.app.feature.sessions.NewSessionCreateOutcome
@@ -647,6 +648,11 @@ fun SessionDetailScreen(
                         state = controller.mergeSnapshotWithLiveState(id, loaded, state)
                             .completeSnapshotLoad()
                         state.session?.let(onSessionChanged)
+                        // The queue is server state, so it is read alongside the
+                        // snapshot rather than derived from the timeline.
+                        controller.loadQueue(id).onSuccess { queueState ->
+                            if (sessionId == id) state = state.copy(queue = queueState)
+                        }
                     }
                 },
                 onFailure = {
@@ -793,7 +799,25 @@ fun SessionDetailScreen(
         val id = sessionId ?: return
         val runtimeId = state.session?.runtimeId ?: state.runtime.runtimeId
         val runtimeType = state.session?.runtimeType ?: state.runtime.runtimeType
-        val messageAction = state.capabilities.messageAction(runtimeId, state.effectiveRuntimeStatus(), runtimeType)
+        val currentRuntimeStatus = state.effectiveRuntimeStatus()
+        val canSendCapability = state.capabilities.isUsable(
+            SESSION_SEND_MESSAGE_CAPABILITY,
+            runtimeId,
+            runtimeType,
+        )
+        val canSteerCapability = state.capabilities.isUsable(
+            SESSION_STEER_CAPABILITY,
+            runtimeId,
+            runtimeType,
+        )
+        // A runtime that cannot steer (DSH) must queue the message instead of
+        // having the submission refused mid-turn.
+        val queueWhileRunning = runtimeQueuesWhileRunning(
+            currentRuntimeStatus,
+            canSteerCapability,
+            canSendCapability,
+        )
+        val messageAction = state.capabilities.messageAction(runtimeId, currentRuntimeStatus, runtimeType)
         if (messageAction == null) {
             showError(context.getString(R.string.session_steer_unavailable))
             return
@@ -853,6 +877,9 @@ fun SessionDetailScreen(
                     content = text,
                     clientMessageId = clientMessageId,
                     uploadedAttachments = uploadedAttachments,
+                    // A runtime that cannot steer (DSH) takes the message into
+                    // its queue instead of rejecting it mid-turn.
+                    queueWhenBusy = queueWhileRunning,
                 )
             }
             request
@@ -865,6 +892,12 @@ fun SessionDetailScreen(
                         status = "running",
                         attachments = optimisticAttachments.ifEmpty { result.attachments },
                     )
+                    // A queued message is not running yet; refresh so the row appears.
+                    if (queueWhileRunning) {
+                        controller.loadQueue(id).onSuccess { queueState ->
+                            state = state.copy(queue = queueState)
+                        }
+                    }
                 }
                 .onFailure { error ->
                     val rawMessage = error.message
@@ -1365,8 +1398,13 @@ fun SessionDetailScreen(
         openInteractions.filter { it.blocksSession(id) }
     }
     // A running session accepts follow-up instructions through session.steer.
-    // Only states without a valid message action should block the composer.
-    val runtimeBlocksSubmission = runtimeBlocksComposerSubmission(runtimeStatus, canUseSteer)
+    // When the runtime cannot steer (DSH), the message is queued instead, so a
+    // missing steer capability must not lock the composer out.
+    val runtimeBlocksSubmission = runtimeBlocksComposerSubmission(
+        runtimeStatus,
+        canUseSteer,
+        canUseSendMessage,
+    )
     val commandRequested = takeoverEnabled && draft.trimStart().startsWith('/') && attachments.isEmpty()
     val commandQuery = draft.trimStart().removePrefix("/").trim()
     val inputEnabled = if (isPreparedSession) {
@@ -1672,6 +1710,32 @@ fun SessionDetailScreen(
                             Column(
                                 modifier = Modifier.onSizeChanged { composerHeightPx = it.height },
                             ) {
+                                // Queued messages sit directly above the composer:
+                                // the reader sees that a message was accepted while
+                                // the current turn is still running.
+                                SessionQueuePanel(
+                                    queue = state.queue,
+                                    onUpdate = { item, content ->
+                                        val activeSessionId = sessionId ?: return@SessionQueuePanel
+                                        scope.launch {
+                                            controller.updateQueuedMessage(activeSessionId, item.id, content)
+                                                .onSuccess { queueState -> state = state.copy(queue = queueState) }
+                                                .onFailure {
+                                                    showError(context.getString(R.string.session_queue_update_failed))
+                                                }
+                                        }
+                                    },
+                                    onDelete = { item ->
+                                        val activeSessionId = sessionId ?: return@SessionQueuePanel
+                                        scope.launch {
+                                            controller.deleteQueuedMessage(activeSessionId, item.id)
+                                                .onSuccess { queueState -> state = state.copy(queue = queueState) }
+                                                .onFailure {
+                                                    showError(context.getString(R.string.session_queue_delete_failed))
+                                                }
+                                        }
+                                    },
+                                )
                                 BlockingRuntimeNoticeStack(
                                     notices = blockingNotices,
                                     respondingNoticeIds = state.respondingNoticeIds,

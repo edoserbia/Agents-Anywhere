@@ -22,8 +22,77 @@ class SendUnavailableReasonTest {
     }
 
     @Test
-    fun `running session blocks composer submission without steering`() {
-        assertTrue(runtimeBlocksComposerSubmission(SessionRuntimeStatus.Running, canSteer = false))
+    fun `running session with a queueable send keeps the composer open`() {
+        // DSH declares steerTurn=false but does support send_message: the message
+        // is queued and dispatched when the turn ends, so it must not be refused.
+        assertFalse(
+            runtimeBlocksComposerSubmission(
+                SessionRuntimeStatus.Running,
+                canSteer = false,
+                canSendMessage = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `running session blocks submission when it can neither steer nor queue`() {
+        assertTrue(
+            runtimeBlocksComposerSubmission(
+                SessionRuntimeStatus.Running,
+                canSteer = false,
+                canSendMessage = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `a running non-steerable runtime queues the message`() {
+        assertTrue(
+            runtimeQueuesWhileRunning(
+                SessionRuntimeStatus.Running,
+                canSteer = false,
+                canSendMessage = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `a running steerable runtime steers instead of queueing`() {
+        assertFalse(
+            runtimeQueuesWhileRunning(
+                SessionRuntimeStatus.Running,
+                canSteer = true,
+                canSendMessage = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `an idle session never queues`() {
+        assertFalse(
+            runtimeQueuesWhileRunning(
+                SessionRuntimeStatus.Idle,
+                canSteer = false,
+                canSendMessage = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `waiting states still block submission regardless of send support`() {
+        for (status in listOf(
+            SessionRuntimeStatus.Waiting,
+            SessionRuntimeStatus.Pending,
+            SessionRuntimeStatus.Stopping,
+            SessionRuntimeStatus.WaitingApproval,
+            SessionRuntimeStatus.Blocked,
+            SessionRuntimeStatus.Disconnected,
+        )) {
+            assertTrue(
+                "$status must block submission",
+                runtimeBlocksComposerSubmission(status, canSteer = true, canSendMessage = true),
+            )
+        }
     }
 
     @Test

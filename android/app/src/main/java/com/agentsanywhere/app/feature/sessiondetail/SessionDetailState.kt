@@ -20,6 +20,7 @@ data class SessionDetailState(
     val selectionUpdating: Boolean = false,
     val commandExecuting: Boolean = false,
     val respondingNoticeIds: Set<String> = emptySet(),
+    val queue: SessionMessageQueue = SessionMessageQueue(),
 ) {
     val session: AgentSession?
         get() = meta.session
@@ -113,3 +114,37 @@ internal fun SessionDetailState.failSnapshotLoad(message: String?): SessionDetai
     capabilities = capabilities.copy(isLoading = false, errorMessage = capabilities.errorMessage ?: message),
     notices = notices.copy(isLoading = false, errorMessage = notices.errorMessage ?: message),
 )
+
+/**
+ * Messages the server is holding until the session's current turn finishes.
+ *
+ * The queue exists because a runtime can only run one turn at a time. A message
+ * sent while one is running is kept here and dispatched automatically, instead
+ * of being refused — which is what used to leave the composer dead on runtimes
+ * that cannot steer, such as DSH.
+ */
+data class SessionMessageQueue(
+    val items: List<QueuedMessage> = emptyList(),
+    val isLoaded: Boolean = false,
+    val errorMessage: String? = null,
+) {
+    /** Items still waiting; only these can be edited or removed. */
+    val pending: List<QueuedMessage>
+        get() = items.filter(QueuedMessage::pending)
+
+    val isEmpty: Boolean get() = items.isEmpty()
+}
+
+data class QueuedMessage(
+    val id: String,
+    val sessionId: String,
+    val position: Int,
+    val status: String,
+    val content: String,
+    val clientMessageId: String? = null,
+    val errorCode: String? = null,
+    val errorMessage: String? = null,
+) {
+    val pending: Boolean get() = status == "queued"
+    val failed: Boolean get() = status == "failed"
+}

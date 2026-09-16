@@ -182,3 +182,33 @@ private fun JSONObject.catalogItemDisabledReason(metadata: Map<String, Any?>): S
     return optNullableString("disabledReason")?.takeIf(String::isNotBlank)
         ?: (metadata["disabledReason"] as? String)?.takeIf(String::isNotBlank)
 }
+
+/**
+ * A message the server is holding until the session's current turn finishes.
+ *
+ * Mirrors the server's `QueuedMessageView`: `status` is `queued` while it waits,
+ * and only `queued` items can still be edited or removed.
+ */
+data class RemoteQueuedMessage(
+    val id: String,
+    val sessionId: String,
+    val position: Int,
+    val status: String,
+    val content: String,
+    val clientMessageId: String?,
+    val errorCode: String?,
+    val errorMessage: String?,
+) {
+    val pending: Boolean get() = status == "queued"
+}
+
+data class RemoteSessionQueue(
+    val sessionId: String,
+    val items: List<RemoteQueuedMessage>,
+    val serverTime: String?,
+)
+
+data class RemoteQueuedMessageResponse(
+    val item: RemoteQueuedMessage,
+    val serverTime: String?,
+)

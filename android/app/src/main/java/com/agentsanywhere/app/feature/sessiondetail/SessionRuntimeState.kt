@@ -540,9 +540,19 @@ internal fun sessionComposerEnabled(
     canUseCommands: Boolean,
 ): Boolean = takeoverEnabled && capabilityFactsFresh && (canSendMessage || canSteer || canUseCommands)
 
+/**
+ * Whether the composer must refuse a submission outright.
+ *
+ * A running runtime that supports steering takes the message mid-turn. A
+ * running runtime that cannot steer (DSH declares `steerTurn: false`) still
+ * accepts a message — the message is queued and sent when the turn ends — so a
+ * missing steer capability must not lock the composer. Only runtimes that can
+ * neither steer nor accept a queued message are refused while running.
+ */
 internal fun runtimeBlocksComposerSubmission(
     status: SessionRuntimeStatus,
     canSteer: Boolean,
+    canSendMessage: Boolean = canSteer,
 ): Boolean = when (status) {
     SessionRuntimeStatus.Waiting,
     SessionRuntimeStatus.Pending,
@@ -550,9 +560,19 @@ internal fun runtimeBlocksComposerSubmission(
     SessionRuntimeStatus.WaitingApproval,
     SessionRuntimeStatus.Blocked,
     SessionRuntimeStatus.Disconnected -> true
-    SessionRuntimeStatus.Running -> !canSteer
+    SessionRuntimeStatus.Running -> !canSteer && !canSendMessage
     else -> false
 }
+
+/**
+ * Whether a submission made while the runtime is busy must be queued rather
+ * than steered into the running turn.
+ */
+internal fun runtimeQueuesWhileRunning(
+    status: SessionRuntimeStatus,
+    canSteer: Boolean,
+    canSendMessage: Boolean,
+): Boolean = status == SessionRuntimeStatus.Running && !canSteer && canSendMessage
 
 /**
  * Why the composer cannot send, as reported by the server.
