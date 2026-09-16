@@ -16,10 +16,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-REMOTE="${AA_REMOTE:-aa-server}"
+# closex.cc is the production host. The previous host (124.220.147.199) is kept
+# only as a rollback target; override AA_REMOTE to publish there.
+REMOTE="${AA_REMOTE:-aa-new}"
 DOWNLOAD_DIR="${AA_DOWNLOAD_DIR:-/opt/aa-downloads}"
-SERVER_URL="${AA_SERVER_URL:-http://124.220.147.199:4000}"
-PAGE_URL="${AA_PAGE_URL:-http://124.220.147.199:4001}"
+SERVER_URL="${AA_SERVER_URL:-https://closex.cc}"
+PAGE_URL="${AA_PAGE_URL:-http://closex.cc:4001}"
 
 VERSION="${1:-}"
 SKIP_BUILD=0
@@ -78,7 +80,7 @@ edits = [
     ("android/app/build.gradle.kts",
      r'versionName = "[0-9.]+"', f'versionName = "{version}"'),
     ("android/app/src/main/java/com/agentsanywhere/app/config/AppConfig.kt",
-     r'agents-anywhere-[0-9.]+-release\.apk', f'agents-anywhere-{version}-release.apk'),
+     r'agents-anywhere-[0-9.]+-debug\.apk', f'agents-anywhere-{version}-debug.apk'),
 ]
 for path, pattern, replacement in edits:
     text = io.open(path, encoding="utf-8").read()
