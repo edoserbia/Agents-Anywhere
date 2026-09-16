@@ -98,6 +98,7 @@ export function SessionComposer({
     content: string,
     attachments: AttachedFile[],
     selections: { model?: string; permission?: string },
+    options?: { queueWhenBusy?: boolean },
   ) => Promise<boolean>
   onInterrupt: () => void
   onCommand: (command: string, options: { args: string[]; raw: string }) => void
@@ -127,17 +128,22 @@ export function SessionComposer({
   const isDisconnected = runtimeStatus === "disconnected"
   const sourceUnavailable = session.archived
   const connectorOnline = session.connectorStatus === "online"
+  const canUseSendMessage = capabilityIsUsable(effectiveCapabilities, CAPABILITY.sendMessage, runtimeScope)
+  const canUseSteer = capabilityIsUsable(effectiveCapabilities, CAPABILITY.steer, runtimeScope)
+  // A running runtime that cannot steer (DSH) still accepts a message: the
+  // server queues it and sends it when the turn ends. Treating "running and
+  // cannot steer" as "cannot type" is what used to lock the composer for the
+  // whole run, so a running session stays editable when it can send at all.
+  const queuesWhileRunning = isRunning && !canUseSteer && canUseSendMessage
   const acceptsUserInput =
     connectorOnline &&
     !sourceUnavailable &&
     !isDisconnected &&
     !isWaiting &&
-    !isRunning &&
+    (!isRunning || queuesWhileRunning) &&
     !isStopping &&
     !isWaitingApproval &&
     !isBlocked
-  const canUseSendMessage = capabilityIsUsable(effectiveCapabilities, CAPABILITY.sendMessage, runtimeScope)
-  const canUseSteer = capabilityIsUsable(effectiveCapabilities, CAPABILITY.steer, runtimeScope)
   const canUseInterrupt = capabilityIsUsable(effectiveCapabilities, CAPABILITY.interrupt, runtimeScope)
   const interruptCapability = findCapability(effectiveCapabilities, CAPABILITY.interrupt, runtimeScope)
   const canUseModelCatalog = capabilityIsUsable(effectiveCapabilities, CAPABILITY.modelCatalog, runtimeScope)
@@ -313,8 +319,10 @@ export function SessionComposer({
           ? tSession("pendingPlaceholder")
           : isStopping
             ? tSession("busyPlaceholder")
-            : isRunning && !canUseSteer
-              ? tSession("busyPlaceholder")
+            : queuesWhileRunning
+              ? tSession("queuedPlaceholder")
+              : isRunning && !canUseSteer
+                ? tSession("busyPlaceholder")
             : isWaitingApproval || isBlocked
               ? tSession("waitingApprovalPlaceholder")
               : isError
@@ -358,10 +366,16 @@ export function SessionComposer({
     const files = attachments
     updateValue("")
     clear({ revokePreviews: false })
-    const sent = await onSend(text, files, {
-      ...(selectedModelSelection ? { model: selectedModelSelection } : {}),
-      ...(selectedPermissionSelection ? { permission: selectedPermissionSelection } : {}),
-    })
+    const sent = await onSend(
+      text,
+      files,
+      {
+        ...(selectedModelSelection ? { model: selectedModelSelection } : {}),
+        ...(selectedPermissionSelection ? { permission: selectedPermissionSelection } : {}),
+      },
+      // Tell the server to hold the message rather than reject it mid-turn.
+      { queueWhenBusy: queuesWhileRunning },
+    )
     if (!sent && valueRef.current === "") {
       updateValue(text)
     }
