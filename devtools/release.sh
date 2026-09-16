@@ -51,6 +51,17 @@ echo "==> releasing $CURRENT -> $VERSION"
 current_code="$(grep -oE 'versionCode = [0-9]+' "$GRADLE" | grep -oE '[0-9]+')"
 next_code=$((current_code + 1))
 
+if [[ "$SKIP_BUILD" -eq 1 ]]; then
+  # Publishing an already-built release must not move the version again: running
+  # the publish step twice would keep inflating versionCode and leave the source
+  # disagreeing with the APK that was actually shipped.
+  if [[ "$CURRENT" != "$VERSION" ]]; then
+    echo "--no-build cannot publish $VERSION while the tree is at $CURRENT" >&2
+    echo "run without --no-build to bump and build it first" >&2
+    exit 1
+  fi
+  echo "==> publish only: tree stays at $VERSION (versionCode $current_code)"
+else
 echo "==> bumping version in all five locations"
 python3 - "$VERSION" "$current_code" "$next_code" <<'PY'
 import io, re, sys
@@ -77,6 +88,7 @@ for path, pattern, replacement in edits:
     io.open(path, "w", encoding="utf-8").write(updated)
 print(f"   versionCode {current_code} -> {next_code}")
 PY
+fi
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
   echo "==> running the version parity test"
