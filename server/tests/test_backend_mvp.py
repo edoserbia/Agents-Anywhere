@@ -8919,6 +8919,41 @@ def test_session_ws_updates_effective_capabilities_after_takeover(tmp_path):
         assert capabilities["session.send_message"]["allowed"] is True
 
 
+def test_session_ws_does_not_publish_an_all_unsupported_capability_verdict(tmp_path):
+    """A capability publish that reached no runtime must not clear the composer.
+
+    When the connector cannot be reached, the persisted facts are used. If those
+    facts predate the session's runtime instance they carry nothing for it, so
+    every capability renders as unsupported. Publishing that verdict told a
+    client the runtime could do nothing at all, and because the set carries a
+    session timestamp as its revision it outranked the runtime's real facts from
+    then on — which left a healthy session unable to send.
+    """
+
+    client = make_client(tmp_path)
+    connector_id, _, session_id, headers = create_connector_and_session(client)
+    # Facts for a *different* runtime instance: nothing matches this session.
+    seed_runtime_capabilities(
+        client.app,
+        connector_id,
+        "dsh",
+        "runtime.config",
+    )
+    ticket = ws_ticket(client, session_id, headers)
+
+    with client.websocket_connect(f"/sessions/{session_id}/ws?ticket={ticket}") as ws:
+        assert ws.receive_json()["type"] == "session.subscribed"
+        response = client.post(f"/sessions/{session_id}/takeover", headers=headers)
+        assert response.status_code == 200, response.text
+
+        received = [ws.receive_json() for _ in range(2)]
+        # No capability verdict is published, so the client keeps what it has
+        # instead of being told the runtime supports nothing.
+        assert "runtime.capability.updated" not in {
+            event["type"] for event in received
+        }
+
+
 def test_session_ws_suppresses_repeated_capability_semantics_across_sequences(tmp_path):
     client = make_client(tmp_path)
     _, _, session_id, headers = create_connector_and_session(client)

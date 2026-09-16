@@ -97,3 +97,64 @@ class CapabilityLookupTest {
         assertEquals(RuntimeMessageAction.Send, set.messageAction("rti_live", SessionRuntimeStatus.Running, "dsh"))
     }
 }
+
+/**
+ * A capability set that reports nothing usable is the server's
+ * "could not reach the connector" placeholder, not a statement about the
+ * runtime. It must never outrank facts that name something usable, no matter
+ * what revision each carries — a placeholder revision is a session timestamp
+ * and is therefore always larger, which previously made the placeholder win
+ * forever and left the composer disabled on a healthy session.
+ */
+class CapabilityRevisionTest {
+    private fun cap(
+        supported: Boolean,
+        revision: Long,
+        runtimeId: String = "rti_live",
+    ): Pair<EffectiveCapabilities, EffectiveCapability> {
+        val c = EffectiveCapability(
+            capabilityId = "session.send_message",
+            version = "1",
+            scope = "session",
+            runtime = "dsh",
+            sessionId = "s1",
+            supported = supported,
+            available = supported,
+            allowed = true,
+            unavailableReason = if (supported) null else "runtime_capability_unsupported",
+            parameters = emptyMap(),
+            runtimeId = runtimeId,
+            runtimeType = "dsh",
+        )
+        return EffectiveCapabilities(
+            revision = revision,
+            capabilities = listOf(c),
+            connectorId = "c1",
+            serverTime = null,
+            isLoaded = true,
+        ) to c
+    }
+
+    @Test
+    fun `healthier facts are recognized as usable`() {
+        val (healthy, _) = cap(supported = true, revision = 100)
+        assertTrue(healthy.isUsable("session.send_message", "rti_live", "dsh"))
+    }
+
+    @Test
+    fun `the placeholder reports nothing usable`() {
+        val (placeholder, _) = cap(supported = false, revision = 1789534940969771L)
+        assertTrue(
+            "the placeholder must be detectable as 'nothing usable'",
+            placeholder.capabilities.none { it.usable },
+        )
+    }
+
+    @Test
+    fun `a placeholder revision dwarfs a real counter`() {
+        // This is why revision alone cannot decide which facts to keep.
+        val (_, _) = cap(supported = true, revision = 46_930)
+        val placeholderRevision = 1_789_534_940_969_771L
+        assertTrue(placeholderRevision > 46_930)
+    }
+}

@@ -173,7 +173,7 @@ async def _publish_session_protocol_update(
         session,
         None,
     )
-    runtime_capabilities = await read_session_capabilities_with_fallback(
+    runtime_capabilities, capabilities_are_live = await read_session_capabilities_with_origin(
         db,
         manager,
         session,
@@ -196,8 +196,19 @@ async def _publish_session_protocol_update(
             "nextSeq": next_seq,
             "session": session.model_dump(mode="json"),
             "runtimeState": runtime_state.model_dump(mode="json"),
-            "capabilitySet": effective_capabilities.model_dump(mode="json"),
         }
+        # A persisted fallback set can hold no facts for this session's runtime
+        # instance, in which case every capability renders as unsupported.
+        # Publishing that tells clients the runtime cannot do anything, and the
+        # revision it carries (a session timestamp) then outranks the runtime's
+        # real facts on the client, which is what left a healthy session's
+        # composer disabled. A fallback set that does name usable capabilities is
+        # still worth publishing, so only the empty-verdict case is skipped.
+        if capabilities_are_live or any(
+            capability.supported
+            for capability in effective_capabilities.capabilities
+        ):
+            envelope["capabilitySet"] = effective_capabilities.model_dump(mode="json")
         await broker.publish(session_id, envelope)
 
 
@@ -1696,13 +1707,42 @@ async def read_session_capabilities_with_fallback(
       snapshot and WebSocket publish paths.
     """
 
+    capabilities, _ = await read_session_capabilities_with_origin(
+        db,
+        manager,
+        session,
+        user_id,
+    )
+    return capabilities
+
+
+async def read_session_capabilities_with_origin(
+    db: Store,
+    manager: ConnectorRpcManager,
+    session: SessionView,
+    user_id: str | None,
+) -> tuple[ProtocolCapabilitySet, bool]:
+    """Read session capabilities and report whether they came from the runtime.
+
+    The second element is False when the connector could not be reached and the
+    persisted facts were used instead. Callers that publish capabilities to
+    clients need that distinction: persisted facts predate the session and carry
+    no facts for its runtime instance, so they render every capability as
+    unsupported. Publishing them replaces a runtime's real capabilities with
+    "this runtime cannot do anything", which is what left the composer disabled
+    on a healthy session.
+    """
+
     if await manager.is_online(session.connectorId):
         try:
-            return await read_session_capabilities_from_connector(manager, session)
+            return await read_session_capabilities_from_connector(manager, session), True
         except HTTPException:
             pass
-    return ProtocolCapabilitySet.model_validate(
-        await db.get_protocol_capabilities(session.connectorId, user_id=user_id)
+    return (
+        ProtocolCapabilitySet.model_validate(
+            await db.get_protocol_capabilities(session.connectorId, user_id=user_id)
+        ),
+        False,
     )
 
 

@@ -550,6 +550,7 @@
     <string name="session_waiting_approval_placeholder">等待你在下方处理交互…</string>
     <string name="session_pending_placeholder">等待运行时接收任务…</string>
     <string name="session_busy_placeholder">发送中断，或等待当前回合结束</string>
+    <string name="session_queued_placeholder">回复，运行中发送的消息会进入队列依次发送…</string>
     <string name="session_error_placeholder">这个会话有错误，发送后会重试</string>
     <string name="session_takeover">接管</string>
     <string name="session_attachment_camera">相机</string>

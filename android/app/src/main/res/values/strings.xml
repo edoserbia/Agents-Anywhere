@@ -551,6 +551,7 @@
     <string name="session_waiting_approval_placeholder">Waiting for your response below…</string>
     <string name="session_pending_placeholder">Waiting for the runtime to accept the task…</string>
     <string name="session_busy_placeholder">Send an interrupt or wait for the current turn to finish</string>
+    <string name="session_queued_placeholder">Reply — messages sent now are queued and sent in order…</string>
     <string name="session_error_placeholder">This session has an error; sending will retry</string>
     <string name="session_takeover">Takeover</string>
     <string name="session_attachment_camera">Camera</string>

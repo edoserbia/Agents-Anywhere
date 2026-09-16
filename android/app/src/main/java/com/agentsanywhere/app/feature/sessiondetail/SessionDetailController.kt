@@ -151,6 +151,51 @@ class SessionDetailController(
         return next
     }
 
+    /**
+     * Re-read the session's capability facts and apply them.
+     *
+     * Returns the updated state, or null when the read failed or produced
+     * nothing newer. Used to recover from a capability read that happened while
+     * the connector was not ready: those facts report the runtime as unable to
+     * send, which would otherwise leave the composer disabled for the whole
+     * visit even though the runtime supports sending.
+     */
+    suspend fun refreshCapabilities(
+        sessionId: String,
+        current: SessionDetailState,
+    ): SessionDetailState? {
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val auth = authSession()
+                val response = sessionsApi.getSessionRuntimeCapabilities(
+                    auth.serverUrl,
+                    auth.accessToken,
+                    sessionId,
+                )
+                val observed = response.capabilitySet.toEffectiveCapabilities(
+                    connectorId = response.connectorId,
+                    serverTime = response.serverTime,
+                )
+                // Only accept facts that actually say something is usable, so a
+                // failing read cannot make the state worse.
+                if (observed.capabilities.none { it.usable }) return@runCatching null
+                // The revision guard exists to stop an older read from undoing a
+                // newer one, but a state that reports nothing usable while the
+                // runtime reports otherwise is not "newer" in any useful sense:
+                // it is the persisted-fact placeholder the server publishes when
+                // it cannot reach the connector. Accepting the healthier facts is
+                // a strict improvement, so the guard is bypassed for it.
+                if (current.capabilities.capabilities.none { it.usable }) {
+                    current.copy(
+                        capabilities = observed.copy(isLoading = false, errorMessage = null),
+                    )
+                } else {
+                    current.applyCapabilitiesObservation(observed)
+                }
+            }.getOrNull()
+        }
+    }
+
     suspend fun refreshDomains(
         sessionId: String,
         devices: List<AgentDevice>,

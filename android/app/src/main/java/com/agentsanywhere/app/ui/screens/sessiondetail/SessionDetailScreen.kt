@@ -1407,6 +1407,31 @@ fun SessionDetailScreen(
     )
     val commandRequested = takeoverEnabled && draft.trimStart().startsWith('/') && attachments.isEmpty()
     val commandQuery = draft.trimStart().removePrefix("/").trim()
+    val queueWhileRunning = runtimeQueuesWhileRunning(
+        runtimeStatus,
+        canUseSteer,
+        canUseSendMessage,
+    )
+    // The capability facts are read once per entry. When they say the runtime
+    // cannot send but the connector was simply not ready at that moment, the
+    // composer would stay dead for the whole visit — the session is otherwise
+    // healthy and the runtime does support sending. Re-read once whenever the
+    // composer is about to be disabled for that reason, so a transient read
+    // failure heals itself instead of requiring the reader to leave and return.
+    val capabilitiesLookWrong =
+        !isPreparedSession &&
+        takeoverEnabled &&
+        connectorOnline &&
+        capabilityFactsFresh &&
+        !canUseSendMessage &&
+        !canUseSteer
+    LaunchedEffect(sessionId, capabilitiesLookWrong, state.capabilities.revision) {
+        val activeSessionId = sessionId ?: return@LaunchedEffect
+        if (!capabilitiesLookWrong) return@LaunchedEffect
+        controller.refreshCapabilities(activeSessionId, state)?.let { healed ->
+            if (sessionId == activeSessionId) state = healed
+        }
+    }
     val inputEnabled = if (isPreparedSession) {
         true
     } else {
@@ -1586,6 +1611,10 @@ fun SessionDetailScreen(
         runtimeStatus == SessionRuntimeStatus.Unknown -> stringResource(R.string.session_runtime_state_unknown)
         runtimeStatus in setOf(SessionRuntimeStatus.Waiting, SessionRuntimeStatus.Pending) ->
             stringResource(R.string.session_pending_placeholder)
+        // A running runtime that cannot steer queues the message instead, so the
+        // "send an interrupt or wait" text would misdescribe a usable composer.
+        runtimeStatus == SessionRuntimeStatus.Running && queueWhileRunning ->
+            stringResource(R.string.session_queued_placeholder)
         runtimeStatus in setOf(SessionRuntimeStatus.Running, SessionRuntimeStatus.Stopping) ->
             stringResource(R.string.session_busy_placeholder)
         runtimeStatus in setOf(SessionRuntimeStatus.WaitingApproval, SessionRuntimeStatus.Blocked) ->
