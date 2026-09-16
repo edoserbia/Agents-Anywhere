@@ -18,17 +18,24 @@ class TimelineTimestampTest {
     private val utc = ZoneId.of("UTC")
 
     @Test
-    fun `formats an instant as a bracketed date and time`() {
+    fun `formats an instant as a bracketed month, day and time`() {
         assertEquals(
-            "[2026-09-16 14:05:09]",
+            "[09-16 14:05]",
             formatTimelineTimestamp("2026-09-16T14:05:09Z", utc),
         )
     }
 
     @Test
+    fun `omits seconds and the year`() {
+        val formatted = formatTimelineTimestamp("2026-09-16T14:05:09Z", utc)
+        assertTrue("the year must not appear", formatted?.contains("2026") != true)
+        assertEquals("only hours and minutes", 2, formatted!!.removePrefix("[").removeSuffix("]").split(":").size)
+    }
+
+    @Test
     fun `pads every field to a fixed width`() {
         assertEquals(
-            "[2026-01-02 03:04:05]",
+            "[01-02 03:04]",
             formatTimelineTimestamp("2026-01-02T03:04:05Z", utc),
         )
     }
@@ -37,7 +44,7 @@ class TimelineTimestampTest {
     fun `renders the instant in the supplied zone`() {
         // 14:05 UTC is 22:05 in Beijing, which is what a reader there expects.
         assertEquals(
-            "[2026-09-16 22:05:09]",
+            "[09-16 22:05]",
             formatTimelineTimestamp("2026-09-16T14:05:09Z", ZoneId.of("Asia/Shanghai")),
         )
     }
@@ -61,5 +68,7 @@ class TimelineTimestampTest {
         val second = formatTimelineTimestamp("2026-09-16T17:30:00Z", utc)
         assertTrue(first != null && second != null)
         assertEquals(first!!.length, second!!.length)
+        // Short enough to sit above a row without dominating it.
+        assertTrue("stamp is too long: $first", first.length <= 16)
     }
 }

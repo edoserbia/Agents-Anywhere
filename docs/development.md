@@ -109,7 +109,7 @@ yarn dist:win   # 在 Windows 构建 x64 NSIS 安装包
 
 ### 时间戳
 
-每个条目显示它被服务端首次看到的时间，格式 `[YYYY-MM-DD HH:mm:ss]`，读者本地时区：
+每个条目显示它被服务端首次看到的时间，格式 `[MM-DD HH:mm]`，读者本地时区：
 
 - Desktop：`desktop-workbench/renderer/src/components/session/timeline-timestamp.ts`。
 - Android：`android/app/src/main/java/com/agentsanywhere/app/feature/sessiondetail/TimelineTimestamp.kt`。

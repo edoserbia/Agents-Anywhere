@@ -11,14 +11,16 @@ import java.time.format.DateTimeFormatter
  * lets a reader tell when a reply or an action began, which is otherwise
  * impossible to reconstruct from a transcript that can span hours.
  *
- * The value renders as `[YYYY-MM-DD HH:mm:ss]` in the device's own timezone, in
- * the same bracketed form the timeline uses for other metadata.
+ * The value renders as `[MM-DD HH:mm]` in the device's own timezone, in the same
+ * bracketed form the timeline uses for other metadata. Seconds are omitted
+ * because they are never the interesting part of a transcript reading, and the
+ * year is omitted so the stamp stays short next to each row.
  */
 private val timelineTimestampFormatter: DateTimeFormatter =
-    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+    DateTimeFormatter.ofPattern("MM-dd HH:mm")
 
 /**
- * Format an ISO-8601 instant as `[YYYY-MM-DD HH:mm:ss]`, or null when unusable.
+ * Format an ISO-8601 instant as `[MM-DD HH:mm]`, or null when unusable.
  *
  * The fields are assembled from a formatter rather than a locale-aware style so
  * the numeric form stays stable regardless of device language: a reader

@@ -5,11 +5,13 @@
  * lets a reader tell when a reply or an action began, which is otherwise
  * impossible to reconstruct from a transcript that can span hours.
  *
- * The value is rendered as `[YYYY-MM-DD HH:mm:ss]` in the reader's own timezone,
- * matching the bracketed form the timeline uses for other metadata.
+ * The value is rendered as `[MM-DD HH:mm]` in the reader's own timezone,
+ * matching the bracketed form the timeline uses for other metadata. Seconds are
+ * omitted because they are never the interesting part of a transcript reading,
+ * and the year is omitted so the stamp stays short next to each row.
  */
 
-/** Format an ISO timestamp as `[YYYY-MM-DD HH:mm:ss]`, or null when unusable. */
+/** Format an ISO timestamp as `[MM-DD HH:mm]`, or null when unusable. */
 export function formatTimelineTimestamp(value: string | null | undefined): string | null {
   if (!value) return null
   const parsed = new Date(value)
@@ -28,7 +30,7 @@ export function formatTimelineTimestamp(value: string | null | undefined): strin
 export function localDateTime(date: Date): string {
   const pad = (value: number) => String(value).padStart(2, "0")
   return (
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-    ` ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+    `${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    ` ${pad(date.getHours())}:${pad(date.getMinutes())}`
   )
 }
