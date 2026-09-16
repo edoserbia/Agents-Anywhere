@@ -1,7 +1,9 @@
 package com.agentsanywhere.app.feature.sessiondetail
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -14,6 +16,20 @@ import org.junit.Test
  * that each of those situations must produce.
  */
 class SendUnavailableReasonTest {
+    @Test
+    fun `running session allows composer submission when steering is usable`() {
+        assertFalse(runtimeBlocksComposerSubmission(SessionRuntimeStatus.Running, canSteer = true))
+    }
+
+    @Test
+    fun `running session blocks composer submission without steering`() {
+        assertTrue(runtimeBlocksComposerSubmission(SessionRuntimeStatus.Running, canSteer = false))
+    }
+
+    @Test
+    fun `idle session remains available for normal send`() {
+        assertFalse(runtimeBlocksComposerSubmission(SessionRuntimeStatus.Idle, canSteer = false))
+    }
 
     private fun capability(
         id: String,

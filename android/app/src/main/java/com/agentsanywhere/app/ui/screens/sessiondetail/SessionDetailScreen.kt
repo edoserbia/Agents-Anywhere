@@ -109,6 +109,7 @@ import com.agentsanywhere.app.feature.sessiondetail.SESSION_STEER_CAPABILITY
 import com.agentsanywhere.app.feature.sessiondetail.selectionOptions
 import com.agentsanywhere.app.feature.sessiondetail.sendUnavailableReason
 import com.agentsanywhere.app.feature.sessiondetail.sessionComposerEnabled
+import com.agentsanywhere.app.feature.sessiondetail.runtimeBlocksComposerSubmission
 import com.agentsanywhere.app.feature.sessiondetail.validatedSelection
 import com.agentsanywhere.app.feature.sessions.mergeAuthoritativeSessionMetadata
 import com.agentsanywhere.app.feature.sessions.NewSessionCreateOutcome
@@ -1363,15 +1364,9 @@ fun SessionDetailScreen(
         val id = sessionId.orEmpty()
         openInteractions.filter { it.blocksSession(id) }
     }
-    val runtimeBlocksSubmission = runtimeStatus in setOf(
-        SessionRuntimeStatus.Waiting,
-        SessionRuntimeStatus.Pending,
-        SessionRuntimeStatus.Running,
-        SessionRuntimeStatus.Stopping,
-        SessionRuntimeStatus.WaitingApproval,
-        SessionRuntimeStatus.Blocked,
-        SessionRuntimeStatus.Disconnected,
-    )
+    // A running session accepts follow-up instructions through session.steer.
+    // Only states without a valid message action should block the composer.
+    val runtimeBlocksSubmission = runtimeBlocksComposerSubmission(runtimeStatus, canUseSteer)
     val commandRequested = takeoverEnabled && draft.trimStart().startsWith('/') && attachments.isEmpty()
     val commandQuery = draft.trimStart().removePrefix("/").trim()
     val inputEnabled = if (isPreparedSession) {
@@ -2354,4 +2349,3 @@ private fun sessionSendUnavailableMessage(reason: String?, takeoverEnabled: Bool
         else -> stringResource(R.string.session_send_unavailable)
     }
 }
-

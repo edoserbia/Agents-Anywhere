@@ -34,7 +34,7 @@ Install the desktop client on your work machine, then access it from your phone,
 | **macOS** | [Universal DMG · 2.0.0](https://modelscope.cn/models/t4wefan/deepseek-harness-desktop/resolve/master/Agents%20Anywhere-2.0.0-universal.dmg) |
 | **Windows** | [x64 installer · 2.0.0](https://modelscope.cn/models/t4wefan/deepseek-harness-desktop/resolve/master/Agents%20Anywhere%20Setup%202.0.0-x64.exe) |
 | **iOS / iPadOS** | [Join TestFlight](https://testflight.apple.com/join/GKGaut99) |
-| **Android** | [APK · 2.0.0](https://modelscope.cn/models/t4wefan/deepseek-harness-desktop/resolve/master/agents-anywhere-2.0.0-release.apk) |
+| **Android** | [APK · 2.0.3](https://modelscope.cn/models/t4wefan/deepseek-harness-desktop/resolve/master/agents-anywhere-2.0.3-release.apk) |
 | **Web** | [Open Web](https://web.agents-anywhere.com) |
 | **Linux / headless** | [Run the Connector CLI](connector/README.md) |
 

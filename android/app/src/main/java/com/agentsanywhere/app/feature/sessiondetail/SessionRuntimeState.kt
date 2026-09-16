@@ -540,6 +540,20 @@ internal fun sessionComposerEnabled(
     canUseCommands: Boolean,
 ): Boolean = takeoverEnabled && capabilityFactsFresh && (canSendMessage || canSteer || canUseCommands)
 
+internal fun runtimeBlocksComposerSubmission(
+    status: SessionRuntimeStatus,
+    canSteer: Boolean,
+): Boolean = when (status) {
+    SessionRuntimeStatus.Waiting,
+    SessionRuntimeStatus.Pending,
+    SessionRuntimeStatus.Stopping,
+    SessionRuntimeStatus.WaitingApproval,
+    SessionRuntimeStatus.Blocked,
+    SessionRuntimeStatus.Disconnected -> true
+    SessionRuntimeStatus.Running -> !canSteer
+    else -> false
+}
+
 /**
  * Why the composer cannot send, as reported by the server.
  *
