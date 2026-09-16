@@ -46,6 +46,8 @@ data class TimelineMessage(
     val fileChanges: List<TimelineFileChange> = emptyList(),
     val agentCall: TimelineAgentCall? = null,
     val rawContent: String = "",
+    /** When the server first saw this item, as an ISO-8601 instant. */
+    val createdAt: String = "",
     val orderSeq: Int = 0,
     val revision: Int = 1,
     val updatedSeq: Int = 0,

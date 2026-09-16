@@ -86,6 +86,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import com.agentsanywhere.app.R
 import com.agentsanywhere.app.feature.sessiondetail.MessageAuthor
+import com.agentsanywhere.app.feature.sessiondetail.formatTimelineTimestamp
 import com.agentsanywhere.app.feature.sessiondetail.SessionDetailController
 import com.agentsanywhere.app.feature.sessiondetail.RuntimeNotice
 import com.agentsanywhere.app.feature.sessiondetail.RuntimeNoticeAction
@@ -1414,6 +1415,17 @@ private fun TimelineMessageRow(
     noticeResponseErrors: Map<String, String> = emptyMap(),
     onRespondNotice: (RuntimeNotice, RuntimeNoticeAction, Map<String, Any?>?) -> Unit = { _, _, _ -> },
 ) {
+    // Shown above the row so a reader can tell when this step began, including
+    // when the row is a collapsed group.
+    formatTimelineTimestamp(message.createdAt)?.let { stamp ->
+        Text(
+            text = stamp,
+            color = LocalAAColors.current.muted,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 2.dp),
+        )
+    }
     when (message.kind) {
         TimelineMessageKind.Reasoning -> ReasoningSection(
             message = message,
