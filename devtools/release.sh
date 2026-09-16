@@ -185,14 +185,24 @@ def to_list(body: str) -> str:
     return "\n".join(items)
 
 
-# Prefer the user-facing bullets; fall back to the whole changes section's
-# sub-headings when the notes describe changes as prose.
-changes = to_list(section("产品变化"))
-if not changes:
-    headings = re.findall(r"^### (.+)$", section("产品变化"), re.M)
-    changes = "\n".join(
-        f"      <li><b>{html.escape(h)}</b></li>" for h in headings
-    )
+# Lift the reader-facing bullets. Notes are written for maintainers and do not
+# always use the same headings, so several are tried before falling back to the
+# sub-headings of whichever section describes the change.
+CHANGE_SECTIONS = ("产品变化", "服务端迁到新主机", "客户端变化", "本次变化")
+changes = ""
+for title in CHANGE_SECTIONS:
+    body = section(title)
+    if not body:
+        continue
+    changes = to_list(body)
+    if changes:
+        break
+    heading_items = re.findall(r"^### (.+)$", body, re.M)
+    if heading_items:
+        changes = "\n".join(
+            f"      <li><b>{html.escape(h)}</b></li>" for h in heading_items
+        )
+        break
 html = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
