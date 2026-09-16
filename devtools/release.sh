@@ -131,9 +131,54 @@ EOF
 ssh "$REMOTE" "cd '$DOWNLOAD_DIR' && shasum -a 256 -c SHA256SUMS.txt"
 
 echo "==> updating the download page"
-python3 - "$VERSION" "$SERVER_URL" > /tmp/aa-index.html <<'PY'
+# The page's "what changed" section is generated from the release notes, so the
+# page cannot describe a release it has no notes for. A missing notes file fails
+# the release rather than publishing a page with no explanation of the update.
+NOTES_FILE="docs/releases/${VERSION}.md"
+if [[ ! -f "$NOTES_FILE" ]]; then
+  echo "missing release notes: $NOTES_FILE" >&2
+  echo "write them first; the download page is generated from them" >&2
+  exit 1
+fi
+python3 - "$VERSION" "$SERVER_URL" "$NOTES_FILE" > /tmp/aa-index.html <<'PY'
+import html
+import re
 import sys
-version, server_url = sys.argv[1], sys.argv[2]
+
+version, server_url, notes_path = sys.argv[1], sys.argv[2], sys.argv[3]
+notes = open(notes_path, encoding="utf-8").read()
+
+
+def section(title: str) -> str:
+    """Return the body of one `## <title>` section, without the heading."""
+    match = re.search(
+        rf"^## {re.escape(title)}\s*$(.*?)(?=^## |\Z)", notes, re.S | re.M
+    )
+    return match.group(1).strip() if match else ""
+
+
+def to_list(body: str) -> str:
+    """Render the section's bullets, keeping bold and inline code."""
+    items = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line.startswith("- "):
+            continue
+        text = html.escape(line[2:].strip())
+        text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+        text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+        items.append(f"      <li>{text}</li>")
+    return "\n".join(items)
+
+
+# Prefer the user-facing bullets; fall back to the whole changes section's
+# sub-headings when the notes describe changes as prose.
+changes = to_list(section("产品变化"))
+if not changes:
+    headings = re.findall(r"^### (.+)$", section("产品变化"), re.M)
+    changes = "\n".join(
+        f"      <li><b>{html.escape(h)}</b></li>" for h in headings
+    )
 html = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -153,18 +198,29 @@ html = f"""<!doctype html>
           padding: .5rem 1rem; border-radius: 9px; font-size: .9rem; font-weight: 600; }}
   code {{ background: #f3f4f6; padding: .12rem .38rem; border-radius: 5px; font-size: .85em; }}
   .note {{ font-size: .85rem; color: #6b7280; }}
+  .fix {{ border-left: 3px solid #10b981; padding-left: .8rem; margin: 1.2rem 0; }}
+  .fix h3 {{ margin: 0 0 .3rem; font-size: .95rem; }}
+  .fix ul {{ margin: .3rem 0; padding-left: 1.2rem; font-size: .9rem; color: #4b5563; }}
   @media (prefers-color-scheme: dark) {{
     body {{ background: #0b0b0c; color: #f3f4f6; }}
     .card {{ border-color: #2a2a2e; }}
     .sub, .card p, .note {{ color: #9ca3af; }}
     a.btn {{ background: #f3f4f6; color: #111827; }}
     code {{ background: #1f1f23; }}
+    .fix ul {{ color: #9ca3af; }}
   }}
 </style>
 </head>
 <body>
   <h1>Agents Anywhere 客户端</h1>
   <p class="sub">版本 {version} · 服务端同步升级至 {version}</p>
+
+  <div class="fix">
+    <h3>{version} 更新</h3>
+    <ul>
+{changes}
+    </ul>
+  </div>
 
   <div class="card">
     <h2>macOS 桌面客户端（Universal）· {version}</h2>
