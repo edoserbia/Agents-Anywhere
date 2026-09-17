@@ -567,7 +567,9 @@
       "startConnection": "Start connection",
       "stepProgress": "Step {current} of {total}",
       "title": "Mobile connection",
-      "waitingForScan": "Waiting for phone to scan"
+      "waitingForScan": "Waiting for phone to scan",
+      "androidDownloadOption": "Android",
+      "iosDownloadOption": "iOS"
     },
     "device": {
       "sessionCount": "{count, plural, one {# session} other {# sessions}}",
@@ -756,7 +758,18 @@
       "unarchiveAllTitle": "Unarchive sessions?",
       "archiveAllDescription": "Archive all sessions in the current {name} view.",
       "unarchiveAllDescription": "Unarchive all sessions in the current {name} view.",
-      "bulkArchiveFailed": "Failed to update sessions."
+      "bulkArchiveFailed": "Failed to update sessions.",
+      "connect": "Connect",
+      "disconnect": "Disconnect",
+      "disconnecting": "Disconnecting…",
+      "reconnect": "Reconnect",
+      "disconnectSucceeded": "Device disconnected.",
+      "disconnectFailed": "Failed to disconnect the device.",
+      "desktopConnecting": "Connecting",
+      "desktopStart": "Start",
+      "disconnectTitle": "Disconnect this device?",
+      "localDisconnectDescription": "This device will go offline. You can reconnect it later from settings on this computer.",
+      "remoteDisconnectDescription": "The connection token for {name} will become invalid. To use this device again, open the Agents Anywhere desktop app on that device and reconnect it there; it cannot be restored from here."
     },
     "panels": {
       "files": {
@@ -1058,7 +1071,17 @@
       "queueCancel": "Cancel",
       "queueUpdateFailed": "Could not update the queued message.",
       "queueDeleteFailed": "Could not remove the queued message.",
-      "queueItemFailed": "This queued message could not be sent."
+      "queueItemFailed": "This queued message could not be sent.",
+      "requestHistory": {
+        "title": "Requests",
+        "close": "Close request history",
+        "empty": "No requests in this session yet",
+        "untitled": "(empty request)",
+        "open": "Show request history"
+      },
+      "processSummary": "Folded {count} process entries",
+      "processRunning": "Working · {count} entries",
+      "jumpToRequest": "Jump to this request"
     },
     "sessionStatus": {
       "idle": "Idle",
@@ -1182,7 +1205,21 @@
         "configureAndStartFailed": "Failed to configure and start the agent."
       },
       "quickAdd": "Quick add",
-      "skipAgents": "Skip for now"
+      "skipAgents": "Skip for now",
+      "platformTitle": "Add a device",
+      "platformDescription": "First choose the operating system of the device you want to connect.",
+      "platformMacos": "macOS",
+      "platformMacosDescription": "Install Desktop and sign in to come online",
+      "platformWindows": "Windows",
+      "platformWindowsDescription": "Install Desktop and sign in to come online",
+      "platformLinux": "Linux",
+      "platformLinuxDescription": "Use a terminal command or pair code",
+      "linuxMethodTitle": "Choose a pairing method",
+      "linuxMethodDescription": "Choose how to connect this Linux device to your account.",
+      "linuxTerminalTitle": "Pair with command line (Recommended)",
+      "linuxTerminalDescription": "Copy the command and run it in the Linux terminal.",
+      "linuxPairCodeTitle": "Pair with a code",
+      "linuxPairCodeDescription": "Generate a pair code on the target device, then return here to finish pairing."
     },
     "firstDevice": {
       "title": "Add your first device?",
