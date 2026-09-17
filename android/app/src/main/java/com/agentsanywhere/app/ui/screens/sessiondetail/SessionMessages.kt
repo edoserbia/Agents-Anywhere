@@ -742,20 +742,33 @@ private fun TimelineProcessBlock(
                 tint = if (failed) colors.errorIcon else muted,
                 modifier = Modifier.size(16.dp),
             )
-            Text(
-                text = if (active) {
-                    stringResource(R.string.session_process_running, toolRunSummary(block.messages))
-                } else {
-                    toolRunSummary(block.messages)
-                },
-                modifier = Modifier.weight(1f),
-                color = if (failed) colors.errorIcon else colors.ink,
-                fontSize = 13.sp,
-                fontWeight = TimelineActivityLabelWeight,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            // The folded row is all a reader sees once a turn finishes, so it
+            // carries the moment the work began; without it a collapsed turn has
+            // no time at all.
+            val startedAt = formatTimelineTimestamp(block.messages.firstOrNull()?.createdAt)
+            Column(modifier = Modifier.weight(1f)) {
+                if (startedAt != null) {
+                    Text(
+                        text = startedAt,
+                        color = muted,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+                Text(
+                    text = if (active) {
+                        stringResource(R.string.session_process_running, toolRunSummary(block.messages))
+                    } else {
+                        toolRunSummary(block.messages)
+                    },
+                    color = if (failed) colors.errorIcon else colors.ink,
+                    fontSize = 13.sp,
+                    fontWeight = TimelineActivityLabelWeight,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             if (active) {
                 WorkingSpinner(color = muted)
             }

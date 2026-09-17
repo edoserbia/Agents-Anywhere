@@ -70,6 +70,95 @@ class TimelineTurnsTest {
     }
 
     @Test
+    fun `intermediate replies fold away leaving only the turn's final reply`() {
+        // A runtime narrates as it works: reply, tools, reply, tools, conclusion.
+        // Only the conclusion is the answer, so everything before it folds.
+        val blocks = buildTimelineBlocks(
+            listOf(
+                single(user("u1")),
+                single(reply("a1")),
+                single(tool("t1")),
+                single(reply("a2")),
+                single(tool("t2")),
+                single(reply("a3")),
+            ),
+        )
+
+        assertEquals(
+            listOf("Entry", "Process", "Entry"),
+            blocks.map { it::class.simpleName },
+        )
+        assertEquals("u1", blocks[0].messages.single().id)
+        assertEquals("a3", blocks[2].messages.single().id)
+        // Intermediate replies fold in with the process, in order.
+        assertEquals(listOf("a1", "t1", "a2", "t2"), blocks[1].messages.map { it.id })
+    }
+
+    @Test
+    fun `while a turn runs the newest reply stays visible and earlier ones fold`() {
+        val first = buildTimelineBlocks(
+            listOf(single(user("u1")), single(reply("a1")), single(tool("t1"))),
+        )
+        assertEquals(
+            listOf("Entry", "Entry", "Process"),
+            first.map { it::class.simpleName },
+        )
+        assertEquals(listOf("t1"), first[2].messages.map { it.id })
+
+        // When the next update arrives, the previous one folds in behind it.
+        val second = buildTimelineBlocks(
+            listOf(single(user("u1")), single(reply("a1")), single(tool("t1")), single(reply("a2"))),
+        )
+        assertEquals(
+            listOf("Entry", "Process", "Entry"),
+            second.map { it::class.simpleName },
+        )
+        assertEquals(listOf("a1", "t1"), second[1].messages.map { it.id })
+        assertEquals("a2", second[2].messages.single().id)
+    }
+
+    @Test
+    fun `each turn keeps its own fold and its own conclusion`() {
+        val blocks = buildTimelineBlocks(
+            listOf(
+                single(user("u1")),
+                single(reply("a1")),
+                single(tool("t1")),
+                single(reply("a2")),
+                single(user("u2")),
+                single(reply("a3")),
+                single(tool("t2")),
+                single(reply("a4")),
+            ),
+        )
+
+        assertEquals(
+            listOf("Entry", "Process", "Entry", "Entry", "Process", "Entry"),
+            blocks.map { it::class.simpleName },
+        )
+        val processes = blocks.filterIsInstance<TimelineBlock.Process>()
+        assertEquals(listOf("a1", "t1"), processes[0].messages.map { it.id })
+        assertEquals(listOf("a3", "t2"), processes[1].messages.map { it.id })
+        assertEquals(
+            listOf("u1", "a2", "u2", "a4"),
+            blocks.filterIsInstance<TimelineBlock.Entry>().map { it.messages.single().id },
+        )
+    }
+
+    @Test
+    fun `a turn abandoned without a reply still separates from the next`() {
+        val blocks = buildTimelineBlocks(
+            listOf(single(user("u1")), single(tool("t1")), single(user("u2")), single(reply("a2"))),
+        )
+
+        assertEquals(
+            listOf("Entry", "Process", "Entry", "Entry"),
+            blocks.map { it::class.simpleName },
+        )
+        assertEquals(listOf("t1"), blocks[1].messages.map { it.id })
+    }
+
+    @Test
     fun `keeps a process block per turn so an old turn cannot absorb a new one`() {
         val blocks = buildTimelineBlocks(
             listOf(

@@ -60,6 +60,7 @@ import { createSessionEventBuffer } from "@/components/session/session-event-buf
 import { CAPABILITY, capabilityIsUsable } from "@/components/session/capabilities"
 import { SessionComposer, type AttachedFile } from "@/components/session/session-composer"
 import { SessionQueuePanel } from "@/components/session/session-queue-panel"
+import { formatTimelineTimestamp } from "@/components/session/timeline-timestamp"
 import {
   acceptSessionEventId,
   bufferedEventsAfterLiveCapabilityRead,
@@ -2391,6 +2392,9 @@ function TimelineProcessBlockEntry({
   const status = toolRunStatus(block.items)
   const active = timelineItemStatusIsActive(status)
   const title = toolRunSummary(block.items, tSession)
+  // The folded header is all a reader sees once a turn finishes, so it carries
+  // the moment the work began — otherwise a collapsed turn has no time at all.
+  const startedAt = formatTimelineTimestamp(block.items[0]?.createdAt)
 
   return (
     <Collapsible open={open} onOpenChange={onOpenChange} className="min-w-0 max-w-full overflow-hidden">
@@ -2403,7 +2407,17 @@ function TimelineProcessBlockEntry({
               data-slot="timeline-process-toggle"
               data-state={open ? "open" : "closed"}
             >
-              <ToolMarkerRowContent collapsible kind="tool" status={status} title={title} />
+              <div className="flex min-w-0 flex-col gap-0.5">
+                {startedAt ? (
+                  <span
+                    className="select-none text-[11px] font-medium tabular-nums text-muted-foreground/70"
+                    data-timeline-timestamp
+                  >
+                    {startedAt}
+                  </span>
+                ) : null}
+                <ToolMarkerRowContent collapsible kind="tool" status={status} title={title} />
+              </div>
             </button>
           </Marker>
         </CollapsibleTrigger>

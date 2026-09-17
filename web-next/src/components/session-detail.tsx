@@ -46,6 +46,12 @@ import {
   ToolMarkerRowContent,
 } from "@/components/session/session-tool-cards"
 import { timelineRunCounts } from "@/components/session/timeline-summary"
+import {
+  activeProcessBlockKey,
+  buildTimelineRenderBlocks,
+  type TimelineProcessBlock,
+} from "@/components/session/timeline-turns"
+import { formatTimelineTimestamp } from "@/components/session/timeline-timestamp"
 import { needsOlderTimelinePage } from "@/components/session/timeline-autofill"
 import { createTimelineScrollFollow } from "@/components/session/timeline-scroll-follow"
 import { createSessionEventBuffer } from "@/components/session/session-event-buffer"
@@ -363,6 +369,8 @@ export function SessionDetail({
   const [blockingInteractionStackHeight, setBlockingInteractionStackHeight] = React.useState(0)
   const [composerHeight, setComposerHeight] = React.useState(144)
   const [timelineGroupOpenByKey, setTimelineGroupOpenByKey] = React.useState<Record<string, boolean>>({})
+  // Explicit open/close choices for folded turn blocks, keyed by block key.
+  const [processOpenByKey, setProcessOpenByKey] = React.useState<Record<string, boolean>>({})
   const [timelineItemOpenById, setTimelineItemOpenById] = React.useState<Record<string, boolean>>({})
   const [composerDraftState, setComposerDraftState] = React.useState<ComposerDraftState>(() => ({
     sessionId,
@@ -579,6 +587,7 @@ export function SessionDetail({
 
   React.useEffect(() => {
     setTimelineGroupOpenByKey({})
+    setProcessOpenByKey({})
     setTimelineItemOpenById({})
     catalogFetchKeyRef.current = null
   }, [sessionId])
@@ -1595,6 +1604,24 @@ export function SessionDetail({
     () => groupTimelineItems((state?.items ?? []).filter(isVisibleTimelineItem), interactionTargetIds),
     [interactionTargetIds, state?.items],
   )
+  // Fold each turn's process (reasoning, tools, intermediate replies) so a turn
+  // reads as request -> one folded block -> its final answer, instead of walking
+  // the reader past every step the runtime narrated along the way.
+  const timelineBlocks = React.useMemo(
+    () => buildTimelineRenderBlocks(timelineGroups),
+    [timelineGroups],
+  )
+  const liveProcessKey = React.useMemo(
+    () => (turnInProgress ? activeProcessBlockKey(timelineBlocks) : null),
+    [timelineBlocks, turnInProgress],
+  )
+  const isProcessOpen = React.useCallback(
+    (key: string) => processOpenByKey[key] ?? key === liveProcessKey,
+    [liveProcessKey, processOpenByKey],
+  )
+  const handleProcessOpenChange = React.useCallback((key: string, open: boolean) => {
+    setProcessOpenByKey((current) => ({ ...current, [key]: open }))
+  }, [])
   const turnReviewDisplay = React.useMemo(() => {
     return buildTurnReviewDisplay(state?.session.id === sessionId ? state.items.filter(isVisibleTimelineItem) : [], {
       root: state?.session.cwd,
@@ -1681,7 +1708,28 @@ export function SessionDetail({
             blockingInteractionList.length === 0 ? (
               <p className="py-12 text-center text-sm text-muted-foreground">{tSession("noActivity")}</p>
             ) : null}
-            {timelineGroups.map((group) => {
+            {timelineBlocks.map((block) => {
+              if (block.kind === "process") {
+                return (
+                  <TimelineProcessBlockEntry
+                    key={block.key}
+                    block={block}
+                    token={token}
+                    session={session}
+                    interactionByTarget={interactionByTarget}
+                    resolvingNoticeId={resolvingNoticeId}
+                    resolvingActionId={resolvingActionId}
+                    open={isProcessOpen(block.key)}
+                    onOpenChange={(open) => handleProcessOpenChange(block.key, open)}
+                    groupOpenByKey={timelineGroupOpenByKey}
+                    itemOpenById={timelineItemOpenById}
+                    onGroupOpenChange={handleTimelineGroupOpenChange}
+                    onItemOpenChange={handleTimelineItemOpenChange}
+                    onRespondInteraction={handleRespondInteraction}
+                  />
+                )
+              }
+              const group = block.group
               const groupKey = timelineGroupKey(group)
               const turnAction = turnActionsByGroupKey.get(groupKey)
               const completedTurnReview = timelineGroupItems(group)
@@ -2462,6 +2510,100 @@ function AgentCallGroup({
 function toolRunStatus(items: TimelineItem[]): TimelineItem["status"] {
   if (items.some((item) => timelineItemStatusIsActive(item.status))) return "running"
   return "done"
+}
+
+function TimelineProcessBlockEntry({
+  block,
+  token,
+  session,
+  interactionByTarget,
+  resolvingNoticeId,
+  resolvingActionId,
+  open,
+  onOpenChange,
+  groupOpenByKey,
+  itemOpenById,
+  onGroupOpenChange,
+  onItemOpenChange,
+  onRespondInteraction,
+}: {
+  block: TimelineProcessBlock
+  token: string
+  session: SessionView
+  interactionByTarget: ReadonlyMap<string | null, Notice>
+  resolvingNoticeId: string | null
+  resolvingActionId: string | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  groupOpenByKey: Record<string, boolean>
+  itemOpenById: Record<string, boolean>
+  onGroupOpenChange: (key: string, open: boolean) => void
+  onItemOpenChange: (itemId: string, open: boolean) => void
+  onRespondInteraction: (noticeId: string, actionId: string, input?: Record<string, unknown>) => void
+}) {
+  const tSession = useTranslations("dashboard.session")
+  const status = toolRunStatus(block.items)
+  const active = timelineItemStatusIsActive(status)
+  const title = toolRunSummary(block.items, tSession)
+  // The folded header is all a reader sees once a turn finishes, so it carries
+  // the moment the work began — otherwise a collapsed turn has no time at all.
+  const startedAt = formatTimelineTimestamp(block.items[0]?.createdAt)
+
+  return (
+    <Collapsible open={open} onOpenChange={onOpenChange} className="min-w-0 max-w-full overflow-hidden">
+      <div className="flex min-w-0 max-w-full flex-col gap-2 overflow-hidden">
+        <CollapsibleTrigger asChild>
+          <Marker asChild className="w-full">
+            <button
+              type="button"
+              className="text-left"
+              data-slot="timeline-process-toggle"
+              data-state={open ? "open" : "closed"}
+            >
+              <div className="flex min-w-0 flex-col gap-0.5">
+                {startedAt ? (
+                  <span
+                    className="select-none text-[11px] font-medium tabular-nums text-muted-foreground/70"
+                    data-timeline-timestamp
+                  >
+                    {startedAt}
+                  </span>
+                ) : null}
+                <ToolMarkerRowContent collapsible kind="tool" status={status} title={title} />
+              </div>
+            </button>
+          </Marker>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="min-w-0 max-w-full overflow-hidden">
+          <div className="flex flex-col gap-3 border-l border-border/60 pl-3">
+            {block.groups.map((group) => (
+              <TimelineGroupEntry
+                key={timelineGroupKey(group)}
+                group={group}
+                token={token}
+                session={session}
+                interactionByTarget={interactionByTarget}
+                resolvingNoticeId={resolvingNoticeId}
+                resolvingActionId={resolvingActionId}
+                groupOpen={group.kind === "single" ? false : groupOpenByKey[group.key] ?? false}
+                itemOpenById={itemOpenById}
+                onGroupOpenChange={group.kind === "single"
+                  ? undefined
+                  : (nextOpen) => onGroupOpenChange(group.key, nextOpen)}
+                onItemOpenChange={onItemOpenChange}
+                onRespondInteraction={onRespondInteraction}
+              />
+            ))}
+          </div>
+        </CollapsibleContent>
+      </div>
+      {active ? (
+        <span className="sr-only" data-slot="timeline-process-active">
+          {tSession("processRunning", { count: block.items.length })}
+        </span>
+      ) : null}
+    </Collapsible>
+  )
 }
 
 function toolRunSummary(

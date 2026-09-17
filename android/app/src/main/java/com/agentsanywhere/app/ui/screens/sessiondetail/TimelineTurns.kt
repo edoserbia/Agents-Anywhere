@@ -40,10 +40,46 @@ internal fun TimelineMessage.isAgentReply(): Boolean =
     type == "message" && author != MessageAuthor.User
 
 /**
- * Split grouped items into visible requests/answers and the folded process
- * between them. Anything that is neither a request nor an answer is process.
+ * Split grouped items into the visible request and answer of each turn, with
+ * everything the runtime did in between folded into a single block.
+ *
+ * A turn is one user request and its outcome, but the runtime narrates as it
+ * goes: it emits a reply, runs tools, emits another reply, and so on. Treating
+ * every one of those replies as an answer splits a single turn into many
+ * process blocks and makes the reader scroll past intermediate commentary to
+ * reach the conclusion.
+ *
+ * So a turn renders as exactly three things: the request, one folded block
+ * holding all the process *and* every intermediate reply, and the turn's final
+ * reply. The final reply is the only message left outside the fold, because it
+ * is the answer the reader came for.
+ *
+ * The final reply is identified by looking ahead to the next user request (or
+ * the end of the list). While a turn is still running the newest reply stays
+ * visible as the current progress report, and the fold grows behind it.
  */
 internal fun buildTimelineBlocks(items: List<TimelineRenderItem>): List<TimelineBlock> {
+    // Which item holds each turn's final reply. Computed up front because the
+    // answer is only knowable from what follows it.
+    val finalReplyIndex = mutableSetOf<Int>()
+    fun closeTurn(endExclusive: Int, startInclusive: Int) {
+        for (i in endExclusive - 1 downTo startInclusive) {
+            val item = items.getOrNull(i) ?: continue
+            if (item.messages.any { it.isAgentReply() }) {
+                finalReplyIndex += i
+                return
+            }
+        }
+    }
+    var turnStart = 0
+    items.forEachIndexed { index, item ->
+        if (item.messages.any { it.isUserRequest() }) {
+            if (index > turnStart) closeTurn(index, turnStart)
+            turnStart = index
+        }
+    }
+    closeTurn(items.size, turnStart)
+
     val blocks = mutableListOf<TimelineBlock>()
     val pending = mutableListOf<TimelineRenderItem>()
 
@@ -54,9 +90,11 @@ internal fun buildTimelineBlocks(items: List<TimelineRenderItem>): List<Timeline
         pending.clear()
     }
 
-    for (item in items) {
-        val isVisibleTurnItem = item.messages.any { it.isUserRequest() || it.isAgentReply() }
-        if (isVisibleTurnItem) {
+    items.forEachIndexed { index, item ->
+        // The request opens a turn; the turn's final reply closes it. Both stay
+        // visible. Every other item — including intermediate replies — folds.
+        val visible = item.messages.any { it.isUserRequest() } || index in finalReplyIndex
+        if (visible) {
             flush()
             blocks += TimelineBlock.Entry(item)
         } else {
