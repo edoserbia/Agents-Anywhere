@@ -6,10 +6,10 @@ import com.agentsanywhere.app.api.normalizeServerOrigin
 object AppConfig {
     // Debug builds can override the backend in android/local.properties.
     val OFFICIAL_SERVER_URL: String = BuildConfig.OFFICIAL_SERVER_URL
-    const val DESKTOP_DOWNLOAD_URL = "http://closex.cc:4001/"
+    const val DESKTOP_DOWNLOAD_URL = "https://closex.cc/download"
     // Served by our own download page. The previous ModelScope path returned
     // 404, so an in-app update prompt could never resolve to a real file.
-    const val UPDATE_DOWNLOAD_URL = "http://closex.cc:4001/agents-anywhere-2.0.5-debug.apk"
+    const val UPDATE_DOWNLOAD_URL = "https://closex.cc/download/agents-anywhere-2.0.6-debug.apk"
 
     fun isOfficialServer(serverUrl: String): Boolean {
         val officialOrigin = normalizeServerOrigin(OFFICIAL_SERVER_URL) ?: return false

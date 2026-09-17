@@ -21,7 +21,7 @@ cd "$REPO_ROOT"
 REMOTE="${AA_REMOTE:-aa-new}"
 DOWNLOAD_DIR="${AA_DOWNLOAD_DIR:-/opt/aa-downloads}"
 SERVER_URL="${AA_SERVER_URL:-https://closex.cc}"
-PAGE_URL="${AA_PAGE_URL:-http://closex.cc:4001}"
+PAGE_URL="${AA_PAGE_URL:-https://closex.cc/download}"
 
 VERSION="${1:-}"
 SKIP_BUILD=0
