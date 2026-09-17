@@ -134,14 +134,41 @@ export function buildTimelineRenderBlocks(groups: TimelineGroup[]): TimelineRend
 }
 
 /**
- * Process blocks that are still being produced. Only the last block can be
- * live: an earlier turn's process is finished by definition once a newer
- * request exists.
+ * Keys of the process blocks belonging to the turn currently being produced.
+ *
+ * The running turn's work is open, so its progress is visible as it happens.
+ * Every block of that turn qualifies, not just the last one: a turn narrates as
+ * reply, tools, reply, tools, and each intermediate reply closes the block
+ * before it. Returning only the final block hid everything the runtime had
+ * already done, so a reader saw "the agent is working" with no way to tell what
+ * it was doing or whether it had stalled.
+ *
+ * Blocks from finished turns are excluded, because an earlier turn is complete
+ * once a newer request exists.
+ */
+export function activeProcessBlockKeys(blocks: TimelineRenderBlock[]): string[] {
+  const lastRequestIndex = blocks.reduce(
+    (found, block, index) => (block.kind === "entry" && isUserRequestBlock(block) ? index : found),
+    -1,
+  )
+  return blocks
+    .slice(lastRequestIndex + 1)
+    .filter((block): block is TimelineProcessBlock => block.kind === "process")
+    .map((block) => block.key)
+}
+
+function isUserRequestBlock(block: TimelineEntryBlock): boolean {
+  return timelineGroupItemsOf(block.group).some(isUserRequestItem)
+}
+
+/**
+ * The single most recent live process block, or null.
+ *
+ * Retained for callers that need one anchor rather than the whole set.
  */
 export function activeProcessBlockKey(blocks: TimelineRenderBlock[]): string | null {
-  const processes = blocks.filter((block): block is TimelineProcessBlock => block.kind === "process")
-  const last = processes[processes.length - 1]
-  return last ? last.key : null
+  const keys = activeProcessBlockKeys(blocks)
+  return keys.length > 0 ? keys[keys.length - 1] : null
 }
 
 export type TimelineRequestEntry = {

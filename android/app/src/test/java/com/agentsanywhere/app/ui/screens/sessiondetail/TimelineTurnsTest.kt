@@ -159,6 +159,41 @@ class TimelineTurnsTest {
     }
 
     @Test
+    fun `every process block of the running turn is live not just the last`() {
+        // A turn narrates as reply, tools, reply, tools. Each intermediate reply
+        // closes the block before it, so keeping only the final block open would
+        // hide most of the work and leave no way to tell whether the run stalled.
+        val blocks = buildTimelineBlocks(
+            listOf(
+                single(user("u1")),
+                single(reply("a1")),
+                single(tool("t1")),
+                single(reply("a2")),
+                single(tool("t2")),
+            ),
+        )
+        val processes = blocks.filterIsInstance<TimelineBlock.Process>()
+        assertEquals(2, processes.size)
+        assertEquals(processes.map { it.key }.toSet(), activeProcessBlockKeys(blocks))
+    }
+
+    @Test
+    fun `a finished turn stops being live once a newer request arrives`() {
+        val blocks = buildTimelineBlocks(
+            listOf(
+                single(user("u1")),
+                single(reply("a1")),
+                single(tool("t1")),
+                single(user("u2")),
+                single(tool("t2")),
+            ),
+        )
+        val processes = blocks.filterIsInstance<TimelineBlock.Process>()
+        assertEquals(2, processes.size)
+        assertEquals(setOf(processes[1].key), activeProcessBlockKeys(blocks))
+    }
+
+    @Test
     fun `keeps a process block per turn so an old turn cannot absorb a new one`() {
         val blocks = buildTimelineBlocks(
             listOf(

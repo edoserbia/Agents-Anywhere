@@ -47,12 +47,14 @@ import {
 } from "@/components/session/session-tool-cards"
 import { timelineRunCounts } from "@/components/session/timeline-summary"
 import {
-  activeProcessBlockKey,
+  activeProcessBlockKeys,
   buildTimelineRenderBlocks,
   type TimelineProcessBlock,
+  buildTimelineRequestEntries,
 } from "@/components/session/timeline-turns"
 import { formatTimelineTimestamp } from "@/components/session/timeline-timestamp"
 import { SessionQueuePanel } from "@/components/session/session-queue-panel"
+import { TimelineRequestHistory } from "@/components/session/timeline-request-history"
 import type { QueuedMessage } from "@/features/dashboard/types"
 import { needsOlderTimelinePage } from "@/components/session/timeline-autofill"
 import { createTimelineScrollFollow } from "@/components/session/timeline-scroll-follow"
@@ -322,6 +324,9 @@ function writeComposerDraft(sessionId: string, value: string) {
   }
 }
 
+/** Width reserved for the request navigator when it is open. */
+const REQUEST_HISTORY_WIDTH = "16rem"
+
 export function SessionDetail({
   token,
   sessionId,
@@ -374,6 +379,8 @@ export function SessionDetail({
   const [timelineGroupOpenByKey, setTimelineGroupOpenByKey] = React.useState<Record<string, boolean>>({})
   // Explicit open/close choices for folded turn blocks, keyed by block key.
   const [processOpenByKey, setProcessOpenByKey] = React.useState<Record<string, boolean>>({})
+  const [requestHistoryOpen, setRequestHistoryOpen] = React.useState(false)
+  const [activeRequestId, setActiveRequestId] = React.useState<string | null>(null)
   const [timelineItemOpenById, setTimelineItemOpenById] = React.useState<Record<string, boolean>>({})
   const [composerDraftState, setComposerDraftState] = React.useState<ComposerDraftState>(() => ({
     sessionId,
@@ -501,6 +508,24 @@ export function SessionDetail({
       if (current[itemId] === open) return current
       return { ...current, [itemId]: open }
     })
+  }, [])
+
+  /**
+   * Scroll the timeline to a past request and mark it active.
+   *
+   * The target is looked up by data attribute rather than a stored offset so
+   * it stays correct after the timeline grows or folds above it.
+   */
+  const handleJumpToRequest = React.useCallback((entry: { id: string }) => {
+    setActiveRequestId(entry.id)
+    const viewport = timelineRef.current
+    if (!viewport) return
+    const target = viewport.querySelector(`[data-timeline-request-id="${CSS.escape(entry.id)}"]`)
+    if (!(target instanceof HTMLElement)) return
+    timelineFollowRef.current?.pause()
+    const viewportTop = viewport.getBoundingClientRect().top
+    const targetTop = target.getBoundingClientRect().top
+    viewport.scrollTo({ top: viewport.scrollTop + (targetTop - viewportTop) - 16, behavior: "smooth" })
   }, [])
 
   const handleSelectionChange = async (
@@ -1659,13 +1684,20 @@ export function SessionDetail({
     () => buildTimelineRenderBlocks(timelineGroups),
     [timelineGroups],
   )
-  const liveProcessKey = React.useMemo(
-    () => (turnInProgress ? activeProcessBlockKey(timelineBlocks) : null),
+  const requestEntries = React.useMemo(
+    () => buildTimelineRequestEntries(timelineBlocks, (item) => messageText(item)),
+    [timelineBlocks],
+  )
+  // Every process block of the running turn stays open, not just the last one:
+  // a turn narrates as reply, tools, reply, tools, and each intermediate reply
+  // would otherwise close the block before it, hiding the work already done.
+  const liveProcessKeys = React.useMemo(
+    () => new Set(turnInProgress ? activeProcessBlockKeys(timelineBlocks) : []),
     [timelineBlocks, turnInProgress],
   )
   const isProcessOpen = React.useCallback(
-    (key: string) => processOpenByKey[key] ?? key === liveProcessKey,
-    [liveProcessKey, processOpenByKey],
+    (key: string) => processOpenByKey[key] ?? liveProcessKeys.has(key),
+    [liveProcessKeys, processOpenByKey],
   )
   const handleProcessOpenChange = React.useCallback((key: string, open: boolean) => {
     setProcessOpenByKey((current) => ({ ...current, [key]: open }))

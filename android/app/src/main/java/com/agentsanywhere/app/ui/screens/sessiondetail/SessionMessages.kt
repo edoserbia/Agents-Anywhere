@@ -299,8 +299,10 @@ internal fun MessageList(
     // Fold each turn's process (reasoning, tools, file changes, sub-agents) into
     // a single collapsible row so only the request and its answer stay visible.
     val timelineBlocks = remember(timelineItems) { buildTimelineBlocks(timelineItems) }
-    val liveProcessKey = remember(timelineBlocks, turnInProgress) {
-        if (turnInProgress) activeProcessBlockKey(timelineBlocks) else null
+    // Every process block of the running turn stays open, not just the last
+    // one, so progress is visible while the turn is still producing it.
+    val liveProcessKeys = remember(timelineBlocks, turnInProgress) {
+        if (turnInProgress) activeProcessBlockKeys(timelineBlocks) else emptySet()
     }
     val requestEntries = remember(timelineBlocks) { buildTimelineRequestEntries(timelineBlocks) }
     // Publish the navigable requests so the header can offer the history sheet.
@@ -544,7 +546,7 @@ internal fun MessageList(
                                 onOpenAttachment = onOpenAttachment,
                                 onCopyMessage = onCopyMessage,
                                 onOpenFile = onOpenFile,
-                                open = processOpenByKey[block.key] ?: (block.key == liveProcessKey),
+                                open = processOpenByKey[block.key] ?: liveProcessKeys.contains(block.key),
                                 onOpenChange = { open -> processOpenByKey[block.key] = open },
                             )
                         }

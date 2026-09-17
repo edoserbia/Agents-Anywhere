@@ -541,6 +541,15 @@ class SessionRunService:
             )
         except ConnectorOfflineError as exc:
             raise SessionRunConflictError(str(exc)) from exc
+        except TimeoutError as exc:
+            # A runtime busy with a turn can be too slow to answer within the
+            # read budget. That is a runtime that did not answer, not a server
+            # fault, so it must be reported as a timeout: letting it escape as a
+            # bare TimeoutError surfaces as an opaque 500 and tells the reader
+            # nothing about whether to retry.
+            raise SessionRunTimeoutError(
+                "runtime did not report its state in time"
+            ) from exc
         except ConnectorRpcError as exc:
             raise SessionRunUpstreamError(exc.message or exc.code) from exc
         if not isinstance(result, dict):

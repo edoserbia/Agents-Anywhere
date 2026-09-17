@@ -3,6 +3,7 @@ import test from "node:test"
 
 import {
   activeProcessBlockKey,
+  activeProcessBlockKeys,
   buildTimelineRenderBlocks,
   buildTimelineRequestEntries,
   requestPreview,
@@ -177,6 +178,56 @@ test("folds process that arrives before any request, without losing it", () => {
 
   assert.deepEqual(blocks.map((block) => block.kind), ["process", "entry", "entry"])
   assert.deepEqual(blocks[0].items.map((it) => it.id), ["r0"])
+})
+
+test("every process block of the running turn is live, not just the last", () => {
+  // A turn narrates as reply, tools, reply, tools. Each intermediate reply
+  // closes the block before it, so keeping only the final block open would hide
+  // most of the work and leave no way to tell whether the run had stalled.
+  const blocks = buildTimelineRenderBlocks([
+    single(user("u1", "long task")),
+    single(reply("a1", "looking")),
+    single(tool("t1")),
+    single(reply("a2", "still going")),
+    single(tool("t2")),
+  ])
+
+  const live = activeProcessBlockKeys(blocks)
+  const processes = blocks.filter((block) => block.kind === "process")
+  assert.equal(processes.length, 2, "the turn folds into two process blocks")
+  assert.deepEqual(
+    live,
+    processes.map((block) => block.key),
+    "both blocks belong to the running turn, so both stay open",
+  )
+})
+
+test("a finished turn stops being live once a newer request arrives", () => {
+  const blocks = buildTimelineRenderBlocks([
+    single(user("u1", "first")),
+    single(reply("a1", "working")),
+    single(tool("t1")),
+    single(user("u2", "second")),
+    single(tool("t2")),
+  ])
+
+  const live = activeProcessBlockKeys(blocks)
+  const processes = blocks.filter((block) => block.kind === "process")
+  assert.equal(processes.length, 2, "one fold per turn")
+  assert.deepEqual(
+    live,
+    [processes[1].key],
+    "only the newest turn is live; the earlier turn folds",
+  )
+})
+
+test("before any request, the only block is live so the view is not empty", () => {
+  // Reconnect noise or runtime chatter can precede the first request. It is the
+  // entire transcript at that point, so it stays open; collapsing it would show
+  // an empty screen.
+  const blocks = buildTimelineRenderBlocks([single(reasoning("r1")), single(tool("t1"))])
+  assert.equal(blocks.length, 1)
+  assert.deepEqual(activeProcessBlockKeys(blocks), [blocks[0].key])
 })
 
 test("only the last process block is considered live", () => {

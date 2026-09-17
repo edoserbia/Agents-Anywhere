@@ -106,9 +106,30 @@ internal fun buildTimelineBlocks(items: List<TimelineRenderItem>): List<Timeline
 }
 
 /**
- * Key of the process block that is still being produced. Only the last block
- * can be live, because an earlier turn is finished once a newer request exists.
+ * Keys of the process blocks belonging to the turn currently being produced.
+ *
+ * The running turn's work stays open so its progress is visible as it happens.
+ * Every block of that turn qualifies, not just the last one: a turn narrates as
+ * reply, tools, reply, tools, and each intermediate reply closes the block
+ * before it. Returning only the final block hid the work already done, leaving
+ * a reader with "the agent is working" and no way to tell what it was doing or
+ * whether it had stalled.
+ *
+ * Blocks from finished turns are excluded, because an earlier turn is complete
+ * once a newer request exists.
  */
+internal fun activeProcessBlockKeys(blocks: List<TimelineBlock>): Set<String> {
+    val lastRequestIndex = blocks.indexOfLast { block ->
+        block is TimelineBlock.Entry && block.messages.any { it.isUserRequest() }
+    }
+    return blocks
+        .drop(lastRequestIndex + 1)
+        .filterIsInstance<TimelineBlock.Process>()
+        .map { it.key }
+        .toSet()
+}
+
+/** Key of the most recent live process block, or null when none is live. */
 internal fun activeProcessBlockKey(blocks: List<TimelineBlock>): String? =
     blocks.filterIsInstance<TimelineBlock.Process>().lastOrNull()?.key
 

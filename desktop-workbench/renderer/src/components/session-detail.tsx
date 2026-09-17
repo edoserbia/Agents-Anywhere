@@ -48,7 +48,7 @@ import {
 } from "@/components/session/session-tool-cards"
 import { timelineRunCounts } from "@/components/session/timeline-summary"
 import {
-  activeProcessBlockKey,
+  activeProcessBlockKeys,
   buildTimelineRenderBlocks,
   buildTimelineRequestEntries,
   type TimelineProcessBlock,
@@ -1688,8 +1688,11 @@ export function SessionDetail({
     () => buildTimelineRenderBlocks(timelineGroups),
     [timelineGroups],
   )
-  const liveProcessKey = React.useMemo(
-    () => (turnInProgress ? activeProcessBlockKey(timelineBlocks) : null),
+  // Every process block of the running turn stays open, not just the last one:
+  // a turn narrates as reply, tools, reply, tools, and each intermediate reply
+  // would otherwise close the block before it, hiding the work already done.
+  const liveProcessKeys = React.useMemo(
+    () => new Set(turnInProgress ? activeProcessBlockKeys(timelineBlocks) : []),
     [timelineBlocks, turnInProgress],
   )
   const requestEntries = React.useMemo(
@@ -1707,8 +1710,8 @@ export function SessionDetail({
    * by default and expands on click.
    */
   const isProcessOpen = React.useCallback(
-    (key: string) => processOpenByKey[key] ?? key === liveProcessKey,
-    [liveProcessKey, processOpenByKey],
+    (key: string) => processOpenByKey[key] ?? liveProcessKeys.has(key),
+    [liveProcessKeys, processOpenByKey],
   )
   const turnReviewDisplay = React.useMemo(() => {
     return buildTurnReviewDisplay(state?.session.id === sessionId ? state.items.filter(isVisibleTimelineItem) : [], {
