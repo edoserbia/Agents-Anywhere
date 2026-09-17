@@ -61,6 +61,8 @@ import { CAPABILITY, capabilityIsUsable } from "@/components/session/capabilitie
 import { SessionComposer, type AttachedFile } from "@/components/session/session-composer"
 import { SessionQueuePanel } from "@/components/session/session-queue-panel"
 import { formatTimelineTimestamp } from "@/components/session/timeline-timestamp"
+import { buildTimelinePlan } from "@/components/session/timeline-plan"
+import { TimelinePlanCard } from "@/components/session/timeline-plan-card"
 import {
   acceptSessionEventId,
   bufferedEventsAfterLiveCapabilityRead,
@@ -1695,6 +1697,14 @@ export function SessionDetail({
     () => new Set(turnInProgress ? activeProcessBlockKeys(timelineBlocks) : []),
     [timelineBlocks, turnInProgress],
   )
+  // The agent's checklist, latest revision only. It is rendered above the
+  // process fold rather than inside it: while a run is in progress the fold is
+  // open anyway, and once it closes the plan is the one piece of process worth
+  // keeping in view.
+  const timelinePlan = React.useMemo(
+    () => buildTimelinePlan((state?.items ?? []).filter(isVisibleTimelineItem)),
+    [state?.items],
+  )
   const requestEntries = React.useMemo(
     () => buildTimelineRequestEntries(timelineBlocks, (item) => messageText(item)),
     [timelineBlocks],
@@ -1799,6 +1809,9 @@ export function SessionDetail({
             detachedNotifications.length === 0 &&
             blockingInteractionList.length === 0 ? (
               <p className="py-12 text-center text-sm text-muted-foreground">{tSession("noActivity")}</p>
+            ) : null}
+            {timelinePlan ? (
+              <TimelinePlanCard plan={timelinePlan} running={turnInProgress} />
             ) : null}
             {timelineBlocks.map((block) => {
               if (block.kind === "process") {

@@ -1077,7 +1077,8 @@
         "close": "关闭历史请求",
         "empty": "本次会话还没有请求",
         "untitled": "（空请求）",
-        "open": "查看历史请求"
+        "open": "查看历史请求",
+        "older": "还有 {count} 条更早的请求，向上滚动查看"
       },
       "processSummary": "已折叠 {count} 条过程记录",
       "processRunning": "正在处理 · {count} 条记录",

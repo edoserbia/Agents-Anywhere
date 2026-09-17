@@ -1,12 +1,18 @@
 "use client"
 
 import { History, MessageSquare } from "lucide-react"
+import * as React from "react"
 import { useTranslations } from "next-intl"
 
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
-import type { TimelineRequestEntry } from "@/components/session/timeline-turns"
+import {
+  hasOlderRequests,
+  requestHistoryWindow,
+  REQUEST_HISTORY_PAGE_SIZE,
+  type TimelineRequestEntry,
+} from "@/components/session/timeline-turns"
 
 /**
  * Navigator for the user requests in one session.
@@ -30,6 +36,31 @@ export function TimelineRequestHistory({
   onSelect: (entry: TimelineRequestEntry) => void
 }) {
   const tSession = useTranslations("dashboard.session")
+  // Requests are listed newest first so the reader opens on the most recent
+  // turn instead of scrolling the transcript to find it. Older ones are
+  // revealed by scrolling this panel, never by scrolling the conversation.
+  const [visibleCount, setVisibleCount] = React.useState(REQUEST_HISTORY_PAGE_SIZE)
+
+  // Reset the window when the panel is reopened or the session's requests
+  // change identity, so a stale count cannot hide the newest entries.
+  React.useEffect(() => {
+    if (!open) setVisibleCount(REQUEST_HISTORY_PAGE_SIZE)
+  }, [open])
+  const firstEntryId = entries[0]?.id ?? null
+  React.useEffect(() => {
+    setVisibleCount(REQUEST_HISTORY_PAGE_SIZE)
+  }, [firstEntryId])
+
+  const visible = requestHistoryWindow(entries, visibleCount)
+  const older = hasOlderRequests(entries, visibleCount)
+
+  // Reveal the next page when the reader scrolls to the older end (the bottom,
+  // since the list runs newest first).
+  const handleScroll = React.useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    const node = event.currentTarget
+    if (node.scrollTop + node.clientHeight < node.scrollHeight - 24) return
+    setVisibleCount((current) => (current < entries.length ? current + REQUEST_HISTORY_PAGE_SIZE : current))
+  }, [entries.length])
 
   if (!open) return null
 
@@ -56,9 +87,9 @@ export function TimelineRequestHistory({
       {entries.length === 0 ? (
         <p className="px-3 py-4 text-xs text-muted-foreground">{tSession("requestHistory.empty")}</p>
       ) : (
-        <ScrollArea className="min-h-0 flex-1">
+        <ScrollArea className="min-h-0 flex-1" viewportProps={{ onScroll: handleScroll }}>
           <ul className="flex flex-col gap-0.5 p-1.5">
-            {entries.map((entry) => (
+            {visible.map((entry) => (
               <li key={entry.id}>
                 <button
                   type="button"
@@ -83,6 +114,14 @@ export function TimelineRequestHistory({
               </li>
             ))}
           </ul>
+          {older ? (
+            // A count rather than a bare hint: it says how much is left, which
+            // is what makes scrolling this panel worth doing instead of the
+            // transcript.
+            <p className="px-3 pb-2 pt-1 text-center text-[10px] text-muted-foreground/70">
+              {tSession("requestHistory.older", { count: entries.length - visible.length })}
+            </p>
+          ) : null}
         </ScrollArea>
       )}
     </aside>

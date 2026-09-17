@@ -1077,7 +1077,8 @@
         "close": "Close request history",
         "empty": "No requests in this session yet",
         "untitled": "(empty request)",
-        "open": "Show request history"
+        "open": "Show request history",
+        "older": "{count} older requests — scroll for more"
       },
       "processSummary": "Folded {count} process entries",
       "processRunning": "Working · {count} entries",

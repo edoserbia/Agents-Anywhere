@@ -168,7 +168,7 @@ function isUserRequestBlock(block: TimelineEntryBlock): boolean {
  */
 export function activeProcessBlockKey(blocks: TimelineRenderBlock[]): string | null {
   const keys = activeProcessBlockKeys(blocks)
-  return keys.length > 0 ? keys[keys.length - 1] : null
+  return keys.length > 0 ? (keys[keys.length - 1] ?? null) : null
 }
 
 export type TimelineRequestEntry = {
@@ -215,4 +215,35 @@ export function buildTimelineRequestEntries(
     }
   }
   return entries
+}
+
+/** How many requests the navigator shows before older ones are revealed. */
+export const REQUEST_HISTORY_PAGE_SIZE = 10
+
+/**
+ * The slice of requests the navigator currently shows, newest first.
+ *
+ * Requests are listed newest first so the reader starts at the most recent
+ * turn — the one they are most likely to want — instead of having to scroll the
+ * transcript to find it. Scrolling the panel reveals older requests, which is
+ * why the window grows downward from the newest entry.
+ *
+ * `entries` arrives in reading order (oldest first) because every other caller
+ * numbers them that way, so the reversal happens here rather than at each call
+ * site.
+ */
+export function requestHistoryWindow(
+  entries: readonly TimelineRequestEntry[],
+  visibleCount: number,
+): TimelineRequestEntry[] {
+  if (visibleCount <= 0) return []
+  return [...entries].reverse().slice(0, visibleCount)
+}
+
+/** Whether more requests exist beyond the ones currently shown. */
+export function hasOlderRequests(
+  entries: readonly TimelineRequestEntry[],
+  visibleCount: number,
+): boolean {
+  return entries.length > visibleCount
 }

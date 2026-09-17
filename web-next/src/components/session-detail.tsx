@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { ArrowDown, ChevronDown, CircleAlert, Loader2, WifiOff } from "lucide-react"
+import { ArrowDown, ChevronDown, CircleAlert, History, Loader2, WifiOff } from "lucide-react"
 import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -53,6 +53,8 @@ import {
   buildTimelineRequestEntries,
 } from "@/components/session/timeline-turns"
 import { formatTimelineTimestamp } from "@/components/session/timeline-timestamp"
+import { buildTimelinePlan } from "@/components/session/timeline-plan"
+import { TimelinePlanCard } from "@/components/session/timeline-plan-card"
 import { SessionQueuePanel } from "@/components/session/session-queue-panel"
 import { TimelineRequestHistory } from "@/components/session/timeline-request-history"
 import type { QueuedMessage } from "@/features/dashboard/types"
@@ -1695,6 +1697,14 @@ export function SessionDetail({
     () => new Set(turnInProgress ? activeProcessBlockKeys(timelineBlocks) : []),
     [timelineBlocks, turnInProgress],
   )
+  // The agent's checklist, latest revision only. It is rendered above the
+  // process fold rather than inside it: while a run is in progress the fold is
+  // open anyway, and once it closes the plan is the one piece of process worth
+  // keeping in view.
+  const timelinePlan = React.useMemo(
+    () => buildTimelinePlan((state?.items ?? []).filter(isVisibleTimelineItem)),
+    [state?.items],
+  )
   const isProcessOpen = React.useCallback(
     (key: string) => processOpenByKey[key] ?? liveProcessKeys.has(key),
     [liveProcessKeys, processOpenByKey],
@@ -1787,6 +1797,9 @@ export function SessionDetail({
             detachedNotifications.length === 0 &&
             blockingInteractionList.length === 0 ? (
               <p className="py-12 text-center text-sm text-muted-foreground">{tSession("noActivity")}</p>
+            ) : null}
+            {timelinePlan ? (
+              <TimelinePlanCard plan={timelinePlan} running={turnInProgress} />
             ) : null}
             {timelineBlocks.map((block) => {
               if (block.kind === "process") {
@@ -1889,9 +1902,36 @@ export function SessionDetail({
             {tSession("bottom")}
           </Button>
         ) : null}
+
+        {requestEntries.length > 0 && !requestHistoryOpen ? (
+          <Button
+            type="button"
+            size="icon-sm"
+            variant="secondary"
+            aria-label={tSession("requestHistory.open")}
+            aria-pressed={requestHistoryOpen}
+            data-slot="timeline-request-history-toggle"
+            onClick={() => setRequestHistoryOpen(true)}
+            className="absolute right-3 top-16 z-30 rounded-full border bg-background/95 shadow-lg backdrop-blur"
+          >
+            <History className="size-4" />
+          </Button>
+        ) : null}
+
+        <TimelineRequestHistory
+          open={requestHistoryOpen}
+          onOpenChange={setRequestHistoryOpen}
+          entries={requestEntries}
+          activeId={activeRequestId}
+          onSelect={handleJumpToRequest}
+        />
       </div>
 
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
+      <div
+        className="pointer-events-none absolute inset-x-0 bottom-0 z-10"
+        // Keep the composer clear of the request navigator when it is open.
+        style={requestHistoryOpen ? { right: REQUEST_HISTORY_WIDTH } : undefined}
+      >
         <BlockingInteractionStack
           notices={blockingInteractionList}
           resolvingNoticeId={resolvingNoticeId}

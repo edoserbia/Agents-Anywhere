@@ -4,6 +4,9 @@ import test from "node:test"
 import {
   activeProcessBlockKey,
   activeProcessBlockKeys,
+  hasOlderRequests,
+  requestHistoryWindow,
+  REQUEST_HISTORY_PAGE_SIZE,
   buildTimelineRenderBlocks,
   buildTimelineRequestEntries,
   requestPreview,
@@ -298,4 +301,37 @@ test("request previews collapse whitespace and truncate", () => {
 test("empty request text yields an empty preview rather than throwing", () => {
   assert.equal(requestPreview(""), "")
   assert.equal(requestPreview("   \n  "), "")
+})
+
+test("the request navigator opens on the newest requests, not the oldest", () => {
+  // Reaching an earlier request must not require scrolling the transcript, so
+  // the panel starts at the recent end and grows downward into the past.
+  const entries = Array.from({ length: 25 }, (_, i) => ({
+    id: `u${i + 1}`,
+    blockKey: `b${i + 1}`,
+    index: i + 1,
+    text: `request ${i + 1}`,
+    status: "done",
+    createdAt: "2026-09-16T00:00:00Z",
+  }))
+
+  const firstPage = requestHistoryWindow(entries, REQUEST_HISTORY_PAGE_SIZE)
+  assert.equal(firstPage.length, 10, "ten requests are shown by default")
+  assert.equal(firstPage[0].id, "u25", "the newest request is first")
+  assert.equal(firstPage[9].id, "u16", "the page reaches back ten turns")
+  assert.ok(hasOlderRequests(entries, REQUEST_HISTORY_PAGE_SIZE), "15 remain")
+
+  // Scrolling reveals the next page without losing the newest ones.
+  const secondPage = requestHistoryWindow(entries, REQUEST_HISTORY_PAGE_SIZE * 2)
+  assert.equal(secondPage.length, 20)
+  assert.equal(secondPage[0].id, "u25", "the newest entry never moves")
+  assert.equal(secondPage[19].id, "u6")
+
+  // Past the end the window is the whole list, with no phantom entries.
+  const all = requestHistoryWindow(entries, 100)
+  assert.equal(all.length, 25)
+  assert.equal(all[24].id, "u1", "the oldest request is last")
+  assert.equal(hasOlderRequests(entries, 100), false)
+
+  assert.deepEqual(requestHistoryWindow(entries, 0), [], "nothing shown before the window is sized")
 })

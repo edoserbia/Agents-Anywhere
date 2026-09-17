@@ -305,6 +305,11 @@ internal fun MessageList(
         if (turnInProgress) activeProcessBlockKeys(timelineBlocks) else emptySet()
     }
     val requestEntries = remember(timelineBlocks) { buildTimelineRequestEntries(timelineBlocks) }
+    // The agent's checklist, latest revision only. It is rendered above the
+    // transcript rather than inside the fold: while a run is in progress the
+    // fold is open anyway, and once it closes the plan is the one piece of
+    // process worth keeping in view.
+    val timelinePlan = remember(displayMessages) { buildTimelinePlan(displayMessages) }
     // Publish the navigable requests so the header can offer the history sheet.
     LaunchedEffect(requestEntries) { onRequestEntriesChange(requestEntries) }
     // Explicit open/close choices by the reader, keyed by process block key.
@@ -509,6 +514,14 @@ internal fun MessageList(
                         onRespond = { action, input -> onRespondNotice(notice, action, input) },
                         notificationOnly = notice.type == "notification",
                     )
+                }
+                // reverseLayout draws the last item at the visual top, so the
+                // plan is added last to sit above the transcript rather than
+                // below the newest message.
+                timelinePlan?.let { plan ->
+                    item(key = "timeline-plan") {
+                        TimelinePlanCard(plan = plan, running = turnInProgress)
+                    }
                 }
                 items(timelineBlocks.asReversed(), key = { it.key }) { block ->
                     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
