@@ -2,6 +2,10 @@ name: agents-anywhere
 
 services:
   postgres-next:
+    # Bounded so a runaway process is killed here rather than triggering a
+    # host-wide OOM kill, which would take the co-located VPN down too.
+    mem_limit: 700m
+    memswap_limit: 700m
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
@@ -17,6 +21,10 @@ services:
       retries: 5
 
   redis-next:
+    # Bounded so a runaway process is killed here rather than triggering a
+    # host-wide OOM kill, which would take the co-located VPN down too.
+    mem_limit: 256m
+    memswap_limit: 256m
     image: redis:8-alpine
     restart: unless-stopped
     command:
@@ -40,6 +48,10 @@ services:
       retries: 5
 
   migrate-next:
+    # Bounded so a runaway process is killed here rather than triggering a
+    # host-wide OOM kill, which would take the co-located VPN down too.
+    mem_limit: 512m
+    memswap_limit: 512m
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -55,6 +67,10 @@ services:
     command: ["sh", "-c", "cd /app/server && uv run --no-sync python -m agent_server.infra.db.migrations upgrade"]
 
   server-next:
+    # Bounded so a runaway process is killed here rather than triggering a
+    # host-wide OOM kill, which would take the co-located VPN down too.
+    mem_limit: 900m
+    memswap_limit: 900m
     image: agents-anywhere-server:postgres
     restart: unless-stopped
     depends_on:

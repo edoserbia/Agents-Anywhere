@@ -110,6 +110,69 @@ ssh aa-new 'cd /opt/agents-anywhere
 
 旧主机仍保留原有部署与数据，可随时回滚。**注意**：迁移后两边数据会各自累积，回滚会丢失迁移之后在新主机产生的会话。
 
+## 资源限制与加固
+
+新主机只有 1.9 GB 内存，且与 VPN 共用。以下限制让 Agents Anywhere 出问题时**只影响自己**——否则宿主机 OOM killer 会挑选占用最大的进程杀掉，可能命中 VPN。
+
+### 容器内存上限
+
+`docker/docker-compose.postgres.yml` 中为 AA 的三个容器设置了 `mem_limit`（同时设置 `memswap_limit`，避免用 swap 绕过限制）：
+
+| 容器 | 上限 | 依据 |
+| --- | --- | --- |
+| `server-next` | 900m | 实测稳定约 287 MB（2 个 event worker），留约 3 倍余量 |
+| `postgres-next` | 700m | 实测约 113 MB，其中大部分是可回收文件缓存；数据库 427 MB |
+| `redis-next` | 256m | `maxmemory` 为 192 MB，上限略高于它 |
+| `migrate-next` | 512m | 仅迁移时运行 |
+
+超出上限时 Docker 只杀该容器（`restart: unless-stopped` 会自动拉起），VPN 不受影响。
+
+### journald
+
+`/etc/systemd/journald.conf` 原本**没有任何容量上限**，日志已涨到 2.7 GB，`systemd-journald` 进程占用 152 MB 内存。主要来源不是 AA（24 小时仅 1 行），而是：
+
+| 来源 | 24h 行数 |
+| --- | --- |
+| sing-box（VPN） | 65,448 |
+| sshd | 25,245（其中 6,283 次密码失败、3,231 次非法用户） |
+
+现配置：`SystemMaxUse=500M`、`RuntimeMaxUse=64M`、`MaxRetentionSec=30day`，并启用限流。生效后 journald 内存降到约 52 MB，磁盘占用 2.7 GB → 465 MB。
+
+### Docker 日志轮转
+
+`/etc/docker/daemon.json` 设置 `max-size=20m`、`max-file=3`。注意：
+
+- `systemctl reload docker` **不会**应用 `log-opts`，必须 `systemctl restart docker`。
+- 所有容器都是 `unless-stopped`，重启 Docker 后会自动拉起；sing-box 是 systemd 服务，不受影响。
+- 已存在的容器保留旧日志配置，需重建才生效。
+
+改动前 `sub2api-caddy` 的日志已达 87 MB（约 7.6 MB/天）。清理时用 `truncate -s 0`，**不要删文件**——容器按 inode 持有该文件，删除后空间要等重启才释放。
+
+### SSH 防护
+
+`fail2ban`（`jail.local`，`sshd` jail，`mode = aggressive`，`maxretry = 5`，`bantime = 1h`）。日志显示主机持续遭受 SSH 爆破。
+
+**`ignoreip` 中必须包含运维方自己的地址**，否则输错密码会把自己也封禁：
+
+```
+ignoreip = 127.0.0.1/8 ::1 117.143.161.197 117.143.0.0/16
+```
+
+运维地址是动态的，所以额外加了 `/16`。如果你的出口地址变化导致被拦，从控制台 VNC 登录后执行 `fail2ban-client set sshd unbanip <你的IP>`。
+
+### 加固后的实测结果
+
+| 指标 | 加固前 | 加固后 |
+| --- | --- | --- |
+| journald 内存 | 152 MB | 52 MB |
+| journald 磁盘 | 2.7 GB | 465 MB |
+| 根分区占用 | 14 GB (48%) | 12 GB (40%) |
+| 容器内存上限 | 无 | server 900m / pg 700m / redis 256m |
+| SSH 爆破防护 | 无 | fail2ban（持续封禁中） |
+| swap 换页 | — | `si=0 so=0`，无压力 |
+
+所有改动均先备份到 `/root/aa-hardening-backup-<时间戳>/`。
+
 ## 迁移记录（2026-09-16）
 
 从旧主机迁到新主机：
