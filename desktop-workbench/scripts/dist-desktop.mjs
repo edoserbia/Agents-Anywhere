@@ -142,8 +142,16 @@ async function main() {
   if (platform === "mac" && process.platform !== "darwin") {
     fail("dist:mac must run on macOS: signing and notarization need the Keychain and notarytool.");
   }
-  if (platform === "win" && process.platform !== "win32") {
-    fail("dist:win must run on Windows: the NSIS installer and Authenticode signing are native there.");
+  // Windows installers do build from macOS, and the app is shared code, so the
+  // only thing lost off Windows is Authenticode signing — electron-builder skips
+  // it with a warning. Refusing outright would mean an unsigned installer is
+  // impossible to produce without a Windows machine; asking for it explicitly is
+  // the better trade.
+  if (platform === "win" && process.platform !== "win32" && !process.env.AA_ALLOW_CROSS_BUILD?.trim()) {
+    fail(
+      "dist:win off Windows produces an unsigned installer. " +
+      "Set AA_ALLOW_CROSS_BUILD=1 to build it anyway, or run on Windows for Authenticode signing.",
+    );
   }
 
   const { builderFlags, uvTargets } = resolveTargets({ platform, archFlag });
