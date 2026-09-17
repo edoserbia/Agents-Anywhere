@@ -415,11 +415,7 @@ export function SessionDetail({
   const session = state?.session ?? fallbackSession
   const runtimeState = state?.state ?? null
   const runtimeStatus = effectiveRuntimeStatus(runtimeState, session)
-  const turnInProgress = runtimeStatus === "waiting"
-    || runtimeStatus === "pending"
-    || runtimeStatus === "running"
-    || runtimeStatus === "stopping"
-    || runtimeStatus === "waiting_approval"
+  const turnInProgress = sessionTurnInProgress(runtimeState, session)
   const previousStatusTraceRef = React.useRef<{
     sessionId: string
     sessionStatus: string
@@ -3000,6 +2996,39 @@ function effectiveRuntimeStatus(
   if (runtimeState) return runtimeState.status
   if (session?.connectorStatus === "offline") return "disconnected"
   return session?.status ?? "idle"
+}
+
+/** Statuses that mean the runtime is working on a turn right now. */
+const ACTIVE_STATUSES = new Set<string>([
+  "waiting",
+  "pending",
+  "running",
+  "stopping",
+  "waiting_approval",
+])
+
+/**
+ * Whether the session is mid-turn, according to **any** available source.
+ *
+ * The two sources disagree in practice. `session.status` is maintained by the
+ * ingest path and flips as soon as work starts, while `runtimeState.status` is
+ * a separate live read of the runtime that can still say `idle` — and
+ * `effectiveRuntimeStatus` prefers the runtime's answer whenever it exists.
+ * Trusting that one answer therefore closed the fold during a real turn, which
+ * hid every process row and left the reader with "DSH is working" and no way to
+ * tell what it was doing or whether it had stalled.
+ *
+ * Activity from either source is enough, because the two mistakes are not
+ * symmetric: treating a finished turn as running only leaves a fold open, while
+ * treating a running turn as finished hides the work the reader is waiting on.
+ */
+function sessionTurnInProgress(
+  runtimeState: SessionRuntimeState | null | undefined,
+  session: SessionView | null | undefined,
+): boolean {
+  const runtimeStatus = effectiveRuntimeStatus(runtimeState, session)
+  if (ACTIVE_STATUSES.has(runtimeStatus)) return true
+  return session?.status !== undefined && ACTIVE_STATUSES.has(session.status)
 }
 
 function mergeNotices(current: Notice[], incoming: Notice[]): Notice[] {

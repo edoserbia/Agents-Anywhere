@@ -1569,16 +1569,18 @@ fun SessionDetailScreen(
     }
     val agentLabel = state.session?.runtimeLabel?.takeIf { it.isNotBlank() }
         ?: context.getString(R.string.session_agent_fallback)
+    // Activity from either source counts. `session.status` is maintained by the
+    // ingest path and flips as soon as work starts, while the runtime's own
+    // status is a separate live read that can still say idle; trusting only the
+    // runtime's answer closed the fold during a real turn and hid every process
+    // row. The two mistakes are not symmetric: calling a finished turn running
+    // only leaves a fold open, while calling a running turn finished hides the
+    // work the reader is waiting on.
     val turnInProgress = state.sending ||
         state.interrupting ||
-        runtimeStatus in setOf(
-            SessionRuntimeStatus.Waiting,
-            SessionRuntimeStatus.Pending,
-            SessionRuntimeStatus.Running,
-            SessionRuntimeStatus.Stopping,
-            SessionRuntimeStatus.WaitingApproval,
-            SessionRuntimeStatus.Blocked,
-        ) || state.messages.any { it.optimistic && it.status == "running" }
+        runtimeStatus in ACTIVE_RUNTIME_STATUSES ||
+        state.session?.status?.let { it.toRuntimeStatus() } in ACTIVE_RUNTIME_STATUSES ||
+        state.messages.any { it.optimistic && it.status == "running" }
     val workingLabel = when {
         state.interrupting -> context.getString(R.string.session_agent_interrupting, agentLabel)
         runtimeStatus in setOf(SessionRuntimeStatus.Waiting, SessionRuntimeStatus.Pending) ->
@@ -1985,6 +1987,29 @@ fun SessionDetailScreen(
             onDismiss = { previewImage = null },
         )
     }
+}
+
+/** Runtime statuses that mean a turn is being worked on right now. */
+private val ACTIVE_RUNTIME_STATUSES = setOf(
+    SessionRuntimeStatus.Waiting,
+    SessionRuntimeStatus.Pending,
+    SessionRuntimeStatus.Running,
+    SessionRuntimeStatus.Stopping,
+    SessionRuntimeStatus.WaitingApproval,
+    SessionRuntimeStatus.Blocked,
+)
+
+/** The runtime status a session-level status corresponds to. */
+private fun SessionStatus.toRuntimeStatus(): SessionRuntimeStatus = when (this) {
+    SessionStatus.Idle -> SessionRuntimeStatus.Idle
+    SessionStatus.Waiting -> SessionRuntimeStatus.Waiting
+    SessionStatus.Pending -> SessionRuntimeStatus.Pending
+    SessionStatus.Running -> SessionRuntimeStatus.Running
+    SessionStatus.Stopping -> SessionRuntimeStatus.Stopping
+    SessionStatus.WaitingApproval -> SessionRuntimeStatus.WaitingApproval
+    SessionStatus.Blocked -> SessionRuntimeStatus.Blocked
+    SessionStatus.Error -> SessionRuntimeStatus.Error
+    SessionStatus.Unknown -> SessionRuntimeStatus.Unknown
 }
 
 private fun SessionDetailState.effectiveRuntimeStatus(): SessionRuntimeStatus {
