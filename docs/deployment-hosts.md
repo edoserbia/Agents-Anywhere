@@ -152,13 +152,38 @@ ssh aa-new 'cd /opt/agents-anywhere
 
 `fail2ban`（`jail.local`，`sshd` jail，`mode = aggressive`，`maxretry = 5`，`bantime = 1h`）。日志显示主机持续遭受 SSH 爆破。
 
-**`ignoreip` 中必须包含运维方自己的地址**，否则输错密码会把自己也封禁：
+**`ignoreip` 只保留 loopback**，不列出任何运维地址：
 
 ```
-ignoreip = 127.0.0.1/8 ::1 117.143.161.197 117.143.0.0/16
+ignoreip = 127.0.0.1/8 ::1
 ```
 
-运维地址是动态的，所以额外加了 `/16`。如果你的出口地址变化导致被拦，从控制台 VNC 登录后执行 `fail2ban-client set sshd unbanip <你的IP>`。
+这样所有 IP 一视同仁，封禁判断不依赖运维方从哪个网络接入。因为本机使用**密钥登录**（`ssh -v` 可确认 `Authenticated to ... using "publickey"`），正常操作不会产生密码失败，也就不会被封。
+
+### 如果被误封
+
+出口 IP 没有白名单，所以下列情况可能触发封禁：
+
+- 人为用密码登录并连续输错 5 次；
+- 所在网络出口 IP 与攻击源重合（NAT / 共享出口）。
+
+被封后按 1 小时自动解封，或从控制台 VNC 进入执行：
+
+```bash
+fail2ban-client set sshd unbanip <你的IP>
+fail2ban-client status sshd          # 查看当前封禁列表
+```
+
+注意 `ignoreip` 是**豁免名单**（名单内的 IP 永不被封），不是访问控制——它不限制任何人访问。若确实需要免封，把地址加回该行即可。
+
+### 临时关闭
+
+需要完全停掉防护时：
+
+```bash
+systemctl stop fail2ban        # 立即停止（已封禁的 IP 会一并解封）
+systemctl disable fail2ban     # 可选：取消开机自启
+```
 
 ### 加固后的实测结果
 
@@ -168,7 +193,7 @@ ignoreip = 127.0.0.1/8 ::1 117.143.161.197 117.143.0.0/16
 | journald 磁盘 | 2.7 GB | 465 MB |
 | 根分区占用 | 14 GB (48%) | 12 GB (40%) |
 | 容器内存上限 | 无 | server 900m / pg 700m / redis 256m |
-| SSH 爆破防护 | 无 | fail2ban（持续封禁中） |
+| SSH 爆破防护 | 无 | fail2ban，`ignoreip` 仅 loopback |
 | swap 换页 | — | `si=0 so=0`，无压力 |
 
 所有改动均先备份到 `/root/aa-hardening-backup-<时间戳>/`。
