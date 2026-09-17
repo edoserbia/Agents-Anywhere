@@ -18,6 +18,12 @@ from test_backend_mvp import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "connector"))
 
+# This test drives the real Connector Host through the Server, so it imports the
+# connector package and therefore needs psutil, which the connector declares and
+# the server does not. A server-only environment cannot run it, and skipping says
+# so instead of failing collection for the whole suite.
+pytest.importorskip("psutil", reason="connector dependencies are not installed")
+
 from connector.runtime_protocol import (
     MarkdownMessageContent,
     MessageTimelineItem,
