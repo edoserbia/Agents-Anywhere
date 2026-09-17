@@ -400,6 +400,9 @@ class BackendRpcClient:
         if store is None:
             return False
         flushed = await asyncio.to_thread(store.flush)
+        flush_runtime_storage = getattr(self.agent_runtime_host, "flush_runtime_storage", None)
+        if callable(flush_runtime_storage):
+            flushed = await asyncio.to_thread(flush_runtime_storage) or flushed
         if flushed:
             logger.debug("sync state changes flushed")
         return flushed

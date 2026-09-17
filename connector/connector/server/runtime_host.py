@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+import asyncio
+import copy
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
@@ -25,7 +27,8 @@ from connector.server.runtime_rpc_payloads import (
     session_notice_payload,
     session_source_observation_payload,
 )
-from connector.server.sync_state import RuntimeSyncState, SyncStateStore
+from connector.server.sync_state import JsonSyncStateStore, RuntimeSyncState, SyncStateStore
+from connector.server.runtime_storage import RuntimeStorageManager
 
 BackendNotifier = Callable[[str, dict[str, Any]], Awaitable[None]]
 AttachmentDownloader = Callable[[str, str], Awaitable[tuple[bytes, str, str]]]
@@ -51,6 +54,24 @@ class ConnectorRuntimeHost(RuntimeHostClient):
         self._memory_sync_state: dict[str, Mapping[str, Any]] = {}
         self._ingest_notifications = ingest_notifications
         self._defer_payload_projection = defer_payload_projection
+        self._runtime_storage = RuntimeStorageManager(sync_state_store) if isinstance(sync_state_store, JsonSyncStateStore) else None
+        self._runtime_kv = None
+
+    async def prepare_runtime_host(self, runtime_id: str) -> ConnectorRuntimeHost:
+        if self._runtime_storage is None:
+            return self
+        state, kv = await asyncio.to_thread(self._runtime_storage.prepare, self.connector_id, runtime_id)
+        bound = copy.copy(self)
+        bound._sync_state_store = state
+        bound._runtime_kv = kv
+        return bound
+
+    @property
+    def runtime_kv(self):
+        return self._runtime_kv if self._runtime_kv is not None else super().runtime_kv
+
+    def flush_runtime_storage(self) -> bool:
+        return self._runtime_storage.flush() if self._runtime_storage is not None else False
 
     async def publish_runtime_notifications(
         self, runtime: str, notifications: list[dict[str, Any]], *, runtime_id: str | None = None

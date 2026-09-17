@@ -30,6 +30,7 @@ from connector.runtimes.dsh.runtime import DshRuntime
 from connector.runtimes.dsh.identity import model_selection_id, permission_selection_id
 from connector.server.ingest import ConnectorIngestClient
 from connector.server.runtime_host import ConnectorRuntimeHost
+from connector.server.sync_state import JsonSyncStateStore
 
 SYNC_SCHEMA = Draft202012Validator(json.loads((ROOT / "contracts/dsh-bridge/1.0/schemas/sync-batch.schema.json").read_text()))
 
@@ -72,7 +73,10 @@ async def main(home: Path) -> None:
             async def download(*_args):
                 raise AssertionError("Text messaging must not download attachments")
 
-            host = ConnectorRuntimeHost(connector.id, notify, download, ingest_notifications=ingest.ingest_notifications)
+            checkpoint_path = home / "connector-state.json"
+            base_host = ConnectorRuntimeHost(connector.id, notify, download,
+                sync_state_store=JsonSyncStateStore(checkpoint_path), ingest_notifications=ingest.ingest_notifications)
+            host = await base_host.prepare_runtime_host("dsh")
             config = await DshProvider().validate_config({"dshHome": str(home), "restartBackoffMs": 100})
             runtime = CheckedRuntime(config, host)
 
@@ -128,6 +132,43 @@ async def main(home: Path) -> None:
                 assert len(await stored(cold.id)) == 1005, "all history pages must replace together"
                 for session in sessions:
                     assert all(i.type not in {"turn.start", "turn.end"} for i in await stored(session.id))
+
+                # Discard Connector objects and the DSH Host. Only actual JSON
+                # checkpoints and the backend database survive this restart.
+                await runtime.stop()
+                base_host.flush_runtime_storage()
+                await native_action("host-restart")
+                offset = len(transport.notifications)
+                count = completed_inventories()
+                base_host = ConnectorRuntimeHost(connector.id, notify, download,
+                    sync_state_store=JsonSyncStateStore(checkpoint_path), ingest_notifications=ingest.ingest_notifications)
+                host = await base_host.prepare_runtime_host("dsh")
+                runtime = CheckedRuntime(config, host)
+                await runtime.start()
+                async def restart_ready():
+                    return completed_inventories() > count
+                await until(restart_ready, "disk checkpoint recovery failed")
+                assert not any(n["method"] in {"timeline.sync", "timeline.itemUpsert"}
+                               for n in transport.notifications[offset:]), "unchanged restart uploaded history"
+                await runtime.stop()
+                base_host.flush_runtime_storage()
+                await native_action("offline-message")
+                await native_action("host-restart")
+                offset = len(transport.notifications)
+                count = completed_inventories()
+                base_host = ConnectorRuntimeHost(connector.id, notify, download,
+                    sync_state_store=JsonSyncStateStore(checkpoint_path), ingest_notifications=ingest.ingest_notifications)
+                host = await base_host.prepare_runtime_host("dsh")
+                runtime = CheckedRuntime(config, host)
+                await runtime.start()
+                await until(restart_ready, "changed prefix recovery failed")
+                uploaded = [n for n in transport.notifications[offset:] if n["method"] == "timeline.itemUpsert"]
+                assert len(uploaded) == 1 and uploaded[0]["params"]["item"]["content"]["text"] == "offline recovery message"
+                assert not any(n["method"] == "timeline.sync" for n in transport.notifications[offset:])
+                main_id = next(s.id for s in sessions if s.externalSessionId == "native-main")
+                assert sum(i.content.get("text") == "offline recovery message" for i in await stored(main_id)) == 1
+                initial_client = runtime._client
+                print("DSH disk/Host restart: unchanged=0 history items; offline change=1 delta, 0 snapshots")
 
                 await native_action("draft", "native-draft")
                 await asyncio.sleep(0.2)

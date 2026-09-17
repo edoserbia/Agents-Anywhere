@@ -31,7 +31,7 @@ DSH 左侧边栏「设置」上方 → 手机连接 → 云端登录或连接自
 - **桥接日志**：只读取 Anywhere Bridge 的运行日志，显示最近 200 条，每 2 秒刷新，可暂停或手动刷新。即使 CLI 正占用 Connector、尚未登录、安装检测失败或 AA Desktop 已安装，也可以查看。记录连接、RPC、会话读取、快照、同步批次和 ACK；错误带会话标识、阶段、错误码和调用栈位置，不记录请求正文、原生事件内容、令牌或原始异常消息。
 - **维护**：并排提供打开数据目录、打开日志目录和恢复出厂设置三个按钮，不展示数据与日志路径；headless 环境禁用打开目录。日志仅记录经过筛选的生命周期事件，滚动保留约两份 512 KiB 文件，不记录原始进程输出和凭据。恢复出厂设置先撤销当前设备凭据，再清理本插件的账号、绑定、同步缓存、日志及设置；服务端撤销失败时先保留本地状态，用户可另行确认仅清理本地。DSH 会话、运行时端点、共享 `connector-runtime.json` 和下载好的 Python 环境保留。
 
-桥接日志另存于插件数据目录的 `logs/dsh-runtime.jsonl`，滚动保留当前和上一份约 2 MiB 文件；同时输出到 DSH 的 `agents-anywhere-runtime` 日志分类。默认位置为 `~/.agentsanywhere/dsh-bridge-next/logs/`，自定义 `stateRoot` 时跟随该目录。已有 Connector 生命周期日志继续单独保留。
+桥接日志另存于插件数据目录的 `logs/dsh-runtime.jsonl`，滚动保留当前和上一份约 2 MiB 文件；同时输出到 DSH 的 `agents-anywhere-runtime` 日志分类。默认位置为 `~/.agents-anywhere/dsh-bridge-next/logs/`，自定义 `stateRoot` 时跟随该目录。已有 Connector 生命周期日志继续单独保留。
 
 已安装 AA Desktop 时连接功能仍显示原占位页，桥接日志始终可用，管理权限不自动切换。手机连接复用已有 `/auth/mobile-login/qr`、`status`、`confirm` 接口；二维码包含手机扫描协议要求的临时登录凭据，使用当前账号的后端地址，不使用 DSH 地址或 OAuth Web 开发端口。无需新增 AA Server 接口。
 
@@ -40,6 +40,8 @@ DSH 左侧边栏「设置」上方 → 手机连接 → 云端登录或连接自
 实机日志定位到官方历史读取器拒绝一个序号不连续的会话，进而拖断整个同步流。当前通过 `ctx.sessionQuery` 读取，按会话隔离读取失败，保留 AA 已接收的历史，并允许后续刷新重试。图片及配置恢复后，包含坏历史的完整回传测试继续通过。桥接日志页、Python 启动互斥、ID 历史和 Desktop 安装信息职责调整保留；检查与实机状态见 [验证记录](./VERIFICATION.md)。
 
 RPC 解析、执行、响应大小、取消和超时错误按请求返回，不会关闭已鉴权连接或取消其他请求。同步读取与投影按会话隔离；全局清单、ACK 超时或后端交付失败时只重建同步订阅，正常 RPC 继续可用。模型目录异常也不会关闭消息发送。AA Server 的会话操作检查与页面统一读取实时能力，避免旧缓存拒绝下一条消息；读取能力失败会明确报错并允许重试，不会默认为允许。
+
+会话同步检查点由 Connector 保存到 `<dataRoot>/<connectorId>/<runtimeId>/sync-state.json`，沿用现有读写接口、数据源隔离以及定期/退出刷盘。runtime 首次启动时，Connector 将旧 `connector-state.json` 与 `connector-kv.json` 全量复制到实例目录，后者保存为 `kv.json`；已有实例目录不覆盖，旧文件保留。新版两端协商检查点协议后，历史相关批次等待服务端 ingestion 成功才推进状态；收页 ACK 或通知入队不算同步成功。DSH Host 重启或销毁后重连，会本地读取、重建投影并比较指纹：先重放至已提交检查点并校验历史前缀；匹配且检查点处已结束生成时，只上传后续事件产生的新增或修改项，未变化历史不再上传。检查点处仍在生成、历史前缀变化或出现删除项时，补该会话快照。清单、元数据、当前状态和待处理请求仍会校准，下一条在线事件继续增量同步。检查点缺失、格式/投影版本不匹配或旧版 Connector 连接时完整校准；手动刷新仍强制补该会话快照。本地仍需读取与重放历史，网络上传按后缀投影的变化项恢复。
 
 原生历史读取失败只影响对应会话：桥接日志显示会话 ID、`read_failed` 和官方读取错误，其他会话继续同步；AA 已有历史不会被空快照覆盖。修复 DSH 原生历史后可刷新该会话重试，插件不会自行修改原始会话文件。
 
@@ -134,7 +136,7 @@ Host 配置位于 DSH 的插件配置行。常用项如下：
 | 配置 | 默认值 / 行为 |
 |---|---|
 | `apiBaseUrl` | 默认云端后端地址；上次连接时保存的后端地址优先 |
-| `stateRoot` | 操作系统用户主目录下 `.agentsanywhere/dsh-bridge-next` |
+| `stateRoot` | 操作系统用户主目录下 `.agents-anywhere/dsh-bridge-next` |
 | `connectorSourceDir` | 包内 `lib/bundled-connector`；覆盖时必须为绝对路径 |
 | `uvPath` | 优先使用显式配置或 `UV_PATH`，否则使用 npm 依赖 `@dataiku/uv` 中的平台二进制；依赖不可用时尝试系统 PATH |
 
@@ -158,6 +160,8 @@ Bridge 的独占锁决定端点文件的写入权。获得锁后会重建残留�
 本机共享记录固定为 `<操作系统用户主目录>/.agents-anywhere/connector-runtime.json`。Python Connector 统一负责启动互斥、运行 PID/启动来源和有序 Connector ID 历史，CLI 也在同一范围内。Desktop 只校验和发布安装信息；插件只读取共享记录，不写 ID、运行记录或安装信息。Desktop 与 Python 的短期文件事务保证并发写入不覆盖对方字段。
 
 插件先保存私有绑定，再通过 RPC 启动 Python Connector。Python 核验已有 PID 确实对应原来的 Connector 进程，接受启动时追加缺失 ID；冲突返回 `-32009 / connector_already_running`。插件展示错误并保留绑定供重试，关闭自己被拒绝的子进程；不会因冲突重复注册。正常退出后由 Python 清除自己的运行记录，异常退出后根据 PID 和进程身份判断残留记录；仅停止后端连接不会释放仍存活的 RPC 进程占用。
+
+默认插件数据统一放在 `~/.agents-anywhere/dsh-bridge-next/`；插件启动的 Connector 使用其 `connector/` 子目录，实例检查点和 KV 继续按 `<connectorId>/<runtimeId>/` 隔离。首次启动在读取账号和启动 Connector 前，从旧 `~/.agentsanywhere/dsh-bridge-next/` 复制全部持久数据，保留原文件；新目录已有文件优先。复制使用新旧目录的管理锁，旧插件仍运行时会报告冲突。复制失败会阻止管理器启动，修复后可重试。成功后的 `.legacy-state-migrated.json` 防止退出登录或重置后重新导入旧数据，请勿删除该记录。自动生成的 `connector-venv` 不复制，由 uv 在新位置重建；Connector 配置中指向旧根目录的状态路径随迁移更新。显式 `stateRoot` 不自动迁移，继续使用配置的位置。
 
 安装检测每次重新读取；可执行文件已不存在时保留历史 ID 并允许 Web 流程，记录损坏或无权限时报告错误。Host 兼容读取旧 `.agentsanywhere/machine.json` 和 `desktop/install.json`，迁移由 Python 在成功写入时完成。
 
