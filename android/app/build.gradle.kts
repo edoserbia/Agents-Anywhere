@@ -27,8 +27,8 @@ android {
         applicationId = "com.agentsanywhere.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 13
-        versionName = "2.0.6"
+        versionCode = 14
+        versionName = "2.0.7"
         buildConfigField("String", "OFFICIAL_SERVER_URL", officialServerUrl.asBuildConfigString())
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
