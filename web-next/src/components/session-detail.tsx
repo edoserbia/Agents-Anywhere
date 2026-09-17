@@ -52,6 +52,8 @@ import {
   type TimelineProcessBlock,
 } from "@/components/session/timeline-turns"
 import { formatTimelineTimestamp } from "@/components/session/timeline-timestamp"
+import { SessionQueuePanel } from "@/components/session/session-queue-panel"
+import type { QueuedMessage } from "@/features/dashboard/types"
 import { needsOlderTimelinePage } from "@/components/session/timeline-autofill"
 import { createTimelineScrollFollow } from "@/components/session/timeline-scroll-follow"
 import { createSessionEventBuffer } from "@/components/session/session-event-buffer"
@@ -351,6 +353,7 @@ export function SessionDetail({
   const [loading, setLoading] = React.useState(() => !initialOptimisticState)
   const [error, setError] = React.useState<string | null>(null)
   const [sending, setSending] = React.useState(false)
+  const [queuedMessages, setQueuedMessages] = React.useState<QueuedMessage[]>([])
   const [interrupting, setInterrupting] = React.useState(false)
   const [takeoverBusy, setTakeoverBusy] = React.useState(false)
   const [resolvingNoticeId, setResolvingNoticeId] = React.useState<string | null>(null)
@@ -1184,10 +1187,53 @@ export function SessionDetail({
     token,
   ])
 
+  // The queue is server state, so it is read rather than derived from the
+  // timeline. Refreshed after a send so a queued message appears immediately.
+  const refreshQueue = React.useCallback(async () => {
+    if (!token || !session?.id) return
+    try {
+      const response = await dashboardApi.getSessionQueue(token, session.id)
+      setQueuedMessages(response.items ?? [])
+    } catch {
+      // A queue read failure must not disturb the transcript.
+    }
+  }, [token, session?.id])
+
+  React.useEffect(() => {
+    void refreshQueue()
+  }, [refreshQueue])
+
+  const handleUpdateQueued = React.useCallback(
+    async (item: QueuedMessage, content: string) => {
+      if (!token || !session?.id) return
+      try {
+        await dashboardApi.updateQueuedMessage(token, session.id, item.id, content)
+        await refreshQueue()
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : tSession("queueUpdateFailed"))
+      }
+    },
+    [token, session?.id, refreshQueue, tSession],
+  )
+
+  const handleDeleteQueued = React.useCallback(
+    async (item: QueuedMessage) => {
+      if (!token || !session?.id) return
+      try {
+        await dashboardApi.deleteQueuedMessage(token, session.id, item.id)
+        await refreshQueue()
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : tSession("queueDeleteFailed"))
+      }
+    },
+    [token, session?.id, refreshQueue, tSession],
+  )
+
   const handleSend = async (
     content: string,
     attachments: AttachedFile[],
     selections: { model?: string; permission?: string },
+    options?: { queueWhenBusy?: boolean },
   ): Promise<boolean> => {
     if (!session || (!content.trim() && attachments.length === 0)) return false
     const uploadedAttachments = attachments.flatMap((attachment) =>
@@ -1241,7 +1287,9 @@ export function SessionDetail({
       await dashboardApi.sendSessionMessage(token, session.id, messageText, {
         attachments: uploadedAttachments.map((attachment) => ({ fileId: attachment.fileId })),
         clientMessageId,
+        queueWhenBusy: options?.queueWhenBusy === true,
       })
+      if (options?.queueWhenBusy) void refreshQueue()
       return true
     } catch (err) {
       const nextSourceErrorCode = sessionSourceErrorCode(err)
@@ -1820,6 +1868,13 @@ export function SessionDetail({
           onRespondInteraction={handleRespondInteraction}
         />
         <div ref={composerContainerRef} className="pointer-events-auto relative">
+          <div className="mx-auto w-full max-w-3xl px-4">
+            <SessionQueuePanel
+              items={queuedMessages}
+              onUpdate={handleUpdateQueued}
+              onDelete={handleDeleteQueued}
+            />
+          </div>
           {onOpenReview && turnReviewDisplay.activeReview ? (
             <SessionReviewTag files={turnReviewDisplay.activeReview.files} onReview={() => onOpenReview()} />
           ) : null}

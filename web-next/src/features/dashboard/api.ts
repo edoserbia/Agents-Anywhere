@@ -22,6 +22,8 @@ import type {
   FsReadTextResult,
   FsWriteResult,
   MessageSendOptions,
+  QueuedMessage,
+  SessionQueueResponse,
   PairingClaimResponse,
   PairingPollResponse,
   PairingStartResponse,
@@ -761,14 +763,46 @@ export class DashboardApi {
     content: string,
     options: MessageSendOptions = {},
   ): Promise<RpcResponse<unknown>> {
-    const { attachments, clientMessageId } = options;
+    const { attachments, clientMessageId, queueWhenBusy } = options;
     return this.client.post<RpcResponse<unknown>>(
       `/sessions/${encodeURIComponent(sessionId)}/runtime/messages`,
       {
         content,
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
         ...(clientMessageId ? { clientMessageId } : {}),
+        ...(queueWhenBusy ? { queueWhenBusy: true } : {}),
       },
+      { token },
+    );
+  }
+
+  getSessionQueue(token: string, sessionId: string): Promise<SessionQueueResponse> {
+    return this.client.get<SessionQueueResponse>(
+      `/sessions/${encodeURIComponent(sessionId)}/runtime/queue`,
+      { token },
+    );
+  }
+
+  updateQueuedMessage(
+    token: string,
+    sessionId: string,
+    itemId: string,
+    content: string,
+  ): Promise<{ item: QueuedMessage; serverTime: string }> {
+    return this.client.patch<{ item: QueuedMessage; serverTime: string }>(
+      `/sessions/${encodeURIComponent(sessionId)}/runtime/queue/${encodeURIComponent(itemId)}`,
+      { content },
+      { token },
+    );
+  }
+
+  deleteQueuedMessage(
+    token: string,
+    sessionId: string,
+    itemId: string,
+  ): Promise<{ item: QueuedMessage; serverTime: string }> {
+    return this.client.delete<{ item: QueuedMessage; serverTime: string }>(
+      `/sessions/${encodeURIComponent(sessionId)}/runtime/queue/${encodeURIComponent(itemId)}`,
       { token },
     );
   }

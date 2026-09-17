@@ -262,6 +262,7 @@ export function AppSidebar({ contained = false }: { contained?: boolean }) {
               onExpandedChange={setProjectsExpanded}
               onSessionStatusChange={setProjectSessionStatus}
               onAddProject={() => setProjectEditor({ mode: "create" })}
+              devices={connectors}
             />
             {unassignedSessions.length > 0 ? (
               <RecentSessionsSection

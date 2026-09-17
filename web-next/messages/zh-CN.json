@@ -345,9 +345,15 @@
       "permissionMode": "权限模式",
       "permissionModes": {
         "dsh": {
-          "readOnly": { "label": "仅可查看" },
-          "workspaceWrite": { "label": "工作区内修改" },
-          "fullAccess": { "label": "完全权限" }
+          "readOnly": {
+            "label": "仅可查看"
+          },
+          "workspaceWrite": {
+            "label": "工作区内修改"
+          },
+          "fullAccess": {
+            "label": "完全权限"
+          }
         },
         "requestApproval": {
           "label": "请求批准",
@@ -1043,7 +1049,16 @@
         "reviewOpenFilePreview": "打开 {file} 的完整文件预览",
         "reviewPreviewBlocked": "文件预览窗口被浏览器拦截了。",
         "reviewDiffCard": "第 {index}/{count} 次修改"
-      }
+      },
+      "queuedPlaceholder": "回复，运行中的消息会进入队列依次发送...",
+      "queueTitle": "队列 · {count}",
+      "queueEdit": "编辑",
+      "queueDelete": "删除",
+      "queueSave": "保存",
+      "queueCancel": "取消",
+      "queueUpdateFailed": "无法更新队列中的消息。",
+      "queueDeleteFailed": "无法删除队列中的消息。",
+      "queueItemFailed": "这条排队消息发送失败。"
     },
     "sessionStatus": {
       "idle": "空闲",

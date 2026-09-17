@@ -726,9 +726,34 @@ export type InlineAttachmentRef = AttachmentRef & {
   contentBase64: string;
 };
 
+/** A message the server is holding until the session's current turn finishes. */
+export type QueuedMessage = {
+  id: string;
+  sessionId: string;
+  position: number;
+  status: string;
+  content: string;
+  clientMessageId?: string | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SessionQueueResponse = {
+  sessionId: string;
+  items: QueuedMessage[];
+  serverTime: string;
+};
+
 export type MessageSendOptions = {
   attachments?: AttachmentRef[];
   clientMessageId?: string;
+  /**
+   * Ask the server to keep the message when the runtime is mid-turn instead of
+   * rejecting it. The session queue dispatches it as the current turn ends.
+   */
+  queueWhenBusy?: boolean;
 };
 
 export type SessionRuntimeState = {

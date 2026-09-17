@@ -345,9 +345,15 @@
       "permissionMode": "Permission mode",
       "permissionModes": {
         "dsh": {
-          "readOnly": { "label": "read-only" },
-          "workspaceWrite": { "label": "workspace-write" },
-          "fullAccess": { "label": "danger-full-access" }
+          "readOnly": {
+            "label": "read-only"
+          },
+          "workspaceWrite": {
+            "label": "workspace-write"
+          },
+          "fullAccess": {
+            "label": "danger-full-access"
+          }
         },
         "requestApproval": {
           "label": "Request approval",
@@ -1043,7 +1049,16 @@
         "reviewOpenFilePreview": "Open full preview for {file}",
         "reviewPreviewBlocked": "The file preview window was blocked.",
         "reviewDiffCard": "Change {index} of {count}"
-      }
+      },
+      "queuedPlaceholder": "Reply — messages sent now are queued and sent in order...",
+      "queueTitle": "Queue · {count}",
+      "queueEdit": "Edit",
+      "queueDelete": "Remove",
+      "queueSave": "Save",
+      "queueCancel": "Cancel",
+      "queueUpdateFailed": "Could not update the queued message.",
+      "queueDeleteFailed": "Could not remove the queued message.",
+      "queueItemFailed": "This queued message could not be sent."
     },
     "sessionStatus": {
       "idle": "Idle",
