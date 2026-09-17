@@ -273,12 +273,48 @@ PY
 scp -q /tmp/aa-index.html "$REMOTE:$DOWNLOAD_DIR/index.html"
 
 echo "==> verifying the published page"
-published="$(curl -s --max-time 20 "$PAGE_URL/" | grep -oE "版本 [0-9.]+" | head -1)"
+# Follow redirects first: the page may be served at a URL that canonicalises
+# with a trailing slash, and the links inside it are relative.
+PAGE_FINAL="$(curl -s -o /dev/null -w '%{url_effective}' -L --max-time 30 "$PAGE_URL")"
+published="$(curl -sL --max-time 30 "$PAGE_URL" | grep -oE "版本 [0-9.]+" | head -1)"
 if [[ "$published" != "版本 $VERSION" ]]; then
   echo "page still advertises '$published'" >&2
   exit 1
 fi
-echo "   $published at $PAGE_URL"
+echo "   $published at $PAGE_FINAL"
+
+# Fetch the installers exactly as a browser would: resolve the page's relative
+# href against the URL the page actually ended up at, then download. Checking
+# only that the link responds 200 is not enough — a mis-resolved relative link
+# is answered by the site's HTML fallback with 200, which is how a 47 MB
+# installer once downloaded as a 17 KB web page.
+echo "==> verifying each installer downloads from the page"
+PAGE_BASE="${PAGE_FINAL%/}/"
+for entry in "agents-anywhere-${VERSION}-debug.apk:$APK" \
+             "Agents Anywhere-${VERSION}-universal.dmg:$DMG"
+do
+  name="${entry%%:*}"; local_path="${entry##*:}"
+  # Percent-encode spaces the way a browser does.
+  href="${name// /%20}"
+  url="${PAGE_BASE}${href}"
+  tmp="$(mktemp)"
+  curl -sL --max-time 600 -o "$tmp" "$url" || { echo "download failed: $url" >&2; exit 1; }
+  local_size="$(wc -c < "$local_path" | tr -d ' ')"
+  got_size="$(wc -c < "$tmp" | tr -d ' ')"
+  if [[ "$got_size" != "$local_size" ]]; then
+    echo "$name downloaded $got_size bytes, expected $local_size" >&2
+    echo "  url: $url" >&2
+    echo "  (a much smaller file is usually the site's HTML fallback being saved" >&2
+    echo "   as the installer, which means the link resolved to the wrong path)" >&2
+    rm -f "$tmp"; exit 1
+  fi
+  if ! cmp -s "$tmp" "$local_path"; then
+    echo "$name differs from the built artifact" >&2
+    rm -f "$tmp"; exit 1
+  fi
+  rm -f "$tmp"
+  echo "   $name ok ($got_size bytes, byte-identical)"
+done
 
 cat <<EOF
 

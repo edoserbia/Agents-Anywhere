@@ -185,6 +185,21 @@ systemctl stop fail2ban        # 立即停止（已封禁的 IP 会一并解封�
 systemctl disable fail2ban     # 可选：取消开机自启
 ```
 
+### 下载页必须能真正下到文件
+
+下载页的链接是**相对路径**（`href="agents-anywhere-….apk"`），所以页面 URL 的**结尾斜杠决定了浏览器把它解析到哪里**：
+
+| 页面 URL | 浏览器解析出的链接 | 结果 |
+| --- | --- | --- |
+| `/download`（无斜杠） | `/agents-anywhere-….apk` | 被 catch-all 用 Web 控制台的 HTML 兜底，得到 **17 KB 的网页** |
+| `/download/`（有斜杠） | `/download/agents-anywhere-….apk` | 正确的 47 MB 安装包 |
+
+这个问题很隐蔽：错误的链接同样返回 **HTTP 200**，文件也有内容，只是内容是网页——下载下来才发现在浏览器里打不开。因此 Caddy 中有一条 `redir /download /download/ permanent` 做规范化。
+
+注意实现方式：必须用**裸 `redir` 指令**，不能写成 `handle` 块。Caddy 按自身优先级排序指令，`handle` 块之间是互斥的，实测放在 `handle` 链里的重定向不会生效。
+
+`devtools/release.sh` 现在会按浏览器的方式验证：跟随重定向取到页面最终 URL，据此解析相对链接，下载后用 `cmp` 与本地构建产物逐字节比对。**只检查链接返回 200 是不够的**，这正是本次漏检的原因。
+
 ### 加固后的实测结果
 
 | 指标 | 加固前 | 加固后 |
