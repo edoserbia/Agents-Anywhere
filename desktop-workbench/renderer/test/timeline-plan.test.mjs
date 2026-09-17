@@ -37,9 +37,14 @@ function todoCall(id, orderSeq, todos, createdAt = "2026-09-16T10:00:00Z") {
   })
 }
 
+/** A user request, which opens the turn a plan belongs to. */
+function request(id, orderSeq) {
+  return item({ id, orderSeq, type: "message", role: "user", content: { text: "do the thing" } })
+}
+
 test("reads the plan out of a todo_write tool call", () => {
   const plan = buildTimelinePlan([
-    item({ id: "u1", type: "message", role: "user", orderSeq: 1 }),
+    request("u1", 1),
     todoCall("p1", 2, [
       { content: "First step", status: "completed" },
       { content: "Second step", status: "in_progress" },
@@ -58,6 +63,7 @@ test("the newest revision wins, because each call replaces the whole list", () =
   // history: reading it would show steps that have since been reworded or
   // dropped.
   const plan = buildTimelinePlan([
+    request("u0", 1),
     todoCall("p1", 2, [{ content: "Old wording", status: "pending" }]),
     todoCall("p2", 5, [
       { content: "Old wording", status: "completed" },
@@ -77,7 +83,8 @@ test("the newest revision wins, because each call replaces the whole list", () =
 
 test("a plan that finishes and is rewritten still reports the latest state", () => {
   const plan = buildTimelinePlan([
-    todoCall("p1", 1, [{ content: "Only step", status: "in_progress" }]),
+    request("u0", 1),
+    todoCall("p1", 2, [{ content: "Only step", status: "in_progress" }]),
     todoCall("p2", 9, [{ content: "Only step", status: "completed" }]),
   ])
   assert.ok(plan)
@@ -97,6 +104,7 @@ test("no plan means no card, rather than an empty one", () => {
 
 test("Codex's update_plan is read the same way", () => {
   const plan = buildTimelinePlan([
+    request("u0", 1),
     item({
       id: "c1",
       orderSeq: 3,
@@ -113,7 +121,8 @@ test("Codex's update_plan is read the same way", () => {
 test("an unrecognised status is kept as not-started, never dropped", () => {
   // A runtime that adds a status must never make a step vanish from the plan.
   const plan = buildTimelinePlan([
-    todoCall("p1", 1, [
+    request("u0", 1),
+    todoCall("p1", 2, [
       { content: "Known", status: "completed" },
       { content: "Brand new status", status: "blocked" },
     ]),
@@ -125,12 +134,16 @@ test("an unrecognised status is kept as not-started, never dropped", () => {
 
 test("blank steps are skipped and a plan of only blanks is no plan", () => {
   const plan = buildTimelinePlan([
-    todoCall("p1", 1, [{ content: "   ", status: "pending" }, { content: "Real", status: "pending" }]),
+    request("u0", 1),
+    todoCall("p1", 2, [{ content: "   ", status: "pending" }, { content: "Real", status: "pending" }]),
   ])
   assert.ok(plan)
   assert.equal(plan.total, 1)
 
-  assert.equal(buildTimelinePlan([todoCall("p2", 1, [{ content: "  ", status: "pending" }])]), null)
+  assert.equal(
+    buildTimelinePlan([request("u0", 1), todoCall("p2", 2, [{ content: "  ", status: "pending" }])]),
+    null,
+  )
 })
 
 test("plan items are reported so the fold can avoid showing them twice", () => {
@@ -142,4 +155,39 @@ test("plan items are reported so the fold can avoid showing them twice", () => {
   const ids = planItemIds(items)
   assert.deepEqual([...ids].sort(), ["p1", "p3"])
   assert.equal(ids.has("t2"), false)
+})
+
+test("the plan is scoped to the current turn, not the session", () => {
+  // A checklist describes the work in hand. Keeping the previous turn's finished
+  // plan on screen while a new request runs would describe work already over.
+  const plan = buildTimelinePlan([
+    request("u1", 1),
+    todoCall("p1", 2, [{ content: "Old task step", status: "completed" }]),
+    request("u2", 3),
+    todoCall("p2", 4, [{ content: "New task step", status: "in_progress" }]),
+  ])
+  assert.ok(plan)
+  assert.deepEqual(plan.steps.map((step) => step.content), ["New task step"])
+})
+
+test("a new turn without a plan shows nothing rather than the old plan", () => {
+  // The bar must disappear when the current task has no plan; falling back to a
+  // finished checklist would be actively misleading.
+  const plan = buildTimelinePlan([
+    request("u1", 1),
+    todoCall("p1", 2, [{ content: "Old task step", status: "completed" }]),
+    request("u2", 3),
+    item({ id: "t1", orderSeq: 4, content: { kind: "command", title: "ls" } }),
+  ])
+  assert.equal(plan, null)
+})
+
+test("a turn is still identified when the request is the newest item", () => {
+  // The agent may not have written its plan yet, so there is nothing to show
+  // until it does — and the previous plan must already be gone.
+  const plan = buildTimelinePlan([
+    todoCall("p1", 1, [{ content: "Old task step", status: "completed" }]),
+    request("u2", 2),
+  ])
+  assert.equal(plan, null)
 })

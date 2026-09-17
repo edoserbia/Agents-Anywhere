@@ -2,6 +2,7 @@
 // which has no knowledge of the `@/` path alias. The `.ts` extension is
 // required because that runner resolves ESM specifiers literally.
 import type { TimelineItem } from "../../features/dashboard/types"
+import { isUserRequestItem } from "./timeline-turns.ts"
 
 /** One step of an agent's plan. */
 export type PlanStep = {
@@ -69,17 +70,31 @@ function planStepsFromItem(item: TimelineItem): PlanStep[] | null {
 }
 
 /**
- * The plan currently in force for a session, or null when the agent never made
- * one.
+ * The plan in force for the session's **current** turn, or null when the current
+ * turn has no plan.
  *
- * The agent rewrites the entire list on every call, so only the newest call
- * describes the present state; earlier calls are history and are used here just
- * to pick the anchor. The anchor is the newest call's position so the plan sits
- * where the agent last updated it rather than at the top of a long transcript.
+ * Scoped to the latest request because a plan describes the work in hand, not
+ * the session's history: showing the previous turn's finished checklist while a
+ * new request runs would describe work that is already over. As soon as a newer
+ * request exists, any plan written before it belongs to the earlier turn and is
+ * no longer current — if that newer turn writes no plan, there is nothing to
+ * show, which is the intended outcome rather than a fallback to the old one.
+ *
+ * Within the current turn only the newest revision counts, because the agent
+ * rewrites the whole list on every call.
  */
 export function buildTimelinePlan(items: readonly TimelineItem[]): TimelinePlan | null {
+  // The last request opens the turn the reader is currently in.
+  let turnStart = -1
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]
+    if (item && isUserRequestItem(item)) turnStart = index
+  }
+
   let latest: { item: TimelineItem; steps: PlanStep[] } | null = null
-  for (const item of items) {
+  for (let index = turnStart + 1; index < items.length; index += 1) {
+    const item = items[index]
+    if (!item) continue
     const steps = planStepsFromItem(item)
     if (!steps) continue
     if (!latest || item.orderSeq >= latest.item.orderSeq) latest = { item, steps }

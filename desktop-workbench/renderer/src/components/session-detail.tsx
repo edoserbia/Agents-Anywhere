@@ -62,7 +62,7 @@ import { SessionComposer, type AttachedFile } from "@/components/session/session
 import { SessionQueuePanel } from "@/components/session/session-queue-panel"
 import { formatTimelineTimestamp } from "@/components/session/timeline-timestamp"
 import { buildTimelinePlan } from "@/components/session/timeline-plan"
-import { TimelinePlanCard } from "@/components/session/timeline-plan-card"
+import { TimelinePlanBar } from "@/components/session/timeline-plan-card"
 import {
   acceptSessionEventId,
   bufferedEventsAfterLiveCapabilityRead,
@@ -1810,9 +1810,6 @@ export function SessionDetail({
             blockingInteractionList.length === 0 ? (
               <p className="py-12 text-center text-sm text-muted-foreground">{tSession("noActivity")}</p>
             ) : null}
-            {timelinePlan ? (
-              <TimelinePlanCard plan={timelinePlan} running={turnInProgress} />
-            ) : null}
             {timelineBlocks.map((block) => {
               if (block.kind === "process") {
                 return (
@@ -1962,6 +1959,16 @@ export function SessionDetail({
         />
         <div ref={composerContainerRef} className="pointer-events-auto relative">
           <div className="mx-auto w-full max-w-3xl px-4">
+            {/* The current turn's plan, pinned with the composer so a long run
+                cannot scroll it out of view. A turn without a plan renders
+                nothing here. */}
+            {timelinePlan ? (
+              <TimelinePlanBar
+                plan={timelinePlan}
+                running={turnInProgress}
+                className="mb-2"
+              />
+            ) : null}
             <SessionQueuePanel
               items={queuedMessages}
               onUpdate={handleUpdateQueued}

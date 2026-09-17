@@ -90,17 +90,27 @@ private fun planStepsFromMessage(message: TimelineMessage): List<PlanStep>? {
 }
 
 /**
- * The plan currently in force for a session, or null when the agent never made
- * one.
+ * The plan in force for the session's **current** turn, or null when the current
+ * turn has no plan.
  *
- * The agent rewrites the entire list on every call, so only the newest call
- * describes the present state; earlier calls are history and are used here just
- * to pick the newest revision.
+ * Scoped to the latest request because a plan describes the work in hand, not
+ * the session's history: showing the previous turn's finished checklist while a
+ * new request runs would describe work that is already over. As soon as a newer
+ * request exists, a plan written before it belongs to the earlier turn — if that
+ * newer turn writes no plan there is nothing to show, which is the intended
+ * outcome rather than a fallback to the old one.
+ *
+ * Within the current turn only the newest revision counts, because the agent
+ * rewrites the whole list on every call.
  */
 internal fun buildTimelinePlan(messages: List<TimelineMessage>): TimelinePlanState? {
+    // The last request opens the turn the reader is currently in.
+    val turnStart = messages.indexOfLast { it.isUserRequest() }
+
     var latest: TimelineMessage? = null
     var steps: List<PlanStep>? = null
-    for (message in messages) {
+    for (index in (turnStart + 1) until messages.size) {
+        val message = messages[index]
         val found = planStepsFromMessage(message) ?: continue
         val previous = latest
         if (previous == null || message.orderSeq >= previous.orderSeq) {

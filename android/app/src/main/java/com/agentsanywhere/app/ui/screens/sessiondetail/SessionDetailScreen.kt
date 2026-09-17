@@ -198,6 +198,9 @@ fun SessionDetailScreen(
     var attachments by remember(composerDraftSessionId) { mutableStateOf(restoredComposerDraft.attachments) }
     var retryClientMessageId by remember(composerDraftSessionId) { mutableStateOf(restoredComposerDraft.clientMessageId) }
     var retryMessageAction by remember(composerDraftSessionId) { mutableStateOf(restoredComposerDraft.retryAction) }
+    // The current turn's plan, reported by the message list and pinned above the
+    // composer. Null means the turn has no plan, and nothing is shown.
+    var timelinePlan by remember(sessionId) { mutableStateOf<TimelinePlanState?>(null) }
     var preparedSessionCreating by remember(preparedSession) { mutableStateOf(false) }
     var preparedSelections by remember(preparedSession) { mutableStateOf(preparedSession?.selections ?: NewSessionSelections()) }
     var preparedModelOptions by remember(preparedSession) { mutableStateOf(emptyList<com.agentsanywhere.app.feature.sessiondetail.RuntimeSelectionOption>()) }
@@ -1701,6 +1704,7 @@ fun SessionDetailScreen(
                                 messages = state.messages,
                                 darkMode = darkMode,
                                 sessionId = sessionId.orEmpty(),
+                                onPlanChange = { timelinePlan = it },
                                 workspaceRoot = state.session?.cwd,
                                 controller = controller,
                                 forceLatestRequest = forceLatestRequest,
@@ -1789,6 +1793,15 @@ fun SessionDetailScreen(
                                                 )
                                             }
                                         },
+                                    )
+                                }
+                                // The current turn's plan, pinned with the
+                                // composer so a long run cannot scroll it away.
+                                timelinePlan?.let { plan ->
+                                    TimelinePlanBar(
+                                        plan = plan,
+                                        running = turnInProgress,
+                                        modifier = Modifier.padding(bottom = 8.dp),
                                     )
                                 }
                                 MessageComposer(

@@ -26,6 +26,21 @@ class TimelinePlanTest {
         rawContent = rawContent,
     )
 
+    /**
+     * A user request, which opens the turn a plan belongs to.
+     *
+     * `isUserRequest` requires both the message type and the user author, so the
+     * author has to be overridden from the agent default.
+     */
+    private fun request(id: String, orderSeq: Int) = TimelineMessage(
+        id = id,
+        author = MessageAuthor.User,
+        text = "do the thing",
+        kind = TimelineMessageKind.Text,
+        type = "message",
+        orderSeq = orderSeq,
+    )
+
     /** A `todo_write` call, the shape DSH actually emits. */
     private fun todoCall(id: String, orderSeq: Int, todos: String) = message(
         id = id,
@@ -37,6 +52,7 @@ class TimelinePlanTest {
     fun `reads the plan out of a todo_write tool call`() {
         val plan = buildTimelinePlan(
             listOf(
+                request("u0", 1),
                 todoCall(
                     "p1",
                     2,
@@ -62,6 +78,7 @@ class TimelinePlanTest {
         // history: reading it would show steps that have since been reworded.
         val plan = buildTimelinePlan(
             listOf(
+                request("u0", 1),
                 todoCall("p1", 2, """[{"content":"Old wording","status":"pending"}]"""),
                 todoCall(
                     "p2",
@@ -88,6 +105,7 @@ class TimelinePlanTest {
     fun `Codex's update_plan is read the same way`() {
         val plan = buildTimelinePlan(
             listOf(
+                request("u0", 1),
                 message(
                     "c1",
                     3,
@@ -106,9 +124,10 @@ class TimelinePlanTest {
         // A runtime that adds a status must never make a step vanish.
         val plan = buildTimelinePlan(
             listOf(
+                request("u0", 1),
                 todoCall(
                     "p1",
-                    1,
+                    2,
                     """[{"content":"Known","status":"completed"},
                         {"content":"Brand new status","status":"blocked"}]""",
                 ),
@@ -123,9 +142,10 @@ class TimelinePlanTest {
     fun `blank steps are skipped and a plan of only blanks is no plan`() {
         val plan = buildTimelinePlan(
             listOf(
+                request("u0", 1),
                 todoCall(
                     "p1",
-                    1,
+                    2,
                     """[{"content":"   ","status":"pending"},{"content":"Real","status":"pending"}]""",
                 ),
             ),
@@ -133,7 +153,59 @@ class TimelinePlanTest {
         requireNotNull(plan)
         assertEquals(1, plan.total)
 
-        assertNull(buildTimelinePlan(listOf(todoCall("p2", 1, """[{"content":"  ","status":"pending"}]"""))))
+        assertNull(
+            buildTimelinePlan(
+                listOf(
+                    request("u0", 1),
+                    todoCall("p2", 2, """[{"content":"  ","status":"pending"}]"""),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `the plan is scoped to the current turn not the session`() {
+        // A checklist describes the work in hand. Keeping the previous turn's
+        // finished plan on screen while a new request runs would describe work
+        // already over.
+        val plan = buildTimelinePlan(
+            listOf(
+                request("u1", 1),
+                todoCall("p1", 2, """[{"content":"Old task step","status":"completed"}]"""),
+                request("u2", 3),
+                todoCall("p2", 4, """[{"content":"New task step","status":"in_progress"}]"""),
+            ),
+        )
+        requireNotNull(plan)
+        assertEquals(listOf("New task step"), plan.steps.map { it.content })
+    }
+
+    @Test
+    fun `a new turn without a plan shows nothing rather than the old plan`() {
+        // The bar must disappear when the current task has no plan; falling back
+        // to a finished checklist would be actively misleading.
+        val plan = buildTimelinePlan(
+            listOf(
+                request("u1", 1),
+                todoCall("p1", 2, """[{"content":"Old task step","status":"completed"}]"""),
+                request("u2", 3),
+                message("t1", 4, """{"kind":"command","title":"ls"}"""),
+            ),
+        )
+        assertNull(plan)
+    }
+
+    @Test
+    fun `a turn is still identified when the request is the newest message`() {
+        // The agent may not have written its plan yet, so there is nothing to
+        // show until it does - and the previous plan must already be gone.
+        val plan = buildTimelinePlan(
+            listOf(
+                todoCall("p1", 1, """[{"content":"Old task step","status":"completed"}]"""),
+                request("u2", 2),
+            ),
+        )
+        assertNull(plan)
     }
 
     @Test

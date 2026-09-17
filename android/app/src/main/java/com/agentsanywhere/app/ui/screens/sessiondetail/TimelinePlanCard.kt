@@ -38,19 +38,19 @@ import com.composables.icons.lucide.LoaderCircle
 import com.composables.icons.lucide.Lucide
 
 /**
- * The agent's plan for the current work.
+ * The current turn's plan, pinned above the composer.
  *
- * Agents keep a checklist and rewrite it as steps finish, which is the only
- * place the intended shape of a long run is written down. Rendering it as an
- * ordinary tool row buried that: the reader could see that tools ran but not
- * what remained.
+ * It sits with the composer rather than in the transcript because the plan is an
+ * input to reading the run — what is happening and what is left — and the
+ * transcript scrolls it away exactly when a long run makes it most useful.
  *
- * While the run is in progress the plan is open, because its whole purpose is
- * to answer "what is left". Once the run ends it collapses to a one-line
- * summary, since a finished plan is history rather than status.
+ * Collapsed by default: the one-line summary already carries the progress count,
+ * which is what a glance at a running task needs, and the steps are one tap
+ * away. Rendered only when the current turn has a plan, so a turn without one
+ * shows nothing rather than an empty bar.
  */
 @Composable
-internal fun TimelinePlanCard(
+internal fun TimelinePlanBar(
     plan: TimelinePlanState,
     running: Boolean,
     modifier: Modifier = Modifier,
@@ -59,11 +59,8 @@ internal fun TimelinePlanCard(
     val muted = colors.muted
     val surface = colors.sessionTimelineActivitySurface
     val haptic = LocalHapticFeedback.current
-    var open by remember(plan.id) { mutableStateOf(running) }
-
-    // Follow the run, but never overrule a choice the reader made.
-    var touched by remember(plan.id) { mutableStateOf(false) }
-    if (!touched && open != running) open = running
+    // A new plan is a new turn's checklist, so it starts collapsed again.
+    var open by remember(plan.id) { mutableStateOf(false) }
 
     val allDone = plan.total > 0 && plan.completed == plan.total
     val startedAt = formatTimelineTimestamp(plan.createdAt)
@@ -77,7 +74,6 @@ internal fun TimelinePlanCard(
                 .background(surface)
                 .noRippleClickable {
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    touched = true
                     open = !open
                 }
                 .padding(horizontal = 6.dp, vertical = 6.dp),
