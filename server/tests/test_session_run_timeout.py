@@ -9,6 +9,7 @@ whether to retry, instead of receiving an opaque Internal Server Error.
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 import pytest
 
@@ -87,3 +88,25 @@ def test_a_cancelled_read_is_not_reported_as_a_timeout() -> None:
             await service._read_runtime_status(_session())
 
     asyncio.run(run())
+
+
+def test_a_status_read_timeout_is_treated_as_busy_when_queueing() -> None:
+    """Queueing must survive the very condition it exists for.
+
+    A status read that times out means the runtime is too busy to answer, which
+    is precisely when a message needs to be queued. Rejecting the send there made
+    the feature unusable under load: the busier the runtime, the likelier the
+    rejection.
+
+    The decision lives in `send_message`, so this asserts the shape of that code
+    rather than standing up a full service: the timeout branch must exist, must
+    be reachable only when queueing was requested, and must enqueue.
+    """
+    source = inspect.getsource(SessionRunService.send_message)
+    assert "except SessionRunTimeoutError:" in source, "the timeout is caught"
+
+    branch = source[source.index("except SessionRunTimeoutError:"):]
+    branch = branch[: branch.index("if runtime_status not in")]
+    assert "if not payload.queueWhenBusy:" in branch, "only queued sends are relaxed"
+    assert "raise" in branch, "an ordinary send still reports the timeout"
+    assert "_enqueue_message" in branch, "a queued send is enqueued"

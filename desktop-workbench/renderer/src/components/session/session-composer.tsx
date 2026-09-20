@@ -186,7 +186,7 @@ export function SessionComposer({
     interruptCapability.allowed &&
     (isWaiting || isRunning || isStopping || isWaitingApproval || isBlocked),
   )
-  const showInterrupt = !creatingSession && canUseInterrupt && activeSessionCanInterrupt
+
   const [selectedPermissionMode, setSelectedPermissionMode] = React.useState("")
   const [selectedModel, setSelectedModel] = React.useState("")
   const [selectedReasoning, setSelectedReasoning] = React.useState("")
@@ -344,6 +344,13 @@ export function SessionComposer({
     hasInput &&
     attachmentsReady &&
     (attachments.length === 0 || canUseAttachments)
+  // While a turn runs the button means "interrupt" — but only when there is
+  // nothing to send. A running runtime that can accept a message (DSH) queues
+  // it, and offering only a pause left no way to reach that: the button
+  // interrupted and Enter did nothing at all.
+  const canQueueWhileRunning = queuesWhileRunning && (canSubmitCommand || canSubmitMessage)
+  const showInterrupt =
+    !creatingSession && canUseInterrupt && activeSessionCanInterrupt && !canQueueWhileRunning
   const concurrentWriter = runtimeState?.error?.code === "DSH_CONCURRENT_WRITER_DETECTED"
   const updateValue = React.useCallback((nextValue: string) => {
     valueRef.current = nextValue

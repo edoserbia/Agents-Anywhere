@@ -1592,7 +1592,12 @@ fun SessionDetailScreen(
         }
         else -> null
     }
-    val showInterrupt = state.interrupting || (
+    // While a turn runs the button means "interrupt" — but only when there is
+    // nothing to send. A running runtime that can accept a message (DSH) queues
+    // it, and offering only a pause left no way to reach that: the button
+    // interrupted and there was no other affordance to queue.
+    val canQueueWhileRunning = queueWhileRunning && canSend
+    val showInterrupt = !canQueueWhileRunning && (state.interrupting || (
         connectorOnline && canUseInterrupt && runtimeStatus in setOf(
             SessionRuntimeStatus.Waiting,
             SessionRuntimeStatus.Pending,
@@ -1601,7 +1606,7 @@ fun SessionDetailScreen(
             SessionRuntimeStatus.WaitingApproval,
             SessionRuntimeStatus.Blocked,
         )
-    )
+    ))
     val replyTarget = state.session?.runtimeLabel?.takeIf { it.isNotBlank() }
         ?: stringResource(R.string.session_agent_fallback)
     val placeholder = when {

@@ -410,7 +410,21 @@ class SessionRunService:
         if not await self._manager.is_online(session.connectorId):
             raise SessionRunConflictError("connector is offline")
         await self._ensure_session_runtime_running(session, user_id=user_id)
-        runtime_status = await self._read_runtime_status(session)
+        try:
+            runtime_status = await self._read_runtime_status(session)
+        except SessionRunTimeoutError:
+            # A runtime too busy to answer the status read is, by that fact,
+            # mid-turn — which is exactly the case queueing exists for. Failing
+            # here made the feature unusable under the load it was built for:
+            # the busier the runtime, the more likely the send was rejected.
+            if not payload.queueWhenBusy:
+                raise
+            await self._require_session_capability(
+                session,
+                SESSION_SEND_MESSAGE,
+                user_id=user_id,
+            )
+            return await self._enqueue_message(session, payload, user_id=user_id)
         if runtime_status not in {"idle", "error"}:
             # The runtime is mid-turn. With queueing requested, keep the message
             # instead of rejecting it; it is dispatched as this turn finishes.
