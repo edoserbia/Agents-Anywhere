@@ -82,3 +82,43 @@ def test_source_isolation_preserves_existing_keys(tmp_path):
         await a.sync_state_write("dsh/history/x", {"seq": 1})
         assert await b.sync_state_read("dsh/history/x") is None
     asyncio.run(run())
+
+
+def test_runtimes_sync_concurrently_so_one_cannot_starve_another():
+    """A slow runtime must not block the others' acknowledgement budgets.
+
+    The scanner ran runtimes one after another. A single Codex session read was
+    measured at 61s — longer than the DSH bridge's entire 60s batch-ACK budget —
+    so while Codex held the loop DSH could not acknowledge its event stream, and
+    the bridge restarted it from the first batch indefinitely. That is what made
+    a task submitted in DSH Desktop never reach the platform.
+    """
+    import asyncio
+    import inspect
+
+    from connector.server import runtime_sync
+
+    source = inspect.getsource(runtime_sync.RuntimeSyncRunner.sync_existing_once)
+    assert "asyncio.gather(" in source, "runtimes sync concurrently"
+    assert "_sync_one_runtime" in source, "each runtime has its own task"
+    assert "for runtime_id in self.supervisor.runtimes:" not in source, (
+        "the serial loop must be gone"
+    )
+
+    # Concurrent execution is the point: two runtimes must overlap.
+    order: list[str] = []
+
+    class _Service(runtime_sync.RuntimeSyncRunner):
+        async def _sync_one_runtime(self, runtime_id):  # type: ignore[override]
+            order.append(f"start:{runtime_id}")
+            await asyncio.sleep(0.05)
+            order.append(f"end:{runtime_id}")
+
+    async def run() -> None:
+        service = _Service.__new__(_Service)
+        service.supervisor = type("S", (), {"runtimes": ("a", "b")})()
+        service.flush_sync_state = None
+        await _Service.sync_existing_once(service)
+        assert order[:2] == ["start:a", "start:b"], "both start before either ends"
+
+    asyncio.run(run())

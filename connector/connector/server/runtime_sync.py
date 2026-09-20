@@ -93,152 +93,168 @@ class RuntimeSyncRunner:
                 logger.exception("runtime event recovery deferred runtime={}", runtime_id)
 
     async def sync_existing_once(self) -> None:
-        for runtime_id in self.supervisor.runtimes:
-            runtime_started_at = time.monotonic()
-            recovery_generation = self._recovery_generation
-            recover = self._recovered.get(runtime_id, 0) != recovery_generation
-            failed = False
+        # Runtimes sync concurrently. They are independent — a Codex session
+        # read neither reads nor writes DSH state — and running them serially let
+        # one slow runtime starve the others: a single Codex read was measured at
+        # 61s, longer than the DSH bridge's entire 60s batch-ACK budget, so DSH
+        # could not acknowledge its stream while Codex held the loop and the
+        # bridge restarted it from the first batch indefinitely.
+        runtimes = list(self.supervisor.runtimes)
+        if runtimes:
+            await asyncio.gather(
+                *(self._sync_one_runtime(runtime_id) for runtime_id in runtimes),
+                return_exceptions=True,
+            )
+        if self.flush_sync_state is not None:
             try:
-                runtime = self.supervisor.resolve_runtime(runtime_id)
-                if runtime.sync_mode == "events":
-                    continue
-                logger.info(
-                    "existing session sync runtime started runtime={}", runtime_id
+                await self.flush_sync_state()
+            except Exception:  # noqa: BLE001
+                logger.exception("history scanner sync state flush failed")
+
+    async def _sync_one_runtime(self, runtime_id: str) -> None:
+        """Sync one runtime's sessions, isolated from the others' failures."""
+        runtime_started_at = time.monotonic()
+        recovery_generation = self._recovery_generation
+        recover = self._recovered.get(runtime_id, 0) != recovery_generation
+        failed = False
+        try:
+            runtime = self.supervisor.resolve_runtime(runtime_id)
+            if runtime.sync_mode == "events":
+                # Event-driven runtimes stream their own updates; the scanner
+                # must not duplicate them.
+                return
+            logger.info(
+                "existing session sync runtime started runtime={}", runtime_id
+            )
+            entry = self.supervisor.entry(runtime_id)
+            await self.push_runtime_catalogs(runtime)
+            inventory_scan_token: str | None = None
+            runtime_type = entry.runtime_type
+            scoped_runtime_id = entry.runtime_id
+            if runtime.supports_complete_session_inventory():
+                inventory_scan_token = secrets.token_hex(16)
+                await self._ingest_scanner_notifications(
+                    [
+                        _inventory_begin_notification(
+                            runtime_type,
+                            scoped_runtime_id,
+                            inventory_scan_token,
+                        )
+                    ]
                 )
-                entry = self.supervisor.entry(runtime_id)
-                await self.push_runtime_catalogs(runtime)
-                inventory_scan_token: str | None = None
-                runtime_type = entry.runtime_type
-                scoped_runtime_id = entry.runtime_id
-                if runtime.supports_complete_session_inventory():
-                    inventory_scan_token = secrets.token_hex(16)
-                    await self._ingest_scanner_notifications(
-                        [
-                            _inventory_begin_notification(
-                                runtime_type,
-                                scoped_runtime_id,
-                                inventory_scan_token,
-                            )
-                        ]
+                try:
+                    sessions = await runtime.list_complete_session_inventory(
+                        page_size=100,
+                        force=False,
                     )
-                    try:
-                        sessions = await runtime.list_complete_session_inventory(
-                            page_size=100,
-                            force=False,
-                        )
-                    except Exception:
-                        await self._ingest_scanner_notifications(
-                            [
-                                _inventory_complete_notification(
-                                    runtime_type,
-                                    scoped_runtime_id,
-                                    inventory_scan_token,
-                                    (),
-                                    complete=False,
-                                )
-                            ]
-                        )
-                        raise
-                else:
-                    sessions = await runtime.list_sessions(limit=100, force=False)
-                timeline_sync_count = sum(
-                    1 for session in sessions if session_requires_timeline_sync(session)
-                )
-                logger.info(
-                    "existing session sync runtime discovered runtime={} sessions={} timeline_syncs={}",
-                    runtime_id,
-                    len(sessions),
-                    timeline_sync_count,
-                )
-                for session in sessions:
-                    try:
-                        recovery_key = (runtime_id, session.session_id)
-                        recover_session = recover and recovery_key not in self._recovered_sessions
-                        if recover_session:
-                            session = replace(session, metadata={
-                                **dict(session.metadata),
-                                "sync": {"changed": True, "requires_timeline_sync": True},
-                            })
-                        completed = await self.sync_existing_session(
-                            runtime, session, source_in_inventory=inventory_scan_token is not None,
-                            recovering=recover_session,
-                        )
-                        if completed is False:
-                            failed = True
-                        elif recover_session and recovery_generation == self._recovery_generation:
-                            self._recovered_sessions.add(recovery_key)
-                    except ConnectorNetworkError as exc:
-                        logger.warning(
-                            "existing session sync network failure runtime={} session_id={} external_session_id={} error={}",
-                            session.runtime,
-                            session.session_id,
-                            session.external_session_id,
-                            exc,
-                        )
-                        failed = True
-                        continue
-                    except ValidationError as exc:
-                        logger.error(
-                            "existing session sync validation failed runtime={} session_id={} external_session_id={} validation_errors={} details={}",
-                            session.runtime,
-                            session.session_id,
-                            session.external_session_id,
-                            exc.error_count(),
-                            validation_error_summary(exc),
-                        )
-                        failed = True
-                        continue
-                    except Exception:  # noqa: BLE001
-                        logger.exception(
-                            "existing session sync failed runtime={} session_id={} external_session_id={}",
-                            session.runtime,
-                            session.session_id,
-                            session.external_session_id,
-                        )
-                        failed = True
-                        continue
-                if inventory_scan_token is not None:
+                except Exception:
                     await self._ingest_scanner_notifications(
                         [
                             _inventory_complete_notification(
                                 runtime_type,
                                 scoped_runtime_id,
                                 inventory_scan_token,
-                                sessions,
-                                complete=True,
+                                (),
+                                complete=False,
                             )
                         ]
                     )
-                if not failed:
-                    self._recovered[runtime_id] = recovery_generation
-                logger.info(
-                    "existing session sync runtime completed runtime={} sessions={} elapsed_ms={:.1f}",
-                    runtime_id,
-                    len(sessions),
-                    (time.monotonic() - runtime_started_at) * 1000,
-                )
-            except RuntimeUnavailableError:
-                if self.runtime_has_config(runtime_id):
-                    logger.info(
-                        "existing session sync runtime unavailable runtime={}",
-                        runtime_id,
+                    raise
+            else:
+                sessions = await runtime.list_sessions(limit=100, force=False)
+            timeline_sync_count = sum(
+                1 for session in sessions if session_requires_timeline_sync(session)
+            )
+            logger.info(
+                "existing session sync runtime discovered runtime={} sessions={} timeline_syncs={}",
+                runtime_id,
+                len(sessions),
+                timeline_sync_count,
+            )
+            for session in sessions:
+                try:
+                    recovery_key = (runtime_id, session.session_id)
+                    recover_session = recover and recovery_key not in self._recovered_sessions
+                    if recover_session:
+                        session = replace(session, metadata={
+                            **dict(session.metadata),
+                            "sync": {"changed": True, "requires_timeline_sync": True},
+                        })
+                    completed = await self.sync_existing_session(
+                        runtime, session, source_in_inventory=inventory_scan_token is not None,
+                        recovering=recover_session,
                     )
-                continue
-            except ConnectorNetworkError as exc:
-                logger.warning(
-                    "existing {} session sync network failure error={}",
-                    runtime_id,
-                    exc,
+                    if completed is False:
+                        failed = True
+                    elif recover_session and recovery_generation == self._recovery_generation:
+                        self._recovered_sessions.add(recovery_key)
+                except ConnectorNetworkError as exc:
+                    logger.warning(
+                        "existing session sync network failure runtime={} session_id={} external_session_id={} error={}",
+                        session.runtime,
+                        session.session_id,
+                        session.external_session_id,
+                        exc,
+                    )
+                    failed = True
+                    continue
+                except ValidationError as exc:
+                    logger.error(
+                        "existing session sync validation failed runtime={} session_id={} external_session_id={} validation_errors={} details={}",
+                        session.runtime,
+                        session.session_id,
+                        session.external_session_id,
+                        exc.error_count(),
+                        validation_error_summary(exc),
+                    )
+                    failed = True
+                    continue
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "existing session sync failed runtime={} session_id={} external_session_id={}",
+                        session.runtime,
+                        session.session_id,
+                        session.external_session_id,
+                    )
+                    failed = True
+                    continue
+            if inventory_scan_token is not None:
+                await self._ingest_scanner_notifications(
+                    [
+                        _inventory_complete_notification(
+                            runtime_type,
+                            scoped_runtime_id,
+                            inventory_scan_token,
+                            sessions,
+                            complete=True,
+                        )
+                    ]
                 )
-            except TimeoutError:
-                logger.warning("existing {} session sync timed out", runtime_id)
-            except Exception:  # noqa: BLE001
-                logger.exception("existing {} session sync failed", runtime_id)
-        if self.flush_sync_state is not None:
-            try:
-                await self.flush_sync_state()
-            except Exception:  # noqa: BLE001
-                logger.exception("history scanner sync state flush failed")
+            if not failed:
+                self._recovered[runtime_id] = recovery_generation
+            logger.info(
+                "existing session sync runtime completed runtime={} sessions={} elapsed_ms={:.1f}",
+                runtime_id,
+                len(sessions),
+                (time.monotonic() - runtime_started_at) * 1000,
+            )
+        except RuntimeUnavailableError:
+            if self.runtime_has_config(runtime_id):
+                logger.info(
+                    "existing session sync runtime unavailable runtime={}",
+                    runtime_id,
+                )
+            return
+        except ConnectorNetworkError as exc:
+            logger.warning(
+                "existing {} session sync network failure error={}",
+                runtime_id,
+                exc,
+            )
+        except TimeoutError:
+            logger.warning("existing {} session sync timed out", runtime_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("existing {} session sync failed", runtime_id)
 
     async def sync_existing_session(
         self,
