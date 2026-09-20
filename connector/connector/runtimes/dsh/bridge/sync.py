@@ -5,7 +5,7 @@ import pickle
 import sys
 import tempfile
 from collections.abc import Mapping
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from typing import Any
 
 from connector.logging import logger
@@ -24,6 +24,11 @@ from connector.runtimes.dsh.bridge.models import (
     timeline_item,
 )
 from connector.runtimes.dsh.bridge.models import notice as session_notice
+
+# How long readiness may wait for the initial inventory before serving anyway.
+# Long enough for a large history to ingest, short enough that a bridge which
+# never sends the completion event cannot leave the runtime unusable.
+DEFAULT_INVENTORY_GRACE_SECONDS = 90.0
 
 _DURABLE_NOTIFICATIONS = {
     "timeline.itemUpsert", "session.meta.upsert", "session.state.updated",
@@ -77,6 +82,7 @@ class SyncRelay:
         *,
         retry_delay: float = 1.0,
         health: RelayHealth | None = None,
+        inventory_grace_seconds: float = DEFAULT_INVENTORY_GRACE_SECONDS,
     ) -> None:
         self.client, self.host = client, host
         self.queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=2)
@@ -92,9 +98,46 @@ class SyncRelay:
         self.health = RelayHealth() if health is None else health
         self.durable_checkpoints = False
         self.loaded_checkpoint: dict[str, Any] | None = None
+        self.inventory_grace_seconds = inventory_grace_seconds
+        self._grace_task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
         self.task = asyncio.create_task(self.run(), name="dsh-event-sync")
+        if self.inventory_grace_seconds > 0:
+            self._grace_task = asyncio.create_task(
+                self._announce_after_grace(), name="dsh-sync-grace"
+            )
+
+    async def _announce_after_grace(self) -> None:
+        """Stop waiting for an inventory that may never come.
+
+        Readiness is gated on `session.inventory.complete` so a session is not
+        served before its history is ingested. That event is not guaranteed: a
+        bridge that never sends it left the instance on `starting` forever, and
+        the supervisor refuses every operation while an instance is starting —
+        so the runtime could not be used at all, which is worse than serving a
+        session whose history is still filling in.
+
+        The wait is therefore bounded. Reaching the deadline means the stream is
+        subscribed and the client is connected, which is enough for the runtime
+        to answer requests; the ingest continues in the background either way.
+        """
+        try:
+            await asyncio.sleep(self.inventory_grace_seconds)
+        except asyncio.CancelledError:
+            return
+        if self.health.announced:
+            return
+        if not self.client.connected:
+            # A dead connection is not readiness; the reconnect path owns it.
+            return
+        logger.warning(
+            "DSH inventory did not complete within {}s; serving with ingest in progress",
+            self.inventory_grace_seconds,
+        )
+        self.health.announced = True
+        with suppress(Exception):
+            await self.host.runtime_health_update("running")
 
     def accept(self, payload: Mapping[str, Any]) -> None:
         try:
@@ -199,6 +242,12 @@ class SyncRelay:
             return
         await self.host.publish_runtime_notifications("dsh", notifications)
         if any(n["method"] == "session.inventory.complete" and n["params"].get("complete") is True for n in notifications):
+            # Mark readiness here too. `publish_notification` sets this as well,
+            # and the two paths see the same event depending on whether it
+            # arrived in a batch or on its own — so leaving it unset here made
+            # the flag depend on delivery shape, and a later reconnect would
+            # re-announce "starting" over a runtime that was already serving.
+            self.health.announced = True
             await self.host.runtime_health_update("running")
 
     async def store_items(self, items: list[dict[str, Any]]) -> None:

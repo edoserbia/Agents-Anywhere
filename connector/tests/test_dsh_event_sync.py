@@ -383,3 +383,89 @@ def test_unhealthy_instance_still_reports_starting_while_recovering():
         assert relay.health.announced is False
 
     asyncio.run(run())
+
+
+def test_readiness_is_not_blocked_forever_by_a_missing_inventory():
+    """A bridge that never sends inventory.complete must not wedge the runtime.
+
+    Readiness is gated on that event so a session is not served before its
+    history is ingested, but the event is not guaranteed. Waiting forever left
+    the instance on `starting`, and the supervisor refuses every operation while
+    an instance is starting — so the runtime could not be used at all.
+    """
+    import asyncio
+
+    health = RelayHealth()
+    host = SimpleNamespace(
+        session_state_update=AsyncMock(),
+        runtime_health_update=AsyncMock(),
+    )
+    client = SimpleNamespace(connected=True)
+
+    relay = SyncRelay(
+        client,
+        host,
+        health=health,
+        inventory_grace_seconds=0.05,
+    )
+
+    async def run() -> None:
+        relay.start()
+        # The grace task promotes readiness without any inventory notification.
+        await asyncio.sleep(0.2)
+        assert health.announced is True, "the runtime becomes usable"
+        host.runtime_health_update.assert_awaited_with("running")
+        await relay.close()
+
+    asyncio.run(run())
+
+
+def test_a_completed_inventory_still_announces_immediately():
+    """The normal path is unchanged: the event announces readiness itself."""
+    import asyncio
+
+    health = RelayHealth()
+
+    async def run() -> None:
+        host = SimpleNamespace(
+            session_state_update=AsyncMock(),
+            runtime_health_update=AsyncMock(),
+            publish_runtime_notifications=AsyncMock(),
+        )
+        relay = SyncRelay(Mock(), host, health=health, inventory_grace_seconds=30)
+        await relay.ingest_notifications(
+            [{"method": "session.inventory.complete", "params": {"complete": True}}]
+        )
+        assert health.announced is True
+        host.runtime_health_update.assert_awaited_with("running")
+
+    asyncio.run(run())
+
+
+def test_a_dead_connection_is_not_mistaken_for_readiness():
+    """A disconnected client is not usable, so the grace must not announce it."""
+    import asyncio
+
+    health = RelayHealth()
+    host = SimpleNamespace(
+        session_state_update=AsyncMock(),
+        runtime_health_update=AsyncMock(),
+    )
+    relay = SyncRelay(
+        SimpleNamespace(connected=False),
+        host,
+        health=health,
+        inventory_grace_seconds=0.05,
+    )
+
+    async def run() -> None:
+        relay.start()
+        await asyncio.sleep(0.2)
+        assert health.announced is False, "a dead connection stays unavailable"
+        announced_statuses = [
+            call.args[0] for call in host.runtime_health_update.await_args_list
+        ]
+        assert "running" not in announced_statuses, "readiness is never claimed"
+        await relay.close()
+
+    asyncio.run(run())
