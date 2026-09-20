@@ -122,3 +122,33 @@ def test_runtimes_sync_concurrently_so_one_cannot_starve_another():
         assert order[:2] == ["start:a", "start:b"], "both start before either ends"
 
     asyncio.run(run())
+
+
+def test_ingest_upload_allows_more_than_a_single_minute():
+    """A large snapshot must be able to finish uploading.
+
+    The upload budget used to be a fixed 60s, which assumes the whole snapshot
+    fits in a minute. On an asymmetric link it does not: measured here, upload
+    runs at ~19 KB/s against 216 KB/s down, so one megabyte already takes ~54s
+    and every larger history failed on every attempt — the snapshot never
+    reached the server, so the task never appeared in the platform.
+
+    The budget is generous now, and overridable for a deployment that wants it
+    tighter.
+    """
+    import os
+
+    from connector.server.ingest import ConnectorIngestClient
+
+    ingest = ConnectorIngestClient.__new__(ConnectorIngestClient)
+    # Default: long enough for a multi-megabyte snapshot on a slow uplink.
+    assert ingest._upload_timeout_seconds() >= 600
+
+    # Overridable, and a malformed value falls back rather than crashing.
+    os.environ["AA_CONNECTOR_INGEST_TIMEOUT_SECONDS"] = "120"
+    try:
+        assert ingest._upload_timeout_seconds() == 120
+        os.environ["AA_CONNECTOR_INGEST_TIMEOUT_SECONDS"] = "not-a-number"
+        assert ingest._upload_timeout_seconds() >= 600, "bad input falls back"
+    finally:
+        os.environ.pop("AA_CONNECTOR_INGEST_TIMEOUT_SECONDS", None)

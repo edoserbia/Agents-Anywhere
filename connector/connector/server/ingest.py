@@ -193,8 +193,31 @@ class ConnectorIngestClient:
             api_v2_url(self._server_url, "/connector/ingest"),
             headers={"Authorization": f"Bearer {access_token}"},
             json={"notifications": notifications},
-            timeout=60,
+            timeout=self._upload_timeout_seconds(),
         )
+
+    def _upload_timeout_seconds(self) -> float:
+        """Time to allow one ingest upload.
+
+        The previous fixed 60s assumed a link where a whole snapshot fits in a
+        minute. On an asymmetric connection it does not: measured here, upload
+        runs at ~19 KB/s against 216 KB/s down, so a single megabyte already
+        takes ~54s and any larger history times out every attempt. The request is
+        not what the bridge waits on — it waits for the batch acknowledgement,
+        which this call is upstream of — so a longer upload budget lets a large
+        snapshot complete instead of failing deterministically.
+
+        Overridable so a deployment can tighten or extend it.
+        """
+        import os
+
+        configured = os.environ.get("AA_CONNECTOR_INGEST_TIMEOUT_SECONDS")
+        if configured:
+            try:
+                return max(1.0, float(configured))
+            except ValueError:
+                pass
+        return 900.0
 
 
 def _raise_for_rejected_notifications(response: httpx.Response) -> None:
