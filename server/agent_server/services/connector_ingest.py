@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from loguru import logger
@@ -61,6 +62,58 @@ def ingest_rejection_from_exception(
         message=message,
         errorType=type(error).__name__,
     )
+
+
+
+# One sweep per connector at a time. A newer request replaces the pending one
+# because the sweep reads current state when it runs, so superseding work is
+# never lost — only redundant passes are.
+_CAPABILITY_REPUBLISH_TASKS: dict[str, asyncio.Task[None]] = {}
+
+
+def _schedule_capability_republish(
+    store: Any,
+    presence: Any,
+    publisher: Any,
+    connector_id: str,
+) -> None:
+    """Run the capability sweep off the ingest response path.
+
+    The sweep is idempotent: it projects the connector's current capability
+    facts onto its sessions. Running it slightly later therefore produces the
+    same result, while running it inline delayed every ingest by the length of
+    the sweep.
+    """
+    existing = _CAPABILITY_REPUBLISH_TASKS.get(connector_id)
+    if existing is not None and not existing.done():
+        return
+    _CAPABILITY_REPUBLISH_TASKS[connector_id] = asyncio.create_task(
+        _run_capability_republish(store, presence, publisher, connector_id),
+        name=f"capability-republish-{connector_id}",
+    )
+
+
+async def _run_capability_republish(
+    store: Any,
+    presence: Any,
+    publisher: Any,
+    connector_id: str,
+) -> None:
+    try:
+        await publish_connector_session_capabilities(
+            store,
+            presence,
+            publisher,
+            connector_id,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - a background sweep must not crash the loop
+        logger.exception(
+            "capability republish failed connector_id={}", connector_id
+        )
+    finally:
+        _CAPABILITY_REPUBLISH_TASKS.pop(connector_id, None)
 
 
 class ConnectorIngestService:
@@ -152,7 +205,15 @@ class ConnectorIngestService:
         # Republish whenever a runtime's capability-affecting status changed, so a
         # runtime that recovers does not leave open clients holding stale facts.
         if runtime_status_changed or protocol_capabilities_changed or runtime_scoped_capabilities_changed:
-            await publish_connector_session_capabilities(
+            # Republishing capability facts touches every session of this
+            # connector, so its cost grows with the workspace rather than with
+            # the notification. Awaiting it here made the ingest response take
+            # as long as that sweep — measured at 61-65s for 633 sessions — which
+            # overran the DSH bridge's 60s batch-ACK budget, so the bridge
+            # declared the stream failed and restarted from the first batch
+            # forever. The sweep is idempotent and converges on the same state
+            # whenever it runs, so it does not need to hold the response.
+            _schedule_capability_republish(
                 self._store,
                 self._presence,
                 self._timeline_broker,
@@ -215,7 +276,7 @@ class ConnectorIngestService:
         )
         dashboard_changed = await self._publish_effects([effect])
         if method == "protocol.capabilitiesUpdated" and effect.protocol_changed:
-            await publish_connector_session_capabilities(
+            _schedule_capability_republish(
                 self._store,
                 self._presence,
                 self._timeline_broker,
@@ -226,7 +287,7 @@ class ConnectorIngestService:
             and effect.protocol_changed
             and not isinstance(params.get("sessionId"), str)
         ):
-            await publish_connector_session_capabilities(
+            _schedule_capability_republish(
                 self._store,
                 self._presence,
                 self._timeline_broker,

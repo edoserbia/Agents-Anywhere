@@ -551,3 +551,45 @@ def test_unsupported_capability_is_not_masked_by_takeover() -> None:
     assert send is not None
     assert send.supported is False
     assert send.unavailableReason == "runtime_capability_unsupported"
+
+
+def test_the_capability_sweep_does_not_block_the_ingest_response() -> None:
+    """The sweep must run off the request path.
+
+    Republishing capability facts touches every session of a connector, so its
+    cost grows with the workspace instead of the notification. Awaiting it inline
+    made an ingest response take as long as the sweep — measured at 61-65s for
+    633 sessions — which overran the DSH bridge's 60s batch-ACK budget and made
+    the bridge restart the stream from the first batch forever.
+
+    The sweep is idempotent, so running it after the response is equivalent. This
+    drives the scheduler and asserts the sweep is not awaited by the caller.
+    """
+    import asyncio
+
+    from agent_server.services import connector_ingest
+
+    swept: list[str] = []
+
+    async def fake_sweep(_store, _presence, _publisher, connector_id):
+        swept.append(connector_id)
+
+    async def run() -> None:
+        original = connector_ingest.publish_connector_session_capabilities
+        connector_ingest.publish_connector_session_capabilities = fake_sweep
+        try:
+            # The caller returns before the sweep has run.
+            connector_ingest._schedule_capability_republish(
+                None, None, None, "conn_test"
+            )
+            assert swept == [], "scheduling must not run the sweep inline"
+            # A second schedule while one is pending is coalesced.
+            connector_ingest._schedule_capability_republish(
+                None, None, None, "conn_test"
+            )
+            await asyncio.sleep(0.05)
+            assert swept == ["conn_test"], "one sweep per connector"
+        finally:
+            connector_ingest.publish_connector_session_capabilities = original
+
+    asyncio.run(run())
