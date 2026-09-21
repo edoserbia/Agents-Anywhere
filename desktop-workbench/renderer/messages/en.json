@@ -1090,7 +1090,13 @@
       "queueCancel": "Cancel",
       "queueUpdateFailed": "Could not update the queued message.",
       "queueDeleteFailed": "Could not remove the queued message.",
-      "queueItemFailed": "This queued message could not be sent."
+      "queueItemFailed": "This queued message could not be sent.",
+      "deleteMessage": "Delete this message",
+      "deleteMessageTitle": "Delete this message?",
+      "deleteMessageDescription": "It will be hidden from your conversation. The original record in the cloud runtime is not changed.",
+      "messageDeleted": "Deleted",
+      "deleteMessageFailed": "Could not delete the message.",
+      "cancel": "Cancel"
     },
     "sessionStatus": {
       "idle": "Idle",

@@ -389,6 +389,31 @@ class TimelineRepositoryMixin:
                     await self.timeline.upsert_one(conn, result)
         return TimelineItemWriteResult(item=result, changed=not unchanged)
 
+    async def hide_timeline_item(
+        self,
+        *,
+        session_id: str,
+        item_id: str,
+    ) -> TimelineItem | None:
+        """Delete one item from the reader's view of the session.
+
+        The runtime owns the timeline and has no delete, so this records a local
+        mark instead of removing the row: a removed row would be re-inserted by
+        the next sync, since the runtime still reports the item.
+        """
+        async with self._timeline_lock(session_id):
+            return await self.timeline.set_hidden(session_id, item_id, hidden=True)
+
+    async def unhide_timeline_item(
+        self,
+        *,
+        session_id: str,
+        item_id: str,
+    ) -> TimelineItem | None:
+        """Restore an item the reader previously deleted."""
+        async with self._timeline_lock(session_id):
+            return await self.timeline.set_hidden(session_id, item_id, hidden=False)
+
     async def list_timeline_since(
         self,
         *,

@@ -726,4 +726,9 @@
     <string name="archived_loading_more">加载中…</string>
     <string name="archived_time_unavailable">暂无时间</string>
     <string name="archived_loaded_count">已加载 %1$d 个会话</string>
+    <string name="session_delete_message">删除这条消息</string>
+    <string name="session_delete_message_title">删除这条消息？</string>
+    <string name="session_delete_message_description">这条消息会从你的对话记录中隐藏，云端运行时中的原始记录不受影响。</string>
+    <string name="session_message_deleted">已删除</string>
+    <string name="session_delete_message_failed">删除失败，请重试。</string>
 </resources>

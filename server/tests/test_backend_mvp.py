@@ -12320,3 +12320,73 @@ def test_dashboard_snapshot_includes_projects_and_refreshes_after_create(tmp_pat
         session for session in refreshed["sessions"] if session["id"] == session_id
     )
     assert refreshed_session["projectId"] == existing_project_id
+
+
+def test_a_deleted_timeline_item_stays_deleted_across_a_resync(tmp_path):
+    """Deletion is local and durable, because the runtime owns the timeline.
+
+    No runtime exposes a delete, so removing the row would be undone by the next
+    sync: the runtime still reports the item and ingest re-inserts any id it
+    cannot find. The mark therefore has to outlive a later update of that item.
+    """
+    client = make_client(tmp_path)
+    _, access_token, session_id, headers = create_connector_and_session(client)
+
+    item = {
+        "id": "tl_delete_me",
+        "sessionId": session_id,
+        "turnId": "turn_1",
+        "type": "message",
+        "status": "done",
+        "role": "user",
+        "content": {"text": "remove me", "format": "markdown"},
+        "source": {"runtime": "codex", "sessionId": "thr_1", "itemId": "item_del"},
+        "orderSeq": 1,
+        "revision": 1,
+        "contentHash": "sha256:delete-me",
+    }
+
+    def push(payload):
+        with client.websocket_connect(
+            "/connector/ws", headers={"Authorization": f"Bearer {access_token}"}
+        ) as ws:
+            ws.send_json(
+                {"type": "notification", "method": "timeline.itemUpsert",
+                 "params": {"sessionId": session_id, "item": payload}}
+            )
+            return wait_for_item_update(client, session_id, headers, 0)
+
+    push(item)
+
+    def visible_ids():
+        response = client.get(
+            f"/sessions/{session_id}/timeline",
+            headers=headers,
+            params={"mode": "changes", "afterSeq": 0, "limit": 50},
+        )
+        assert response.status_code == 200, response.text
+        return {entry["id"] for entry in response.json()["items"]}
+
+    assert "tl_delete_me" in visible_ids(), "the item is there to begin with"
+
+    deleted = client.delete(f"/sessions/{session_id}/timeline/tl_delete_me", headers=headers)
+    assert deleted.status_code == 200, deleted.text
+    assert "tl_delete_me" not in visible_ids(), "it disappears from the timeline"
+
+    # The runtime keeps reporting it, exactly as it would on the next sync.
+    push({**item, "revision": 2, "contentHash": "sha256:delete-me-updated",
+          "content": {"text": "the runtime updated it", "format": "markdown"}})
+
+    assert "tl_delete_me" not in visible_ids(), (
+        "the deletion survives a later sync of the same item"
+    )
+
+
+def test_deleting_an_unknown_timeline_item_reports_not_found(tmp_path):
+    client = make_client(tmp_path)
+    _, _, session_id, headers = create_connector_and_session(client)
+
+    response = client.delete(
+        f"/sessions/{session_id}/timeline/tl_never_existed", headers=headers
+    )
+    assert response.status_code == 404, response.text

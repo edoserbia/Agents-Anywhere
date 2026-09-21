@@ -789,6 +789,24 @@ export class DashboardApi {
     );
   }
 
+  /**
+   * Delete one item from the session's timeline.
+   *
+   * The runtime owns the timeline and exposes no delete, so the server records
+   * a local mark instead of removing the row — a removed row would be restored
+   * by the next sync. The item disappears for this account on every client.
+   */
+  deleteTimelineItem(
+    token: string,
+    sessionId: string,
+    itemId: string,
+  ): Promise<{ itemId: string; deleted: boolean; serverTime: string }> {
+    return this.client.delete<{ itemId: string; deleted: boolean; serverTime: string }>(
+      `/sessions/${encodeURIComponent(sessionId)}/timeline/${encodeURIComponent(itemId)}`,
+      { token },
+    );
+  }
+
   deleteQueuedMessage(
     token: string,
     sessionId: string,

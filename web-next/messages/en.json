@@ -1082,7 +1082,13 @@
       },
       "processSummary": "Folded {count} process entries",
       "processRunning": "Working · {count} entries",
-      "jumpToRequest": "Jump to this request"
+      "jumpToRequest": "Jump to this request",
+      "deleteMessage": "Delete this message",
+      "deleteMessageTitle": "Delete this message?",
+      "deleteMessageDescription": "It will be hidden from your conversation. The original record in the cloud runtime is not changed.",
+      "messageDeleted": "Deleted",
+      "deleteMessageFailed": "Could not delete the message.",
+      "cancel": "Cancel"
     },
     "sessionStatus": {
       "idle": "Idle",

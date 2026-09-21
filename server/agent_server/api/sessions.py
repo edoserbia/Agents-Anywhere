@@ -1416,6 +1416,48 @@ async def remove_session_queue_item(
     return QueueItemResponse(item=QueuedMessageView(**item), serverTime=utc_now())
 
 
+@router.delete("/{session_id}/timeline/{item_id}")
+async def delete_timeline_item(
+    session_id: str,
+    item_id: str,
+    user_id: str = Depends(current_user_id),
+    db: Store = Depends(get_store),
+    broker: TimelineBroker = Depends(get_timeline_broker),
+    timeline_write_buffer: TimelineWriteBuffer = Depends(
+        get_timeline_write_buffer
+    ),
+) -> dict[str, Any]:
+    """Delete one item from the session's timeline for this account.
+
+    The runtime owns the timeline, so this records a local mark rather than
+    removing the row: DSH, Codex and Claude expose no delete, and a removed row
+    would be re-inserted by the next sync because the runtime still reports the
+    item. The mark lives outside the runtime write path, so it outlives later
+    updates to the item.
+    """
+    try:
+        session = await db.get_session(session_id, user_id=user_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="session not found") from None
+    try:
+        item = await db.hide_timeline_item(session_id=session_id, item_id=item_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="timeline item not found") from None
+    if item is None:
+        raise HTTPException(status_code=404, detail="timeline item not found")
+    # Tell every open client to drop it, so the deletion is consistent across
+    # the desktop, the web console and Android without a reload.
+    await broker.publish(
+        session_id,
+        {
+            "sessionId": session_id,
+            "runtime": session.runtime,
+            "removedItemIds": [item_id],
+        },
+    )
+    return {"itemId": item_id, "deleted": True, "serverTime": utc_now()}
+
+
 @router.post("/{session_id}/runtime/messages", response_model=RpcResponsePayload)
 async def send_message(
     session_id: str,

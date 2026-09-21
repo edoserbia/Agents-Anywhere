@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from agent_server.core.models import TimelineItem
+from agent_server.core.utc import utc_now
 from agent_server.infra.db import timeline_items
 from agent_server.infra.db.engine import SQLITE_BACKEND
 
@@ -205,6 +206,7 @@ class SqlTimelineStore:
                 await conn.execute(
                     timeline_items.select()
                     .where(
+                        timeline_items.c.hidden_at.is_(None),
                         timeline_items.c.session_id == session_id,
                         timeline_items.c.updated_seq > after_seq,
                     )
@@ -221,6 +223,7 @@ class SqlTimelineStore:
             rows = (
                 await conn.execute(
                     timeline_items.select()
+                    .where(timeline_items.c.hidden_at.is_(None))
                     .where(timeline_items.c.session_id == session_id)
                     .order_by(
                         timeline_items.c.order_seq.desc(),
@@ -242,6 +245,7 @@ class SqlTimelineStore:
             rows = (
                 await conn.execute(
                     timeline_items.select()
+                    .where(timeline_items.c.hidden_at.is_(None))
                     .where(
                         timeline_items.c.session_id == session_id,
                         timeline_items.c.order_seq < before_order_seq,
@@ -258,6 +262,45 @@ class SqlTimelineStore:
         items = [TimelineItem.model_validate_json(row["payload_json"]) for row in rows[:limit]]
         items.reverse()
         return items, has_more
+
+    async def set_hidden(
+        self, session_id: str, item_id: str, *, hidden: bool
+    ) -> TimelineItem | None:
+        """Mark an item hidden, or visible again.
+
+        Deletion is a local mark rather than a row removal: the runtime keeps
+        reporting the item, so a removed row would simply reappear on the next
+        sync. The mark is therefore stored in its own column, outside the set the
+        runtime write path sets, and survives later updates to the item.
+
+        Returns the item as the reader will now see it, or None when the item
+        does not exist in this session.
+        """
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                update(timeline_items)
+                .where(
+                    timeline_items.c.session_id == session_id,
+                    timeline_items.c.id == item_id,
+                )
+                .values(hidden_at=utc_now() if hidden else None)
+            )
+            if result.rowcount != 1:
+                return None
+        return await self.read_one(session_id, item_id)
+
+    async def hidden_item_ids(self, session_id: str) -> set[str]:
+        """Ids the reader has deleted, so a re-sync can avoid resurrecting them."""
+        async with self._engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    select(timeline_items.c.id).where(
+                        timeline_items.c.session_id == session_id,
+                        timeline_items.c.hidden_at.is_not(None),
+                    )
+                )
+            ).all()
+        return {row[0] for row in rows}
 
     def _row_values(self, item: TimelineItem) -> dict[str, Any]:
         return {

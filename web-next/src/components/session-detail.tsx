@@ -1853,6 +1853,13 @@ export function SessionDetail({
                       token={token}
                       sessionId={session.id}
                       action={turnAction}
+                      // Drop it locally too, so the row goes at once rather
+                      // than after the round trip through the server event.
+                      onDeleted={(itemId) => {
+                        setState((current) => current
+                          ? { ...current, items: current.items.filter((entry) => entry.id !== itemId) }
+                          : current)
+                      }}
                     />
                   ) : null}
                 </React.Fragment>
@@ -2199,18 +2206,22 @@ function buildTurnActionsByGroupKey(
   let itemIds: string[] = []
   let endGroupKey: string | null = null
   let turnOpen = false
+  // The request that opened the current turn, so it can be deleted.
+  let requestItemId: string | undefined
 
   const commitTurn = () => {
     if (endGroupKey && itemIds.length > 0) {
       actions.set(endGroupKey, {
         copyText: copyParts.join("\n\n").trim(),
         itemIds: [...new Set(itemIds)],
+        ...(requestItemId ? { requestItemId } : {}),
       })
     }
     copyParts = []
     itemIds = []
     endGroupKey = null
     turnOpen = false
+    requestItemId = undefined
   }
 
   for (const group of groups) {
@@ -2219,6 +2230,9 @@ function buildTurnActionsByGroupKey(
     if (startsTurn) {
       commitTurn()
       turnOpen = true
+      requestItemId = items.find(
+        (item) => item.type === "message" && item.role === "user",
+      )?.id
     }
     const replies = items.filter((item) => item.type === "message" && item.role === "assistant")
     if (replies.length > 0 && !turnOpen) turnOpen = true
@@ -2766,6 +2780,13 @@ function mergeSessionEvent(
   const timelineSnapshot = event.type === "timeline.snapshot" && Array.isArray(event.payload.items)
     ? event.payload.items.filter(isTimelineItem)
     : null
+  // Items the reader deleted on another client. They are dropped locally rather
+  // than refetched, so every open client agrees without a reload.
+  const removedItemIds = Array.isArray(event.payload.removedItemIds)
+    ? (event.payload.removedItemIds as unknown[]).filter(
+        (value): value is string => typeof value === "string",
+      )
+    : []
   const notice = event.type === "runtime.notice.updated"
     ? readPayloadValue<Notice>(event.payload.notice)
     : null
@@ -2794,6 +2815,10 @@ function mergeSessionEvent(
     : item
       ? mergeTimelineItems(current.items, [item])
       : current.items
+  const visibleItems =
+    removedItemIds.length > 0
+      ? nextItems.filter((entry) => !removedItemIds.includes(entry.id))
+      : nextItems
   const timelineResetVersion = nextTimelineResetVersion(
     current.timelineResetVersion,
     timelineSnapshot !== null,
@@ -2864,7 +2889,7 @@ function mergeSessionEvent(
     ...current,
     session: nextSession,
     state: nextRuntimeState,
-    items: nextItems,
+    items: visibleItems,
     notices: nextNotices,
     nextSeq,
     timelineResetVersion,

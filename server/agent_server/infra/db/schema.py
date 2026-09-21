@@ -523,6 +523,11 @@ timeline_items = Table(
     Column("updated_seq", BigInteger, nullable=False),
     Column("item_time", Text),
     Column("payload_json", Text, nullable=False),
+    # Set when the reader deletes this item. The runtime keeps reporting it, so
+    # deletion is a local mark rather than a row removal; the column is
+    # intentionally absent from the runtime write path so a later sync cannot
+    # clear it.
+    Column("hidden_at", Text),
     PrimaryKeyConstraint("session_id", "id"),
     Index("idx_timeline_items_session_updated_seq", "session_id", "updated_seq"),
     Index(

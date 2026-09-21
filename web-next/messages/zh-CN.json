@@ -1082,7 +1082,13 @@
       },
       "processSummary": "已折叠 {count} 条过程记录",
       "processRunning": "正在处理 · {count} 条记录",
-      "jumpToRequest": "跳转到该请求"
+      "jumpToRequest": "跳转到该请求",
+      "deleteMessage": "删除这条消息",
+      "deleteMessageTitle": "删除这条消息？",
+      "deleteMessageDescription": "这条消息会从你的对话记录中隐藏，云端运行时中的原始记录不受影响。",
+      "messageDeleted": "已删除",
+      "deleteMessageFailed": "删除失败，请重试。",
+      "cancel": "取消"
     },
     "sessionStatus": {
       "idle": "空闲",
