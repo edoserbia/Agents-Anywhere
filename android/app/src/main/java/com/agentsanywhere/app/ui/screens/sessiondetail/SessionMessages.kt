@@ -543,6 +543,7 @@ internal fun MessageList(
                                 onPreviewAttachment = onPreviewAttachment,
                                 onOpenAttachment = onOpenAttachment,
                                 onCopyMessage = onCopyMessage,
+                                onDeleteMessage = onDeleteMessage,
                                 onOpenFile = onOpenFile,
                             )
                             is TimelineBlock.Process -> TimelineProcessBlock(
@@ -560,6 +561,7 @@ internal fun MessageList(
                                 onPreviewAttachment = onPreviewAttachment,
                                 onOpenAttachment = onOpenAttachment,
                                 onCopyMessage = onCopyMessage,
+                                onDeleteMessage = onDeleteMessage,
                                 onOpenFile = onOpenFile,
                                 open = processOpenByKey[block.key] ?: liveProcessKeys.contains(block.key),
                                 onOpenChange = { open -> processOpenByKey[block.key] = open },
@@ -650,6 +652,7 @@ private fun TimelineBlockEntries(
     onPreviewAttachment: (TimelineAttachment) -> Unit,
     onOpenAttachment: (TimelineAttachment) -> Unit,
     onCopyMessage: (String) -> Unit,
+    onDeleteMessage: (String) -> Unit,
     onOpenFile: (String) -> Unit,
 ) {
     when (item) {
@@ -663,6 +666,7 @@ private fun TimelineBlockEntries(
             onPreviewAttachment = onPreviewAttachment,
             onOpenAttachment = onOpenAttachment,
             onCopyMessage = onCopyMessage,
+            onDeleteMessage = onDeleteMessage,
             onOpenFile = onOpenFile,
             interaction = interactionByTarget[item.message.sourceItemId],
             canRespondToNotices = canRespondToNotices,
@@ -711,6 +715,7 @@ private fun TimelineProcessBlock(
     onPreviewAttachment: (TimelineAttachment) -> Unit,
     onOpenAttachment: (TimelineAttachment) -> Unit,
     onCopyMessage: (String) -> Unit,
+    onDeleteMessage: (String) -> Unit,
     onOpenFile: (String) -> Unit,
     open: Boolean,
     onOpenChange: (Boolean) -> Unit,
@@ -813,6 +818,7 @@ private fun TimelineProcessBlock(
                         onPreviewAttachment = onPreviewAttachment,
                         onOpenAttachment = onOpenAttachment,
                         onCopyMessage = onCopyMessage,
+                        onDeleteMessage = onDeleteMessage,
                         onOpenFile = onOpenFile,
                     )
                 }
