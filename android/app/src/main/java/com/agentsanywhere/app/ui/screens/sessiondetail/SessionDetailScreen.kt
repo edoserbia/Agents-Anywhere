@@ -33,7 +33,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -171,6 +173,9 @@ fun SessionDetailScreen(
     val darkMode = colors.isDark
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    // Items deleted in this visit; the server's removal event is authoritative
+    // but arriving later, so the row hides immediately.
+    var removedTimelineItemIds by remember { mutableStateOf(emptySet<String>()) }
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val currentDevices by rememberUpdatedState(devices)
@@ -284,6 +289,29 @@ fun SessionDetailScreen(
                 transfer.attachmentName ?: context.getString(R.string.session_attachment_name_fallback),
             )
             null -> error.message ?: context.getString(fallback)
+        }
+    }
+
+    // The message awaiting delete confirmation, so a tap cannot remove it by
+    // accident.
+    var pendingDeleteMessageId by remember { mutableStateOf<String?>(null) }
+
+    fun requestDeleteMessage(itemId: String) {
+        if (itemId.isNotBlank()) pendingDeleteMessageId = itemId
+    }
+
+    fun confirmDeleteMessage(sessionId: String, itemId: String, scope: kotlinx.coroutines.CoroutineScope) {
+        scope.launch {
+            val result = controller.deleteTimelineItem(sessionId, itemId)
+            pendingDeleteMessageId = null
+            if (result.isSuccess) {
+                // Drop it locally as well, so the row goes without waiting for
+                // the server's removal event.
+                removedTimelineItemIds = removedTimelineItemIds + itemId
+                showToast(context.getString(R.string.session_message_deleted))
+            } else {
+                showToast(context.getString(R.string.session_delete_message_failed))
+            }
         }
     }
 
@@ -1729,6 +1757,8 @@ fun SessionDetailScreen(
                                 onPreviewAttachment = { previewImage = AttachmentPreview.Remote(it) },
                                 onOpenAttachment = ::openAttachment,
                                 onCopyMessage = ::copyMessageText,
+                                onDeleteMessage = ::requestDeleteMessage,
+                                removedItemIds = removedTimelineItemIds,
                                 onShareReply = ::requestShare,
                                 onOpenFile = ::openReferencedFile,
                                 onRespondNotice = ::respondNotice,
@@ -1841,6 +1871,32 @@ fun SessionDetailScreen(
                                     onInterrupt = ::interrupt,
                                 )
                             }
+                        }
+                        // Confirm before removing a message, since the reader
+                        // cannot get it back from the runtime.
+                        pendingDeleteMessageId?.let { targetId ->
+                            AlertDialog(
+                                onDismissRequest = { pendingDeleteMessageId = null },
+                                title = { Text(stringResource(R.string.session_delete_message_title)) },
+                                text = { Text(stringResource(R.string.session_delete_message_description)) },
+                                confirmButton = {
+                                    TextButton(onClick = {
+                                        val activeSessionId = sessionId
+                                        if (activeSessionId != null) {
+                                            confirmDeleteMessage(activeSessionId, targetId, scope)
+                                        } else {
+                                            pendingDeleteMessageId = null
+                                        }
+                                    }) {
+                                        Text(stringResource(R.string.session_delete_message))
+                                    }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { pendingDeleteMessageId = null }) {
+                                        Text(stringResource(R.string.common_cancel))
+                                    }
+                                },
+                            )
                         }
                         HeaderVeil(
                             darkMode = darkMode,

@@ -106,6 +106,7 @@ import com.composables.icons.lucide.FilePenLine
 import com.composables.icons.lucide.Hammer
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.Sparkles
+import com.composables.icons.lucide.Trash2
 import com.composables.icons.lucide.SquareArrowOutUpRight
 import com.composables.icons.lucide.SquareTerminal
 import com.composables.icons.lucide.WifiOff
@@ -270,6 +271,10 @@ internal fun MessageList(
     onPreviewAttachment: (TimelineAttachment) -> Unit,
     onOpenAttachment: (TimelineAttachment) -> Unit,
     onCopyMessage: (String) -> Unit,
+    /** Ask to delete one of the reader's own messages. */
+    onDeleteMessage: (String) -> Unit = {},
+    /** Items already deleted here; hidden until the server event confirms. */
+    removedItemIds: Set<String> = emptySet(),
     onShareReply: (List<String>) -> Unit,
     onOpenFile: (String) -> Unit,
     onRespondNotice: (RuntimeNotice, RuntimeNoticeAction, Map<String, Any?>?) -> Unit = { _, _, _ -> },
@@ -283,7 +288,7 @@ internal fun MessageList(
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val displayMessages = messages
+    val displayMessages = messages.filterNot { it.id in removedItemIds }
     val displayWorkingLabel = workingLabel
     val openInteractions = remember(notices, sessionId) {
         notices.filter { it.openInteraction && !it.blocksSession(sessionId) }
@@ -1433,6 +1438,7 @@ private fun TimelineMessageRow(
     onPreviewAttachment: (TimelineAttachment) -> Unit,
     onOpenAttachment: (TimelineAttachment) -> Unit,
     onCopyMessage: (String) -> Unit,
+    onDeleteMessage: (String) -> Unit = {},
     onOpenFile: (String) -> Unit,
     interaction: RuntimeNotice? = null,
     canRespondToNotices: Boolean = false,
@@ -1501,6 +1507,7 @@ private fun TimelineMessageRow(
                 onPreviewAttachment,
                 onOpenAttachment,
                 onCopyMessage,
+                onDeleteMessage,
             )
             MessageAuthor.Agent -> AgentMessageContent(
                 message = message,
@@ -1579,6 +1586,7 @@ private fun UserBubble(
     onPreviewAttachment: (TimelineAttachment) -> Unit,
     onOpenAttachment: (TimelineAttachment) -> Unit,
     onCopyMessage: (String) -> Unit,
+    onDeleteMessage: (String) -> Unit,
 ) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val maxBubbleWidth = maxWidth * 0.78f
@@ -1616,12 +1624,30 @@ private fun UserBubble(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.Bottom,
                     ) {
-                        DisableSelection {
+                        // The buttons sit outside DisableSelection: that wrapper
+                        // exists to keep the bubble's text unselectable, but on
+                        // this Compose version it also swallows pointer input,
+                        // which left both buttons here unreachable.
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                            modifier = Modifier
+                                .padding(bottom = 3.dp)
+                                .width(30.dp),
+                        ) {
                             MessageCopyButton(
                                 darkMode = darkMode,
                                 onClick = { onCopyMessage(text) },
-                                modifier = Modifier.padding(bottom = 3.dp),
                             )
+                            // Deleting is offered only on the reader's own
+                            // message, and only for one that carries an id the
+                            // server can address.
+                            if (message.id.isNotBlank()) {
+                                MessageDeleteButton(
+                                    darkMode = darkMode,
+                                    onClick = { onDeleteMessage(message.id) },
+                                )
+                            }
                         }
                         Box(
                             modifier = Modifier
@@ -1678,6 +1704,37 @@ private fun UserBubble(
                 }
             }
         }
+    }
+}
+
+/**
+ * Delete the reader's own message.
+ *
+ * The server keeps the row and marks it hidden, because the runtime owns the
+ * timeline and exposes no delete — removing the row would be undone by the next
+ * sync. The button therefore reads as "remove from my view", which is what
+ * actually happens.
+ */
+@Composable
+private fun MessageDeleteButton(
+    darkMode: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val contentColor = LocalAAColors.current.muted
+    Box(
+        modifier = modifier
+            .size(30.dp)
+            .clip(CircleShape)
+            .noRippleClickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = Lucide.Trash2,
+            contentDescription = stringResource(R.string.session_delete_message),
+            tint = contentColor,
+            modifier = Modifier.size(15.dp),
+        )
     }
 }
 

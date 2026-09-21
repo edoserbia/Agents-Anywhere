@@ -523,6 +523,27 @@ class SessionsApi(
         ).toRemoteQueuedMessageResponse()
     }
 
+    /**
+     * Delete one item from the session's timeline.
+     *
+     * The runtime owns the timeline and exposes no delete, so the server records
+     * a local mark rather than removing the row — a removed row would be
+     * restored by the next sync because the runtime still reports the item.
+     */
+    fun deleteTimelineItem(
+        serverUrl: String,
+        authorizationToken: String,
+        sessionId: String,
+        itemId: String,
+    ): Boolean {
+        val response = client.deleteJson(
+            serverUrl = serverUrl,
+            path = "/sessions/${sessionId.urlEncode()}/timeline/${itemId.urlEncode()}",
+            authorizationToken = authorizationToken,
+        )
+        return response.optBoolean("deleted", false)
+    }
+
     fun deleteQueuedMessage(
         serverUrl: String,
         authorizationToken: String,

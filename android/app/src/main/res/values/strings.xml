@@ -727,4 +727,9 @@
     <string name="archived_loading_more">Loading…</string>
     <string name="archived_time_unavailable">Time unavailable</string>
     <string name="archived_loaded_count">%1$d sessions loaded</string>
+    <string name="session_delete_message">Delete message</string>
+    <string name="session_delete_message_title">Delete this message?</string>
+    <string name="session_delete_message_description">It will be hidden from your conversation. The original record in the cloud runtime is not changed.</string>
+    <string name="session_message_deleted">Deleted</string>
+    <string name="session_delete_message_failed">Could not delete the message.</string>
 </resources>

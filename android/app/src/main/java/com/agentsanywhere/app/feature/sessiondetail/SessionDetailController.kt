@@ -555,6 +555,30 @@ class SessionDetailController(
         }
     }
 
+    /**
+     * Delete one timeline item from the reader's view of the session.
+     *
+     * The server records a local mark rather than removing the row: the runtime
+     * owns the timeline and exposes no delete, so a removed row would be
+     * restored by the next sync.
+     */
+    suspend fun deleteTimelineItem(
+        sessionId: String,
+        itemId: String,
+    ): Result<Boolean> {
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val auth = authSession()
+                sessionsApi.deleteTimelineItem(
+                    serverUrl = auth.serverUrl,
+                    authorizationToken = auth.accessToken,
+                    sessionId = sessionId,
+                    itemId = itemId,
+                )
+            }
+        }
+    }
+
     private suspend fun performMessageAction(
         sessionId: String,
         content: String,
