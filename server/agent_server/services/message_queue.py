@@ -228,7 +228,15 @@ class MessageQueueService:
         return queued_message_from_row(updated)
 
     async def remove(self, *, session_id: str, item_id: str) -> QueuedMessage:
-        item = await self._require_pending(session_id, item_id)
+        """Remove an item from the session's queue.
+
+        Accepts anything still occupying the queue, including an item that
+        failed to dispatch. Restricting this to pending items made a failure
+        permanent: the item stayed on screen and could not be cleared or
+        retried, so the reader was stuck with a queue entry no action could
+        resolve.
+        """
+        item = await self._require_removable(session_id, item_id)
         await self._store.remove(item_id)
         return item
 
@@ -267,6 +275,38 @@ class MessageQueueService:
             error_message=None,
             updated_at=utc_now(),
         )
+
+    async def _require_removable(self, session_id: str, item_id: str) -> QueuedMessage:
+        """An item that is sitting in the queue, whatever its outcome so far.
+
+        Two statuses are excluded, for different reasons. `sent` has already
+        become a turn, so there is nothing left to remove. `sending` is being
+        handed to the runtime right now, and removing it mid-flight would race
+        the dispatch.
+
+        `failed` is deliberately allowed: restricting removal to pending items
+        made a failure permanent — the entry stayed on screen with no action
+        that could clear it.
+        """
+        row = await self._store.get(item_id)
+        if row is None:
+            raise MessageQueueError(
+                "session/queue-item-not-found",
+                "queued item is no longer in the queue",
+                item_id=item_id,
+            )
+        item = queued_message_from_row(row)
+        # Guard against addressing another session's queue by id.
+        if item.session_id != session_id or item.status in {
+            QUEUE_STATUS_SENT,
+            QUEUE_STATUS_SENDING,
+        }:
+            raise MessageQueueError(
+                "session/queue-item-not-found",
+                "queued item is no longer in the queue",
+                item_id=item_id,
+            )
+        return item
 
     async def _require_pending(self, session_id: str, item_id: str) -> QueuedMessage:
         row = await self._store.get(item_id)

@@ -340,3 +340,54 @@ def test_clear_empties_only_that_session(service) -> None:
         assert len(await service.list("s2")) == 1
 
     asyncio.run(run())
+
+
+def test_a_failed_item_can_be_removed(service) -> None:
+    """A dispatch failure must not leave an entry nobody can clear.
+
+    Removal used to require the item to be pending, so once a dispatch failed the
+    entry stayed in the queue and every attempt to remove it answered "queued
+    item is no longer pending". The reader was left with a queue entry that no
+    action could resolve.
+    """
+
+    async def run() -> None:
+        item = await _enqueue(service, "one")
+        await service.claim_next("s1")
+        await service.mark_failed(
+            item.id, code="queue_dispatch_failed", message="runtime did not report"
+        )
+
+        removed = await service.remove(session_id="s1", item_id=item.id)
+        assert removed.id == item.id
+
+        remaining = await service.list("s1")
+        assert remaining == [], "the queue is clear again"
+
+    asyncio.run(run())
+
+
+def test_a_sending_item_still_cannot_be_removed(service) -> None:
+    """The in-flight window stays protected, only the failure case opened up."""
+
+    async def run() -> None:
+        item = await _enqueue(service, "one")
+        await service.claim_next("s1")  # status becomes "sending"
+        with pytest.raises(MessageQueueError) as caught:
+            await service.remove(session_id="s1", item_id=item.id)
+        assert caught.value.code == "session/queue-item-not-found"
+
+    asyncio.run(run())
+
+
+def test_a_failed_item_cannot_be_edited(service) -> None:
+    """Editing still targets pending items only, since the item may yet resend."""
+
+    async def run() -> None:
+        item = await _enqueue(service, "one")
+        await service.claim_next("s1")
+        await service.mark_failed(item.id, code="x", message="y")
+        with pytest.raises(MessageQueueError):
+            await service.update(session_id="s1", item_id=item.id, content="new")
+
+    asyncio.run(run())

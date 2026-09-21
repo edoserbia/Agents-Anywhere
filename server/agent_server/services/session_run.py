@@ -1021,6 +1021,11 @@ class SessionRunService:
             content=str(item.get("content") or ""),
             attachments=refs,
             clientMessageId=item.get("clientMessageId"),
+            # A runtime that cannot answer its status read in time is busy, not
+            # broken. Without this the dispatch was marked permanently failed —
+            # "runtime did not report its state in time" — and the message the
+            # user queued was never sent.
+            queueWhenBusy=True,
         )
         # A busy runtime here means the session picked up other work between the
         # turn ending and this dispatch. The dispatcher requeues on this signal
@@ -1032,6 +1037,11 @@ class SessionRunService:
             if "session is " in detail:
                 raise QueueDispatchBusy(detail) from None
             raise
+        except SessionRunTimeoutError as exc:
+            # The runtime stayed unreachable for the whole read budget. That is
+            # still "not now" rather than "never", so the item goes back to the
+            # head and the next turn completion retries it.
+            raise QueueDispatchBusy(str(getattr(exc, "detail", "") or exc)) from None
 
     async def _persist_inline_attachments(
         self,
