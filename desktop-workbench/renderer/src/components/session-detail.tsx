@@ -1836,6 +1836,9 @@ export function SessionDetail({
               // A request anchors the history navigator to its position.
               const requestItem = timelineGroupItems(group)
                 .find((item) => item.type === "message" && item.role === "user")
+              const requestDeleteAction = requestItem
+                ? [...turnActionsByGroupKey.values()].find((action) => action.requestItemId === requestItem.id)
+                : undefined
               return (
                 <React.Fragment key={groupKey}>
                   <div
@@ -1856,6 +1859,14 @@ export function SessionDetail({
                         : (open) => handleTimelineGroupOpenChange(group.key, open)}
                       onItemOpenChange={handleTimelineItemOpenChange}
                       onRespondInteraction={handleRespondInteraction}
+                      deleteAction={requestDeleteAction?.requestItemId ? {
+                        token,
+                        sessionId: session.id,
+                        itemId: requestDeleteAction.requestItemId,
+                        onDeleted: (itemId) => setState((current) => current
+                          ? { ...current, items: current.items.filter((entry) => entry.id !== itemId) }
+                          : current),
+                      } : undefined}
                     />
                   </div>
                   {completedTurnReview && onOpenReview ? (
@@ -1873,13 +1884,6 @@ export function SessionDetail({
                       token={token}
                       sessionId={session.id}
                       action={turnAction}
-                      // Drop it locally too, so the row goes at once rather
-                      // than after the round trip through the server event.
-                      onDeleted={(itemId) => {
-                        setState((current) => current
-                          ? { ...current, items: current.items.filter((entry) => entry.id !== itemId) }
-                          : current)
-                      }}
                     />
                   ) : null}
                 </React.Fragment>
@@ -2500,6 +2504,7 @@ export function TimelineGroupEntry({
   onGroupOpenChange,
   onItemOpenChange,
   onRespondInteraction,
+  deleteAction,
 }: {
   group: TimelineGroup
   token: string
@@ -2514,6 +2519,7 @@ export function TimelineGroupEntry({
   onGroupOpenChange?: (open: boolean) => void
   onItemOpenChange: (itemId: string, open: boolean) => void
   onRespondInteraction: (noticeId: string, actionId: string, input?: Record<string, unknown>) => void
+  deleteAction?: { token: string; sessionId: string; itemId: string; onDeleted?: (itemId: string) => void }
 }) {
   if (group.kind === "reconnect") {
     return (
@@ -2575,6 +2581,7 @@ export function TimelineGroupEntry({
       attachmentUrl={attachmentUrl}
       onToolOpenChange={(open) => onItemOpenChange(group.item.id, open)}
       onRespondInteraction={onRespondInteraction}
+      deleteAction={deleteAction}
     />
   )
 }

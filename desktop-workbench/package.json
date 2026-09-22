@@ -2,7 +2,7 @@
   "name": "agents-anywhere-desktop-workbench",
   "productName": "Agents Anywhere",
   "private": true,
-  "version": "2.0.15",
+  "version": "2.0.16",
   "description": "Electron shell for the Agents Anywhere web workbench",
   "packageManager": "yarn@4.6.0",
   "workspaces": [
@@ -26,7 +26,8 @@
     "pack": "yarn bundle:uv && yarn build && electron-builder --dir",
     "dist": "node scripts/dist-desktop.mjs",
     "dist:mac": "node scripts/dist-desktop.mjs mac",
-    "dist:win": "node scripts/dist-desktop.mjs win"
+    "dist:win": "node scripts/dist-desktop.mjs win",
+    "dist:linux": "node scripts/dist-desktop.mjs linux"
   },
   "devDependencies": {
     "@types/node": "^24.10.2",

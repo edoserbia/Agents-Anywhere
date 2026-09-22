@@ -32,6 +32,7 @@ const UV_TARGETS = {
   "darwin-x64": "darwin-x64",
   "win32-x64": "win32-x64",
   "win32-arm64": "win32-arm64",
+  "linux-x64": "linux-x64",
 };
 const ARCH_FLAGS = new Set(["--arm64", "--x64", "--universal"]);
 const PASSTHROUGH_FLAGS = new Set(["--dir"]);
@@ -66,11 +67,11 @@ function electronBuilder(args, env) {
 }
 
 function parseArguments(argv) {
-  const explicitPlatform = argv[0] === "mac" || argv[0] === "win";
-  const platform = explicitPlatform ? argv[0] : process.platform === "darwin" ? "mac" : process.platform === "win32" ? "win" : null;
+  const explicitPlatform = ["mac", "win", "linux"].includes(argv[0]);
+  const platform = explicitPlatform ? argv[0] : process.platform === "darwin" ? "mac" : process.platform === "win32" ? "win" : process.platform === "linux" ? "linux" : null;
   const flags = explicitPlatform ? argv.slice(1) : argv;
-  if (platform !== "mac" && platform !== "win") {
-    fail("Usage: node scripts/dist-desktop.mjs <mac|win> [--arm64|--x64|--universal] [--dir]");
+  if (platform !== "mac" && platform !== "win" && platform !== "linux") {
+    fail("Usage: node scripts/dist-desktop.mjs <mac|win|linux> [--arm64|--x64|--universal] [--dir]");
   }
   const archFlags = flags.filter((value) => ARCH_FLAGS.has(value));
   const passthrough = flags.filter((value) => PASSTHROUGH_FLAGS.has(value));
@@ -81,6 +82,10 @@ function parseArguments(argv) {
 }
 
 function resolveTargets({ platform, archFlag }) {
+  if (platform === "linux") {
+    if (archFlag === "--arm64" || archFlag === "--universal") fail("Linux currently supports x64 only");
+    return { builderFlags: ["--x64"], uvTargets: [UV_TARGETS["linux-x64"]] };
+  }
   if (platform === "win") {
     if (archFlag === "--universal") fail("--universal is macOS only");
     const arch = archFlag === "--arm64" ? "arm64" : "x64";
@@ -111,7 +116,7 @@ function describeSigning(credentials, missingLabel) {
 function artifactPaths() {
   if (!existsSync(OUTPUT_DIR)) return [];
   return readdirSync(OUTPUT_DIR, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && /\.(dmg|exe|zip|pkg)$/.test(entry.name))
+    .filter((entry) => entry.isFile() && /\.(dmg|exe|zip|pkg|AppImage)$/.test(entry.name))
     .map((entry) => join(OUTPUT_DIR, entry.name))
     .sort();
 }
@@ -147,7 +152,7 @@ async function main() {
   // it with a warning. Refusing outright would mean an unsigned installer is
   // impossible to produce without a Windows machine; asking for it explicitly is
   // the better trade.
-  if (platform === "win" && process.platform !== "win32" && !process.env.AA_ALLOW_CROSS_BUILD?.trim()) {
+  if ((platform === "win" || platform === "linux") && platform !== process.platform && !process.env.AA_ALLOW_CROSS_BUILD?.trim()) {
     fail(
       "dist:win off Windows produces an unsigned installer. " +
       "Set AA_ALLOW_CROSS_BUILD=1 to build it anyway, or run on Windows for Authenticode signing.",
@@ -189,7 +194,7 @@ async function main() {
   electronBuilder([
     ...(process.env.WORKBENCH_ELECTRON_DIST ? [`--config.electronDist=${resolve(process.env.WORKBENCH_ELECTRON_DIST)}`] : []),
     `--${platform}`,
-    platform === "mac" ? "dmg" : "nsis",
+    platform === "mac" ? "dmg" : platform === "win" ? "nsis" : "AppImage",
     ...builderFlags,
     "--publish",
     "never",

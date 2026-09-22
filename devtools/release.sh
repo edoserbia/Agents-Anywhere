@@ -102,12 +102,20 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   echo "==> building the macOS DMG (universal)"
   rm -f "desktop-workbench/release/Agents Anywhere-${VERSION}-universal.dmg"
   ( cd desktop-workbench && yarn dist:mac )
+  echo "==> building the Windows installer"
+  rm -f "desktop-workbench/release/Agents Anywhere Setup ${VERSION}.exe"
+  ( cd desktop-workbench && yarn dist:win )
+  echo "==> building the Linux AppImage"
+  rm -f "desktop-workbench/release/Agents Anywhere-${VERSION}-x86_64.AppImage"
+  ( cd desktop-workbench && yarn dist )
 fi
 
 APK="android/app/build/outputs/apk/debug/app-debug.apk"
 DMG="desktop-workbench/release/Agents Anywhere-${VERSION}-universal.dmg"
+WIN="desktop-workbench/release/Agents Anywhere Setup ${VERSION}.exe"
+LINUX="desktop-workbench/release/Agents Anywhere-${VERSION}-x86_64.AppImage"
 
-for artifact in "$APK" "$DMG"; do
+for artifact in "$APK" "$DMG" "$WIN" "$LINUX"; do
   if [[ ! -f "$artifact" ]]; then
     echo "missing artifact: $artifact" >&2
     exit 1
@@ -117,11 +125,15 @@ done
 echo "==> uploading artifacts to $REMOTE:$DOWNLOAD_DIR"
 scp -q "$APK" "$REMOTE:$DOWNLOAD_DIR/agents-anywhere-${VERSION}-debug.apk"
 scp -q "$DMG" "$REMOTE:$DOWNLOAD_DIR/Agents Anywhere-${VERSION}-universal.dmg"
+scp -q "$WIN" "$REMOTE:$DOWNLOAD_DIR/Agents Anywhere-${VERSION}-x64.exe"
+scp -q "$LINUX" "$REMOTE:$DOWNLOAD_DIR/Agents Anywhere-${VERSION}-x86_64.AppImage"
 
 echo "==> verifying the uploads byte for byte"
 for pair in \
   "$APK:agents-anywhere-${VERSION}-debug.apk" \
-  "$DMG:Agents Anywhere-${VERSION}-universal.dmg"
+  "$DMG:Agents Anywhere-${VERSION}-universal.dmg" \
+  "$WIN:Agents Anywhere-${VERSION}-x64.exe" \
+  "$LINUX:Agents Anywhere-${VERSION}-x86_64.AppImage"
 do
   local_path="${pair%%:*}"; remote_name="${pair##*:}"
   local_hash="$(shasum -a 256 "$local_path" | cut -d' ' -f1)"
@@ -138,9 +150,13 @@ done
 echo "==> writing SHA256SUMS.txt"
 DMG_HASH="$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
 APK_HASH="$(shasum -a 256 "$APK" | cut -d' ' -f1)"
+WIN_HASH="$(shasum -a 256 "$WIN" | cut -d' ' -f1)"
+LINUX_HASH="$(shasum -a 256 "$LINUX" | cut -d' ' -f1)"
 ssh "$REMOTE" "cat > '$DOWNLOAD_DIR/SHA256SUMS.txt'" <<EOF
 $DMG_HASH  Agents Anywhere-${VERSION}-universal.dmg
 $APK_HASH  agents-anywhere-${VERSION}-debug.apk
+$WIN_HASH  Agents Anywhere-${VERSION}-x64.exe
+$LINUX_HASH  Agents Anywhere-${VERSION}-x86_64.AppImage
 EOF
 ssh "$REMOTE" "cd '$DOWNLOAD_DIR' && shasum -a 256 -c SHA256SUMS.txt"
 
@@ -154,6 +170,10 @@ if [[ ! -f "$NOTES_FILE" ]]; then
   echo "write them first; the download page is generated from them" >&2
   exit 1
 fi
+python3 devtools/generate_download_page.py "$VERSION" "$SERVER_URL" /tmp/aa-download-page
+scp -q /tmp/aa-download-page/index.html "$REMOTE:$DOWNLOAD_DIR/index.html"
+scp -q /tmp/aa-download-page/CHANGELOG.md "$REMOTE:$DOWNLOAD_DIR/CHANGELOG.md"
+scp -q /tmp/aa-download-page/CHANGELOG.html "$REMOTE:$DOWNLOAD_DIR/CHANGELOG.html"
 python3 - "$VERSION" "$SERVER_URL" "$NOTES_FILE" > /tmp/aa-index.html <<'PY'
 import html
 import re
@@ -270,7 +290,8 @@ html = f"""<!doctype html>
 """
 sys.stdout.write(html)
 PY
-scp -q /tmp/aa-index.html "$REMOTE:$DOWNLOAD_DIR/index.html"
+# The generated page above is authoritative; retain the legacy renderer below
+# only as a syntax-compatible fallback for older release checkouts.
 
 echo "==> verifying the published page"
 # Follow redirects first: the page may be served at a URL that canonicalises
@@ -291,7 +312,9 @@ echo "   $published at $PAGE_FINAL"
 echo "==> verifying each installer downloads from the page"
 PAGE_BASE="${PAGE_FINAL%/}/"
 for entry in "agents-anywhere-${VERSION}-debug.apk:$APK" \
-             "Agents Anywhere-${VERSION}-universal.dmg:$DMG"
+             "Agents Anywhere-${VERSION}-universal.dmg:$DMG" \
+             "Agents Anywhere-${VERSION}-x64.exe:$WIN" \
+             "Agents Anywhere-${VERSION}-x86_64.AppImage:$LINUX"
 do
   name="${entry%%:*}"; local_path="${entry##*:}"
   # Percent-encode spaces the way a browser does.
