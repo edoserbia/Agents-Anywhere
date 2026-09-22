@@ -110,3 +110,9 @@ def test_a_status_read_timeout_is_treated_as_busy_when_queueing() -> None:
     assert "if not payload.queueWhenBusy:" in branch, "only queued sends are relaxed"
     assert "raise" in branch, "an ordinary send still reports the timeout"
     assert "_enqueue_message" in branch, "a queued send is enqueued"
+
+
+def test_dispatching_a_claimed_item_cannot_enqueue_a_duplicate() -> None:
+    """A claimed queue item must be requeued on a busy race, not copied."""
+    source = inspect.getsource(SessionRunService.send_queued_message)
+    assert "queueWhenBusy=False" in source

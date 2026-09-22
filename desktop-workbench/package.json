@@ -2,7 +2,7 @@
   "name": "agents-anywhere-desktop-workbench",
   "productName": "Agents Anywhere",
   "private": true,
-  "version": "2.0.14",
+  "version": "2.0.15",
   "description": "Electron shell for the Agents Anywhere web workbench",
   "packageManager": "yarn@4.6.0",
   "workspaces": [
@@ -86,6 +86,7 @@
     "directories": {
       "output": "release"
     },
+    "publish": [],
     "protocols": [
       {
         "name": "Agents Anywhere Desktop OAuth",

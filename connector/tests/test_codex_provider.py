@@ -429,6 +429,8 @@ async def _test_codex_provider_creates_sdk_runtime(tmp_path: Path) -> None:
 
     assert isinstance(runtime, CodexRuntime)
     assert codex_home.is_dir()
+    assert (codex_home / "config.toml").is_file()
+    assert (codex_home / "config.toml").read_text() == ""
     assert created == [config]
     assert runtime._pending_messages._connector_id == _NoHost().session_namespace
 

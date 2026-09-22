@@ -89,12 +89,21 @@ def get_connector_file_service(conn: HTTPConnection) -> ConnectorFileService:
 
 
 def get_session_run_service(conn: HTTPConnection) -> SessionRunService:
-    return SessionRunService(
+    queue = MessageQueueService(conn.app.state.store.message_queue)
+    service = SessionRunService(
         conn.app.state.store,
         conn.app.state.rpc,
         conn.app.state.device_runtime_service,
-        MessageQueueService(conn.app.state.store.message_queue),
+        queue,
     )
+    # The dispatcher sends through this service, so attach its callback after
+    # both objects exist. This also closes the race where a runtime becomes
+    # idle between the status read and queue insertion.
+    dispatcher = build_queue_dispatcher(
+        conn.app.state, conn.app.state.store, conn.app.state.rpc
+    )
+    service.set_queue_dispatcher(dispatcher.dispatch_next)
+    return service
 
 
 def get_device_runtime_service(conn: HTTPConnection) -> DeviceRuntimeService:

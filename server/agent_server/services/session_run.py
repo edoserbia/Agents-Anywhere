@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -111,6 +112,7 @@ class SessionRunService:
         manager: ConnectorRpcManager,
         device_runtimes: DeviceRuntimeService,
         message_queue: MessageQueueService | None = None,
+        queue_dispatch: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self._store = store
         self._manager = manager
@@ -118,6 +120,13 @@ class SessionRunService:
         # Optional so tests and callers that never queue keep working; the API
         # always passes one.
         self._message_queue = message_queue or MessageQueueService(store)
+        self._queue_dispatch = queue_dispatch
+
+    def set_queue_dispatcher(
+        self, dispatch: Callable[[str], Awaitable[bool]] | None
+    ) -> None:
+        """Attach the dispatcher after construction to avoid a dependency cycle."""
+        self._queue_dispatch = dispatch
 
     async def create_session(
         self,
@@ -424,7 +433,9 @@ class SessionRunService:
                 SESSION_SEND_MESSAGE,
                 user_id=user_id,
             )
-            return await self._enqueue_message(session, payload, user_id=user_id)
+            response = await self._enqueue_message(session, payload, user_id=user_id)
+            await self._dispatch_enqueued(session.id)
+            return response
         if runtime_status not in {"idle", "error"}:
             # The runtime is mid-turn. With queueing requested, keep the message
             # instead of rejecting it; it is dispatched as this turn finishes.
@@ -436,11 +447,13 @@ class SessionRunService:
                     SESSION_SEND_MESSAGE,
                     user_id=user_id,
                 )
-                return await self._enqueue_message(
+                response = await self._enqueue_message(
                     session,
                     payload,
                     user_id=user_id,
                 )
+                await self._dispatch_enqueued(session.id)
+                return response
             raise SessionRunConflictError(f"session is {runtime_status}")
         await self._require_session_capability(
             session,
@@ -940,6 +953,24 @@ class SessionRunService:
             },
         )
 
+    async def _dispatch_enqueued(self, session_id: str) -> None:
+        """Close the enqueue/idle transition race.
+
+        A runtime can finish between the status read and the queue insert. In
+        that case its idle notification has already been processed, so waiting
+        for another turn-end event would leave the item invisible to the
+        runtime indefinitely. The optional callback performs an immediate,
+        lock-protected drain; busy races are requeued by the dispatcher.
+        """
+        if self._queue_dispatch is None:
+            return
+        try:
+            await self._queue_dispatch(session_id)
+        except Exception:
+            # The normal runtime status notification remains the durable retry
+            # path; enqueue itself must still succeed when that callback fails.
+            return
+
     async def list_queue(self, session_id: str, *, user_id: str) -> list[dict[str, Any]]:
         await self._require_session(session_id, user_id=user_id)
         items = await self._message_queue.list(session_id)
@@ -1021,11 +1052,11 @@ class SessionRunService:
             content=str(item.get("content") or ""),
             attachments=refs,
             clientMessageId=item.get("clientMessageId"),
-            # A runtime that cannot answer its status read in time is busy, not
-            # broken. Without this the dispatch was marked permanently failed —
-            # "runtime did not report its state in time" — and the message the
-            # user queued was never sent.
-            queueWhenBusy=True,
+            # This item is already claimed by the dispatcher. If the runtime
+            # became busy again, the dispatcher must requeue this same item;
+            # allowing the ordinary send path to enqueue here would duplicate
+            # it.
+            queueWhenBusy=False,
         )
         # A busy runtime here means the session picked up other work between the
         # turn ending and this dispatch. The dispatcher requeues on this signal

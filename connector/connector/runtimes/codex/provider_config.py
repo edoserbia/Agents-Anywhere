@@ -234,3 +234,23 @@ def ensure_codex_home(path: str) -> None:
         raise RuntimeInvalidRequestError("codexHome could not be created") from exc
     if not candidate.is_dir():
         raise RuntimeInvalidRequestError("codexHome must point to a directory")
+
+    # Codex app-server treats a missing config.toml as a configuration-load
+    # failure and exits before sending the JSON-RPC initialize response. A
+    # newly-created isolated home is valid, but it still needs an empty TOML
+    # file so the app-server can initialize it. Never overwrite an existing
+    # file: user configuration remains authoritative.
+    config_file = candidate / "config.toml"
+    if not config_file.exists():
+        try:
+            config_file.touch(mode=0o600, exist_ok=False)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise RuntimeInvalidRequestError(
+                "codexHome configuration file could not be created"
+            ) from exc
+    if not config_file.is_file():
+        raise RuntimeInvalidRequestError(
+            "codexHome config.toml must point to a regular file"
+        )
