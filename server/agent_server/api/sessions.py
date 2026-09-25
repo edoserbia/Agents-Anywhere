@@ -1368,7 +1368,7 @@ async def list_session_queue(
     user_id: str = Depends(current_user_id),
     run_service: SessionRunService = Depends(get_session_run_service),
 ) -> SessionQueueResponse:
-    """Messages accepted while the runtime was busy, in dispatch order."""
+    """Messages currently held by the selected runtime's native queue."""
     try:
         items = await run_service.list_queue(session_id, user_id=user_id)
     except SessionRunError as exc:

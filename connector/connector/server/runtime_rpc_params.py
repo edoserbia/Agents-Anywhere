@@ -309,6 +309,29 @@ class SessionReadParams:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionQueueItemParams:
+    session_id: str
+    external_session_id: str | None
+    item_id: str
+    content: str | None = None
+
+    @classmethod
+    def parse(cls, params: dict[str, Any]) -> "SessionQueueItemParams":
+        item_id = params.get("itemId")
+        if not isinstance(item_id, str) or not item_id:
+            raise ValueError("itemId is required")
+        content = params.get("content")
+        if content is not None and not isinstance(content, str):
+            raise TypeError("content must be a string")
+        return cls(
+            session_id=required_session_id(params),
+            external_session_id=optional_string(params.get("externalSessionId")),
+            item_id=item_id,
+            content=content,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SessionCapabilityParams:
     session_id: str
     external_session_id: str | None

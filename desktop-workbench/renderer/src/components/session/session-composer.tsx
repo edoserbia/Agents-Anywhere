@@ -131,7 +131,7 @@ export function SessionComposer({
   const canUseSendMessage = capabilityIsUsable(effectiveCapabilities, CAPABILITY.sendMessage, runtimeScope)
   const canUseSteer = capabilityIsUsable(effectiveCapabilities, CAPABILITY.steer, runtimeScope)
   // A running runtime that cannot steer (DSH) still accepts a message: the
-  // server queues it and sends it when the turn ends. Treating "running and
+  // The runtime queues it and sends it when the turn ends. Treating "running and
   // cannot steer" as "cannot type" is what used to lock the composer for the
   // whole run, so a running session stays editable when it can send at all.
   const queuesWhileRunning = isRunning && !canUseSteer && canUseSendMessage

@@ -621,7 +621,10 @@ class SessionDetailController(
                 if (!response.ok) {
                     throw IllegalStateException(response.failureMessage("Runtime rejected the message."))
                 }
-                SendMessageResult(attachments = uploaded)
+                SendMessageResult(
+                    attachments = uploaded,
+                    queued = response.result["queued"] == true,
+                )
             }
         }
     }
@@ -944,6 +947,22 @@ class SessionDetailController(
         )
     }
 
+    fun removeOptimisticMessage(
+        sessionId: String,
+        state: SessionDetailState,
+        clientMessageId: String,
+    ): SessionDetailState {
+        optimisticStore.remove(sessionId, clientMessageId)
+        return state.copy(
+            timeline = state.timeline.copy(
+                messages = state.messages.filterNot {
+                    it.optimistic && it.clientMessageId == clientMessageId
+                },
+            ),
+            sending = false,
+        )
+    }
+
     fun hasServerEcho(state: SessionDetailState, clientMessageId: String): Boolean {
         return state.messages.any { message ->
             !message.optimistic && message.matchesClientMessage(clientMessageId)
@@ -999,6 +1018,7 @@ internal class RuntimeNoticeResponseException(
 
 data class SendMessageResult(
     val attachments: List<TimelineAttachment>,
+    val queued: Boolean = false,
 )
 
 data class CommandExecutionResult(
@@ -1022,6 +1042,8 @@ private fun RemoteSessionQueue.toSessionMessageQueue(): SessionMessageQueue {
                 clientMessageId = item.clientMessageId,
                 errorCode = item.errorCode,
                 errorMessage = item.errorMessage,
+                runtime = item.runtime,
+                placement = item.placement,
             )
         },
         isLoaded = true,

@@ -39,6 +39,8 @@ export type ConnectorView = {
   lastSeenAt: string | null;
   createdAt: string;
   updatedAt: string;
+  runtime?: string | null;
+  placement?: string | null;
 };
 
 export type DeviceRuntimeStatus =
@@ -740,7 +742,7 @@ export type MessageSendOptions = {
   queueWhenBusy?: boolean;
 };
 
-/** A message the server is holding until the session's current turn finishes. */
+/** A message currently held by the selected runtime's native queue. */
 export type QueuedMessage = {
   id: string;
   sessionId: string;

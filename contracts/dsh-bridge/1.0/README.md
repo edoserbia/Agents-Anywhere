@@ -13,7 +13,11 @@ version when changed incompatibly.
 The Next plugin implements authenticated `initialize`, `ping`, `runtime.getConfig`,
 `runtime.getCapabilities`, `session.list`, `session.getSnapshot`, `session.getState`,
 `session.getNotices`, and `session.getCapabilities`. With the native Agent service,
-`session.createAndStart`, `session.startTurn` and `session.interrupt` are enabled.
+`session.createAndStart`, `session.startTurn`, `session.queue`, and
+`session.interrupt` are enabled. `session.queue.list`, `session.queue.update`,
+and `session.queue.delete` operate on the native DSH Agent inbox; no queue item
+is persisted in the Agents Anywhere server. A queued message is admitted with
+the same native `SessionController.prompt({ mode: "queue" })` path used by DSH.
 Sends require a stable `clientMessageId`. `session.respondInteraction` handles
 native `ask_user_question` requests via the existing platform inputRequest v1 form.
 AA image sends are available when the official Session Controller and attachment

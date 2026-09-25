@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils"
 import type { QueuedMessage } from "@/features/dashboard"
 
 /**
- * Messages waiting for the session's current turn to finish.
+ * Messages waiting in the selected runtime's native queue.
  *
  * Shown directly above the composer so a message accepted during a run is
  * visibly held rather than looking lost. A pending row can be edited or

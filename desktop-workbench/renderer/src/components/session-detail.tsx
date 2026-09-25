@@ -350,6 +350,7 @@ export function SessionDetail({
     getOptimisticSessionState,
     isOptimisticSession,
     markOptimisticMessageFailed,
+    removeOptimisticMessage,
     replaceHome,
   } = useWorkspace()
   const initialOptimisticState = getOptimisticSessionState(sessionId)
@@ -1312,11 +1313,22 @@ export function SessionDetail({
             : current,
         )
       }
-      await dashboardApi.sendSessionMessage(token, session.id, messageText, {
+      const response = await dashboardApi.sendSessionMessage(token, session.id, messageText, {
         attachments: uploadedAttachments.map((attachment) => ({ fileId: attachment.fileId })),
         clientMessageId,
         queueWhenBusy: options?.queueWhenBusy === true,
       })
+      const queued = options?.queueWhenBusy === true && Boolean(
+        response.result && typeof response.result === "object" &&
+        (response.result as { queued?: unknown }).queued === true,
+      )
+      if (queued) {
+        removeOptimisticMessage(clientMessageId)
+        setState((current) => current ? {
+          ...current,
+          items: current.items.filter((item) => timelineClientMessageId(item) !== clientMessageId),
+        } : current)
+      }
       if (options?.queueWhenBusy) void refreshQueue()
       return true
     } catch (err) {

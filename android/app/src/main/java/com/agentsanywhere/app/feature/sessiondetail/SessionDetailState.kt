@@ -116,12 +116,10 @@ internal fun SessionDetailState.failSnapshotLoad(message: String?): SessionDetai
 )
 
 /**
- * Messages the server is holding until the session's current turn finishes.
+ * Messages waiting in the selected engine's native queue.
  *
  * The queue exists because a runtime can only run one turn at a time. A message
- * sent while one is running is kept here and dispatched automatically, instead
- * of being refused — which is what used to leave the composer dead on runtimes
- * that cannot steer, such as DSH.
+ * The server only projects this state; it does not own or dispatch these items.
  */
 data class SessionMessageQueue(
     val items: List<QueuedMessage> = emptyList(),
@@ -144,6 +142,8 @@ data class QueuedMessage(
     val clientMessageId: String? = null,
     val errorCode: String? = null,
     val errorMessage: String? = null,
+    val runtime: String? = null,
+    val placement: String? = null,
 ) {
     val pending: Boolean get() = status == "queued"
     val failed: Boolean get() = status == "failed"

@@ -13,6 +13,8 @@ from connector.server.runtime_rpc_params import (
     SessionSelectionUpdateParams,
     TurnStartParams,
     TurnSteerParams,
+    SessionReadParams,
+    SessionQueueItemParams,
 )
 from connector.server.runtime_rpc_payloads import (
     command_result_payload,
@@ -69,6 +71,23 @@ async def dispatch_session_send_message(
     return operation_result_payload(result)
 
 
+async def dispatch_session_queue_message(
+    runtime: AgentRuntime,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    parsed = TurnStartParams.parse(params)
+    result = await runtime.queue_session_message(
+        parsed.session_id,
+        parsed.external_session_id,
+        parsed.content,
+        parsed.selections,
+        parsed.attachments,
+        parsed.client_message_id,
+        cwd=parsed.cwd,
+    )
+    return operation_result_payload(result)
+
+
 async def dispatch_session_steer(
     runtime: AgentRuntime,
     params: dict[str, Any],
@@ -82,6 +101,36 @@ async def dispatch_session_steer(
         parsed.client_message_id,
     )
     return operation_result_payload(result)
+
+
+async def dispatch_session_queue_list(
+    runtime: AgentRuntime,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    parsed = SessionReadParams.parse(params)
+    return dict(await runtime.get_session_queue(parsed.session_id, parsed.external_session_id))
+
+
+async def dispatch_session_queue_update(
+    runtime: AgentRuntime,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    parsed = SessionQueueItemParams.parse(params)
+    if parsed.content is None:
+        raise ValueError("content is required")
+    return operation_result_payload(await runtime.update_session_queue(
+        parsed.session_id, parsed.external_session_id, parsed.item_id, parsed.content
+    ))
+
+
+async def dispatch_session_queue_delete(
+    runtime: AgentRuntime,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    parsed = SessionQueueItemParams.parse(params)
+    return operation_result_payload(await runtime.delete_session_queue(
+        parsed.session_id, parsed.external_session_id, parsed.item_id
+    ))
 
 
 async def dispatch_session_interrupt(

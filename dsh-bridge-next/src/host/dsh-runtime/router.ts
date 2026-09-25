@@ -73,7 +73,8 @@ export class RuntimeRouter {
         return { accepted: true }
       }
       case 'session.createAndStart':
-      case 'session.startTurn': {
+      case 'session.startTurn':
+      case 'session.queue': {
         const native = this.reader.native
         if (!native) throw new BridgeError('UNSUPPORTED_OPERATION', 'Text messaging is unavailable.')
         const attachments = parseAttachments(params.attachments)
@@ -127,6 +128,23 @@ export class RuntimeRouter {
         const id = await this.resolve(params, signal)
         await this.reader.native.interrupt(id)
         return { accepted: true, sessionId: sessionId(this.namespace, id), externalSessionId: id }
+      }
+      case 'session.queue.list': {
+        if (!this.reader.native) throw new BridgeError('UNSUPPORTED_OPERATION', 'Queue is unavailable.')
+        const id = await this.resolve(params, signal)
+        return this.reader.native.queue(id)
+      }
+      case 'session.queue.update': {
+        if (!this.reader.native) throw new BridgeError('UNSUPPORTED_OPERATION', 'Queue editing is unavailable.')
+        const id = await this.resolve(params, signal)
+        if (typeof params.itemId !== 'string' || typeof params.content !== 'string') throw new BridgeError('INVALID_PARAMS', 'itemId and content are required.')
+        return this.reader.native.updateQueue(id, params.itemId, params.content, signal)
+      }
+      case 'session.queue.delete': {
+        if (!this.reader.native) throw new BridgeError('UNSUPPORTED_OPERATION', 'Queue deletion is unavailable.')
+        const id = await this.resolve(params, signal)
+        if (typeof params.itemId !== 'string') throw new BridgeError('INVALID_PARAMS', 'itemId is required.')
+        return this.reader.native.deleteQueue(id, params.itemId, signal)
       }
       case 'ping': return { ok: true }
       case 'runtime.getConfig': return { runtime: 'dsh', revision: 2, values: {}, metadata: { readOnly: !this.reader.native?.ctx.get('agents'), storageMode: 'dsh-native' } }

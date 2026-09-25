@@ -479,7 +479,7 @@ class SessionsApi(
             .put("content", content)
             .put("clientMessageId", clientMessageId)
         // Ask the server to keep the message when the runtime is mid-turn
-        // instead of rejecting it; the queue dispatches it as the turn ends.
+        // The selected runtime owns the queue and dispatches it as the turn ends.
         if (queueWhenBusy) body.put("queueWhenBusy", true)
         if (attachments.isNotEmpty()) {
             body.put(
@@ -930,6 +930,8 @@ class SessionsApi(
             clientMessageId = this?.optNullableString("clientMessageId"),
             errorCode = this?.optNullableString("errorCode"),
             errorMessage = this?.optNullableString("errorMessage"),
+            runtime = this?.optNullableString("runtime"),
+            placement = this?.optNullableString("placement"),
         )
     }
 
@@ -1104,6 +1106,7 @@ class SessionsApi(
             ok = optBoolean("ok", false),
             errorCode = error?.optNullableString("code"),
             errorMessage = error?.optNullableString("message"),
+            result = optJSONObject("result").toMap(),
         )
     }
 

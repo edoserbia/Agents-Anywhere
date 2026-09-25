@@ -9,13 +9,14 @@ ENV NODE_ENV=production \
 
 WORKDIR /app/web-next
 
-COPY web-next/package.json web-next/.yarnrc.yml ./
+COPY web-next/package.json web-next/yarn.lock web-next/.yarnrc.yml ./
 RUN corepack enable \
     && if [ -n "$YARN_REGISTRY" ]; then yarn config set npmRegistryServer "$YARN_REGISTRY"; fi \
     && YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install
 
 COPY web-next ./
-RUN yarn build
+RUN yarn install --immutable \
+    && yarn build
 
 
 FROM python:3.12-slim AS server

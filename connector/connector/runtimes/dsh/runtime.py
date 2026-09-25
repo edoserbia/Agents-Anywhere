@@ -322,6 +322,49 @@ class DshRuntime(AgentRuntime):
         return await self._send_text("session.startTurn", session_id, external_session_id, content, cwd, attachments, client_message_id,
                                      selections=selections)
 
+    async def queue_session_message(
+        self, session_id: str, external_session_id: str | None, content: str,
+        selections: Mapping[str, str | None] | None = None,
+        attachments: tuple[RuntimeAttachment, ...] = (), client_message_id: str | None = None,
+        cwd: str | None = None,
+    ) -> RuntimeOperationResult:
+        return await self._send_text("session.queue", session_id, external_session_id, content, cwd, attachments, client_message_id,
+                                     selections=selections)
+
+    async def get_session_queue(
+        self, session_id: str, external_session_id: str | None = None,
+    ) -> Mapping[str, Any]:
+        return _object(await self._request(
+            "session.queue.list", _session_params(session_id, external_session_id)
+        ))
+
+    async def update_session_queue(
+        self, session_id: str, external_session_id: str | None,
+        item_id: str, content: str,
+    ) -> RuntimeOperationResult:
+        result = _object(await self._request("session.queue.update", {
+            **_session_params(session_id, external_session_id),
+            "itemId": item_id,
+            "content": content,
+        }))
+        return RuntimeOperationResult(
+            ok=result.get("ok") is not False,
+            code=result.get("code"), message=result.get("message"),
+            result=_object(result.get("result") or result),
+        )
+
+    async def delete_session_queue(
+        self, session_id: str, external_session_id: str | None, item_id: str,
+    ) -> RuntimeOperationResult:
+        result = _object(await self._request("session.queue.delete", {
+            **_session_params(session_id, external_session_id), "itemId": item_id,
+        }))
+        return RuntimeOperationResult(
+            ok=result.get("ok") is not False,
+            code=result.get("code"), message=result.get("message"),
+            result=_object(result.get("result") or result),
+        )
+
     async def _send_text(
         self, method: str, session_id: str, external_id: str | None, content: str,
         cwd: str | None, attachments: tuple[RuntimeAttachment, ...], client_message_id: str | None,

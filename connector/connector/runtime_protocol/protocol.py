@@ -177,6 +177,18 @@ class AgentRuntime(ABC):
         _ = cwd
         raise RuntimeUnsupportedError("start_turn")
 
+    async def queue_session_message(
+        self,
+        session_id: str,
+        external_session_id: str | None,
+        content: str,
+        selections: Mapping[str, str | None] | None = None,
+        attachments: tuple[RuntimeAttachment, ...] = (),
+        client_message_id: str | None = None,
+        cwd: str | None = None,
+    ) -> RuntimeOperationResult:
+        raise RuntimeUnsupportedError("session.queue")
+
     async def steer_turn(
         self,
         session_id: str,
@@ -186,6 +198,30 @@ class AgentRuntime(ABC):
         client_message_id: str | None = None,
     ) -> RuntimeOperationResult:
         raise RuntimeUnsupportedError("steer_turn")
+
+    async def get_session_queue(
+        self,
+        session_id: str,
+        external_session_id: str | None = None,
+    ) -> Mapping[str, Any]:
+        raise RuntimeUnsupportedError("session.queue.list")
+
+    async def update_session_queue(
+        self,
+        session_id: str,
+        external_session_id: str | None,
+        item_id: str,
+        content: str,
+    ) -> RuntimeOperationResult:
+        raise RuntimeUnsupportedError("session.queue.update")
+
+    async def delete_session_queue(
+        self,
+        session_id: str,
+        external_session_id: str | None,
+        item_id: str,
+    ) -> RuntimeOperationResult:
+        raise RuntimeUnsupportedError("session.queue.delete")
 
     async def interrupt_session(
         self,

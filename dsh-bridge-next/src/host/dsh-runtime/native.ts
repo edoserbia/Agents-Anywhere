@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { SessionPromptRequest } from '@deepseek-ai/dsh-api-session-controller'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionRecord } from '@deepseek-ai/dsh-session-query'
@@ -293,6 +294,68 @@ export class NativeRuntime {
       try { await this.configuration.apply(agent, selections, false, signal) }
       finally { this.emit({ type: 'status', id }) }
       return this.configuration.state(id)
+    })
+  }
+
+  /** Read the queue from DSH's authoritative session-control baseline. */
+  async queue(id: SessionId) {
+    await this.source.requireAvailable(id)
+    await this.configuration.agent(id)
+    const controller = new AbortController()
+    const stream = this.configuration.controller().control(controller.signal)[Symbol.asyncIterator]()
+    try {
+      const { value, done } = await stream.next()
+      if (done || value.type !== 'baseline') {
+        throw new BridgeError('DSH_SERVICE_UNAVAILABLE', 'DSH did not provide a queue snapshot.', true)
+      }
+      const items = value.value.queues[id] ?? []
+      return {
+        sessionId: String(id),
+        source: 'dsh-native',
+        items: items.map((item, position) => ({
+          id: String(item.id),
+          position,
+          status: 'queued',
+          placement: item.placement,
+          content: item.message.content.map(block => {
+            const value = record(block)
+            return value.type === 'text' && typeof value.text === 'string' ? value.text : undefined
+          }).filter((text): text is string => text !== undefined).join('\n'),
+          nativeContent: item.message.content,
+          clientMessageId: item.rpcId,
+        })),
+      }
+    } finally {
+      controller.abort()
+      await stream.return?.()
+    }
+  }
+
+  async updateQueue(id: SessionId, itemId: string, content: string, signal: AbortSignal) {
+    return this.write(id, signal, async () => {
+      await this.source.requireAvailable(id)
+      const agent = await this.configuration.agent(id)
+      this.configuration.controller().updateQueue({
+        sessionId: id,
+        itemId: MessageId(itemId),
+        action: { kind: 'edit', content: [{ type: 'text', text: content }] },
+      })
+      await this.ctx.sessions.flush(agent.session)
+      return { accepted: true, itemId }
+    })
+  }
+
+  async deleteQueue(id: SessionId, itemId: string, signal: AbortSignal) {
+    return this.write(id, signal, async () => {
+      await this.source.requireAvailable(id)
+      const agent = await this.configuration.agent(id)
+      this.configuration.controller().updateQueue({
+        sessionId: id,
+        itemId: MessageId(itemId),
+        action: { kind: 'remove' },
+      })
+      await this.ctx.sessions.flush(agent.session)
+      return { accepted: true, itemId }
     })
   }
 

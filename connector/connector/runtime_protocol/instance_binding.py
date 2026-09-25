@@ -669,6 +669,54 @@ class RuntimeInstance(AgentRuntime):
             client_message_id=client_message_id,
         )
 
+    async def queue_session_message(
+        self,
+        session_id: str,
+        external_session_id: str | None,
+        content: str,
+        selections: Mapping[str, str | None] | None = None,
+        attachments: tuple[RuntimeAttachment, ...] = (),
+        client_message_id: str | None = None,
+        cwd: str | None = None,
+    ) -> RuntimeOperationResult:
+        return await self.native_runtime.queue_session_message(
+            session_id=session_id,
+            external_session_id=external_session_id,
+            content=content,
+            selections=selections,
+            attachments=attachments,
+            client_message_id=client_message_id,
+            cwd=cwd,
+        )
+
+    async def get_session_queue(
+        self,
+        session_id: str,
+        external_session_id: str | None = None,
+    ) -> Mapping[str, Any]:
+        return await self.native_runtime.get_session_queue(session_id, external_session_id)
+
+    async def update_session_queue(
+        self,
+        session_id: str,
+        external_session_id: str | None,
+        item_id: str,
+        content: str,
+    ) -> RuntimeOperationResult:
+        return await self.native_runtime.update_session_queue(
+            session_id, external_session_id, item_id, content
+        )
+
+    async def delete_session_queue(
+        self,
+        session_id: str,
+        external_session_id: str | None,
+        item_id: str,
+    ) -> RuntimeOperationResult:
+        return await self.native_runtime.delete_session_queue(
+            session_id, external_session_id, item_id
+        )
+
     async def interrupt_session(
         self,
         session_id: str,

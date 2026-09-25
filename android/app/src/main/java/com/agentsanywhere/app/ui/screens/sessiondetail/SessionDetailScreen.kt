@@ -916,15 +916,22 @@ fun SessionDetailScreen(
             request
                 .onSuccess { result ->
                     clearComposerDraft()
-                    state = controller.markOptimisticMessage(
-                        sessionId = id,
-                        state = state,
-                        clientMessageId = clientMessageId,
-                        status = "running",
-                        attachments = optimisticAttachments.ifEmpty { result.attachments },
-                    )
-                    // A queued message is not running yet; refresh so the row appears.
-                    if (queueWhileRunning) {
+                    if (result.queued) {
+                        state = controller.removeOptimisticMessage(
+                            sessionId = id,
+                            state = state,
+                            clientMessageId = clientMessageId,
+                        )
+                    } else {
+                        state = controller.markOptimisticMessage(
+                            sessionId = id,
+                            state = state,
+                            clientMessageId = clientMessageId,
+                            status = "running",
+                            attachments = optimisticAttachments.ifEmpty { result.attachments },
+                        )
+                    }
+                    if (queueWhileRunning || result.queued) {
                         controller.loadQueue(id).onSuccess { queueState ->
                             state = state.copy(queue = queueState)
                         }

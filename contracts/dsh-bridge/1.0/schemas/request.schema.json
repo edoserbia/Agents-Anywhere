@@ -15,6 +15,7 @@
         "session.getSnapshot", "session.getState", "session.getNotices",
         "session.getCapabilities", "session.createAndStart", "session.startTurn",
         "session.steer", "session.interrupt", "session.updateSelections",
+        "session.queue", "session.queue.list", "session.queue.update", "session.queue.delete",
         "session.listCommands", "session.executeCommand",
         "session.respondInteraction", "ping", "shutdown"
       ]

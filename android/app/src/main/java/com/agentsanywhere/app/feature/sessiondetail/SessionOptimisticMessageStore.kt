@@ -24,6 +24,14 @@ internal class SessionOptimisticMessageStore {
         }
     }
 
+    fun remove(sessionId: String, clientMessageId: String) {
+        synchronized(lock) {
+            val next = messagesBySession[sessionId].orEmpty()
+                .filterNot { it.clientMessageId == clientMessageId || it.id == clientMessageId }
+            if (next.isEmpty()) messagesBySession.remove(sessionId) else messagesBySession[sessionId] = next
+        }
+    }
+
     fun move(fromSessionId: String, toSessionId: String) {
         if (fromSessionId == toSessionId) return
         synchronized(lock) {

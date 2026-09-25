@@ -394,6 +394,7 @@ export type WorkspaceState = {
   getOptimisticSessionState: (sessionId: string) => SessionLocalTimelineState | null
   isOptimisticSession: (sessionId: string) => boolean
   markOptimisticMessageFailed: (clientMessageId: string, message: string) => void
+  removeOptimisticMessage: (clientMessageId: string) => void
   appendPathToComposer: (path: string) => boolean
   consumeComposerInsertion: (id: number) => void
   refreshData: () => void
@@ -1397,6 +1398,19 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     })
   }, [clearOptimisticTop, sortSessions])
 
+  const removeOptimisticMessage = React.useCallback((clientMessageId: string) => {
+    const existing = optimisticMessagesRef.current.find((entry) => entry.clientMessageId === clientMessageId)
+    if (existing) {
+      clearOptimisticTop(existing.sessionId)
+      setSessions((current) => sortSessions(current))
+    }
+    setOptimisticMessages((prev) => {
+      const next = prev.filter((entry) => entry.clientMessageId !== clientMessageId)
+      optimisticMessagesRef.current = next
+      return next
+    })
+  }, [clearOptimisticTop, sortSessions])
+
   const clearResolvedOptimisticMessages = React.useCallback((sessionId: string, items: TimelineItem[]) => {
     const resolvedClientMessageIds = new Set(
       items
@@ -1557,6 +1571,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     getOptimisticSessionState,
     isOptimisticSession,
     markOptimisticMessageFailed,
+    removeOptimisticMessage,
     appendPathToComposer,
     consumeComposerInsertion,
     refreshData: fetchData,

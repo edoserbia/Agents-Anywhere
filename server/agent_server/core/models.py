@@ -1116,6 +1116,8 @@ class QueuedMessageView(BaseModel):
     errorMessage: str | None = None
     createdAt: str
     updatedAt: str
+    runtime: str | None = None
+    placement: str | None = None
 
 
 class SessionQueueResponse(BaseModel):
