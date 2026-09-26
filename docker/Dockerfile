@@ -16,7 +16,7 @@ RUN corepack enable \
 
 COPY web-next ./
 RUN yarn install --immutable \
-    && yarn build
+    && yarn build --webpack
 
 
 FROM python:3.12-slim AS server
