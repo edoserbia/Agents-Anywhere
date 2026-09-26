@@ -184,10 +184,10 @@ private fun JSONObject.catalogItemDisabledReason(metadata: Map<String, Any?>): S
 }
 
 /**
- * A message currently held by the selected runtime's native queue.
+ * A message currently held by Agents Anywhere until the current turn ends.
  *
  * Mirrors the server's `QueuedMessageView`: `status` is `queued` while it waits,
- * and only `queued` items can still be edited or removed.
+ * and failed items remain editable, removable, and retryable.
  */
 data class RemoteQueuedMessage(
     val id: String,
@@ -202,6 +202,7 @@ data class RemoteQueuedMessage(
     val placement: String? = null,
 ) {
     val pending: Boolean get() = status == "queued"
+    val editable: Boolean get() = status == "queued" || status == "failed"
 }
 
 data class RemoteSessionQueue(

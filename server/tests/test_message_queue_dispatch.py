@@ -15,7 +15,6 @@ from agent_server.services.message_queue import (
     QUEUE_STATUS_FAILED,
     QUEUE_STATUS_QUEUED,
     QUEUE_STATUS_SENDING,
-    QUEUE_STATUS_SENT,
     MessageQueueService,
 )
 from agent_server.services.message_queue_dispatch import (
@@ -58,13 +57,13 @@ def test_dispatches_the_head_message() -> None:
     asyncio.run(run())
 
 
-def test_dispatch_marks_the_item_sent() -> None:
+def test_successful_dispatch_removes_the_item_from_the_queue() -> None:
     async def run() -> None:
         sender = RecordingSender()
         dispatcher, queue = _dispatcher(sender)
         await _enqueue(queue, "first")
         await dispatcher.dispatch_next("s1")
-        assert (await queue.list("s1"))[0].status == QUEUE_STATUS_SENT
+        assert await queue.list("s1") == []
 
     asyncio.run(run())
 
@@ -78,7 +77,7 @@ def test_only_one_message_is_sent_per_finished_turn() -> None:
         await dispatcher.dispatch_next("s1")
         # Sending starts a new turn; the next item must wait for it to finish.
         assert [item["content"] for _, item in sender.sent] == ["first"]
-        remaining = [item for item in await queue.list("s1") if item.status == QUEUE_STATUS_QUEUED]
+        remaining = await queue.list("s1")
         assert [item.content for item in remaining] == ["second"]
 
     asyncio.run(run())

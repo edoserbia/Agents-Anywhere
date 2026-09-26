@@ -555,6 +555,24 @@ class SessionDetailController(
         }
     }
 
+    /** Interrupt the current turn and send this item before the remaining queue. */
+    suspend fun insertQueuedMessage(
+        sessionId: String,
+        itemId: String,
+    ): Result<SessionMessageQueue> {
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val auth = authSession()
+                sessionsApi.insertQueuedMessage(
+                    serverUrl = auth.serverUrl,
+                    authorizationToken = auth.accessToken,
+                    sessionId = sessionId,
+                    itemId = itemId,
+                ).toSessionMessageQueue()
+            }
+        }
+    }
+
     /**
      * Delete one timeline item from the reader's view of the session.
      *

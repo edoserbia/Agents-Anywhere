@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { useTranslations } from "next-intl"
-import { Pencil, Trash2, Clock } from "lucide-react"
+import { ArrowUp, ChevronRight, Pencil, Trash2, Clock } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -21,16 +21,19 @@ export function SessionQueuePanel({
   items,
   onUpdate,
   onDelete,
+  onInsert,
   className,
 }: {
   items: QueuedMessage[]
   onUpdate: (item: QueuedMessage, content: string) => Promise<void> | void
   onDelete: (item: QueuedMessage) => Promise<void> | void
+  onInsert: (item: QueuedMessage) => Promise<void> | void
   className?: string
 }) {
   const t = useTranslations("dashboard.session")
   const [editingId, setEditingId] = React.useState<string | null>(null)
   const [draft, setDraft] = React.useState("")
+  const [collapsed, setCollapsed] = React.useState(true)
 
   if (items.length === 0) return null
 
@@ -52,13 +55,20 @@ export function SessionQueuePanel({
       )}
       data-slot="session-queue-panel"
     >
-      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
+      <button
+        type="button"
+        className="flex min-h-7 items-center gap-1.5 text-[11px] font-semibold text-muted-foreground"
+        aria-expanded={!collapsed}
+        aria-label={t(collapsed ? "queueExpand" : "queueCollapse")}
+        onClick={() => setCollapsed((value) => !value)}
+      >
         <Clock className="size-3" aria-hidden />
         <span>{t("queueTitle", { count: items.length })}</span>
-      </div>
-      <ul className="space-y-1.5">
+        <ChevronRight className={cn("size-3.5 transition-transform", !collapsed && "rotate-90")} aria-hidden />
+      </button>
+      {!collapsed ? <ul className="mt-1.5 space-y-1.5">
         {items.map((item) => {
-          const isPending = item.status === "queued"
+          const canMutate = item.status === "queued" || item.status === "failed"
           const isEditing = editingId === item.id
           return (
             <li
@@ -113,9 +123,22 @@ export function SessionQueuePanel({
                   >
                     {item.content.trim() ||
                       item.errorMessage ||
-                      t("queueItemFailed")}
+                      (item.status === "failed" ? t("queueItemFailed") : t("queueAttachmentOnly"))}
                   </span>
-                  {isPending ? (
+                  {canMutate ? (
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="size-6 shrink-0"
+                      aria-label={t("queueInsert")}
+                      title={t("queueInsert")}
+                      onClick={() => void onInsert(item)}
+                    >
+                      <ArrowUp className="size-3.5" aria-hidden />
+                    </Button>
+                  ) : null}
+                  {canMutate ? (
                     <Button
                       type="button"
                       size="icon"
@@ -128,23 +151,25 @@ export function SessionQueuePanel({
                       <Pencil className="size-3.5" aria-hidden />
                     </Button>
                   ) : null}
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    className="size-6 shrink-0"
-                    aria-label={t("queueDelete")}
-                    title={t("queueDelete")}
-                    onClick={() => void onDelete(item)}
-                  >
-                    <Trash2 className="size-3.5" aria-hidden />
-                  </Button>
+                  {canMutate ? (
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="size-6 shrink-0"
+                      aria-label={t("queueDelete")}
+                      title={t("queueDelete")}
+                      onClick={() => void onDelete(item)}
+                    >
+                      <Trash2 className="size-3.5" aria-hidden />
+                    </Button>
+                  ) : null}
                 </>
               )}
             </li>
           )
         })}
-      </ul>
+      </ul> : null}
     </div>
   )
 }

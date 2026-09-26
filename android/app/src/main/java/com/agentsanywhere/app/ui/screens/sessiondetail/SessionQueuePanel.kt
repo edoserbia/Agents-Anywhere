@@ -34,28 +34,33 @@ import com.agentsanywhere.app.feature.sessiondetail.QueuedMessage
 import com.agentsanywhere.app.feature.sessiondetail.SessionMessageQueue
 import com.agentsanywhere.app.ui.designsystem.LocalAAColors
 import com.agentsanywhere.app.ui.designsystem.noRippleClickable
+import com.composables.icons.lucide.ArrowUp
 import com.composables.icons.lucide.Clock
+import com.composables.icons.lucide.ChevronDown
+import com.composables.icons.lucide.ChevronRight
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.Pencil
 import com.composables.icons.lucide.Trash2
 
 /**
- * Messages waiting for the current turn to finish.
+ * Messages held by Agents Anywhere until the current turn finishes.
  *
  * Shown above the composer so it is clear that a message was accepted rather
  * than lost. Each pending row can be edited or removed; a row that already
- * failed is reported and can only be dismissed.
+ * failed can be retried by insertion, edited, or removed.
  */
 @Composable
 internal fun SessionQueuePanel(
     queue: SessionMessageQueue,
     onUpdate: (QueuedMessage, String) -> Unit,
     onDelete: (QueuedMessage) -> Unit,
+    onInsert: (QueuedMessage) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (queue.items.isEmpty()) return
     val colors = LocalAAColors.current
     val shape = RoundedCornerShape(18.dp)
+    var expanded by remember(queue.items.firstOrNull()?.sessionId) { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -67,10 +72,7 @@ internal fun SessionQueuePanel(
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        TextButton(onClick = { expanded = !expanded }) {
             Icon(
                 imageVector = Lucide.Clock,
                 contentDescription = null,
@@ -83,13 +85,24 @@ internal fun SessionQueuePanel(
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
             )
-        }
-        queue.items.forEach { item ->
-            QueueRow(
-                item = item,
-                onUpdate = onUpdate,
-                onDelete = onDelete,
+            Icon(
+                imageVector = if (expanded) Lucide.ChevronDown else Lucide.ChevronRight,
+                contentDescription = stringResource(
+                    if (expanded) R.string.session_queue_collapse else R.string.session_queue_expand,
+                ),
+                tint = colors.muted,
+                modifier = Modifier.size(14.dp),
             )
+        }
+        if (expanded) {
+            queue.items.forEach { item ->
+                QueueRow(
+                    item = item,
+                    onUpdate = onUpdate,
+                    onDelete = onDelete,
+                    onInsert = onInsert,
+                )
+            }
         }
     }
 }
@@ -99,6 +112,7 @@ private fun QueueRow(
     item: QueuedMessage,
     onUpdate: (QueuedMessage, String) -> Unit,
     onDelete: (QueuedMessage) -> Unit,
+    onInsert: (QueuedMessage) -> Unit,
 ) {
     val colors = LocalAAColors.current
     var editing by remember(item.id) { mutableStateOf(false) }
@@ -154,7 +168,9 @@ private fun QueueRow(
         verticalAlignment = Alignment.Top,
     ) {
         Text(
-            text = item.content.ifBlank { item.errorMessage.orEmpty() },
+            text = item.content.ifBlank {
+                item.errorMessage ?: stringResource(R.string.session_queue_attachment_only)
+            },
             modifier = Modifier.weight(1f).heightIn(max = 96.dp),
             color = if (item.failed) colors.errorText else colors.ink,
             fontSize = 13.sp,
@@ -162,7 +178,15 @@ private fun QueueRow(
             maxLines = 4,
             overflow = TextOverflow.Ellipsis,
         )
-        if (item.pending) {
+        if (item.editable) {
+            Icon(
+                imageVector = Lucide.ArrowUp,
+                contentDescription = stringResource(R.string.session_queue_insert),
+                tint = colors.muted,
+                modifier = Modifier
+                    .size(18.dp)
+                    .noRippleClickable { onInsert(item) },
+            )
             Icon(
                 imageVector = Lucide.Pencil,
                 contentDescription = stringResource(R.string.session_queue_edit),
@@ -171,14 +195,14 @@ private fun QueueRow(
                     .size(18.dp)
                     .noRippleClickable { editing = true },
             )
+            Icon(
+                imageVector = Lucide.Trash2,
+                contentDescription = stringResource(R.string.session_queue_delete),
+                tint = colors.muted,
+                modifier = Modifier
+                    .size(18.dp)
+                    .noRippleClickable { onDelete(item) },
+            )
         }
-        Icon(
-            imageVector = Lucide.Trash2,
-            contentDescription = stringResource(R.string.session_queue_delete),
-            tint = colors.muted,
-            modifier = Modifier
-                .size(18.dp)
-                .noRippleClickable { onDelete(item) },
-        )
     }
 }

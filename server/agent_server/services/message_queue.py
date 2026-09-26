@@ -140,9 +140,13 @@ class MessageQueueStore(Protocol):
 
     async def update_content(self, item_id: str, **values: Any) -> dict[str, Any] | None: ...
 
+    async def prioritize(self, session_id: str, item_id: str, **values: Any) -> dict[str, Any] | None: ...
+
     async def set_status(self, item_id: str, **values: Any) -> None: ...
 
     async def remove(self, item_id: str) -> None: ...
+
+    async def remove_pending(self, session_id: str, item_id: str) -> bool: ...
 
     async def clear_for_session(self, session_id: str) -> None: ...
 
@@ -157,7 +161,11 @@ class MessageQueueService:
 
     async def list(self, session_id: str) -> list[QueuedMessage]:
         rows = await self._store.list_for_session(session_id)
-        return [queued_message_from_row(row) for row in rows]
+        return [
+            item
+            for row in rows
+            if (item := queued_message_from_row(row)).status != QUEUE_STATUS_SENT
+        ]
 
     async def enqueue(
         self,
@@ -203,7 +211,7 @@ class MessageQueueService:
         A dispatched item is rejected rather than rewritten: the runtime may
         already have acted on it, so changing it would misrepresent what ran.
         """
-        item = await self._require_pending(session_id, item_id)
+        item = await self._require_editable(session_id, item_id)
         if content is None:
             content = item.content
         if not content.strip() and not attachments:
@@ -218,6 +226,7 @@ class MessageQueueService:
             attachments=attachments if attachments is not None else item.attachments,
             updated_at=utc_now(),
             updated_seq=item.updated_seq + 1,
+            status=QUEUE_STATUS_QUEUED,
         )
         if updated is None:
             raise MessageQueueError(
@@ -237,7 +246,12 @@ class MessageQueueService:
         resolve.
         """
         item = await self._require_removable(session_id, item_id)
-        await self._store.remove(item_id)
+        if not await self._store.remove_pending(session_id, item_id):
+            raise MessageQueueError(
+                "session/queue-item-not-found",
+                "queued item is no longer pending",
+                item_id=item_id,
+            )
         return item
 
     async def clear(self, session_id: str) -> None:
@@ -253,9 +267,27 @@ class MessageQueueService:
         return queued_message_from_row(row) if row is not None else None
 
     async def mark_sent(self, item_id: str) -> None:
-        await self._store.set_status(
-            item_id, status=QUEUE_STATUS_SENT, updated_at=utc_now()
+        # Once the runtime accepts the message, the queue no longer owns it.
+        await self._store.remove(item_id)
+
+    async def prioritize(self, *, session_id: str, item_id: str) -> QueuedMessage:
+        """Move an unsent item to the head so it can be inserted immediately."""
+        await self._require_removable(session_id, item_id)
+        row = await self._store.prioritize(
+            session_id,
+            item_id,
+            status=QUEUE_STATUS_QUEUED,
+            error_code=None,
+            error_message=None,
+            updated_at=utc_now(),
         )
+        if row is None:
+            raise MessageQueueError(
+                "session/queue-item-not-found",
+                "queued item is no longer pending",
+                item_id=item_id,
+            )
+        return queued_message_from_row(row)
 
     async def mark_failed(self, item_id: str, *, code: str, message: str) -> None:
         await self._store.set_status(
@@ -297,9 +329,9 @@ class MessageQueueService:
             )
         item = queued_message_from_row(row)
         # Guard against addressing another session's queue by id.
-        if item.session_id != session_id or item.status in {
-            QUEUE_STATUS_SENT,
-            QUEUE_STATUS_SENDING,
+        if item.session_id != session_id or item.status not in {
+            QUEUE_STATUS_QUEUED,
+            QUEUE_STATUS_FAILED,
         }:
             raise MessageQueueError(
                 "session/queue-item-not-found",
@@ -308,20 +340,23 @@ class MessageQueueService:
             )
         return item
 
-    async def _require_pending(self, session_id: str, item_id: str) -> QueuedMessage:
+    async def _require_editable(self, session_id: str, item_id: str) -> QueuedMessage:
         row = await self._store.get(item_id)
         if row is None:
             raise MessageQueueError(
                 "session/queue-item-not-found",
-                "queued item is no longer pending",
+                "queued item is no longer editable",
                 item_id=item_id,
             )
         item = queued_message_from_row(row)
         # Guard against addressing another session's queue by id.
-        if item.session_id != session_id or not item.pending:
+        if item.session_id != session_id or item.status not in {
+            QUEUE_STATUS_QUEUED,
+            QUEUE_STATUS_FAILED,
+        }:
             raise MessageQueueError(
                 "session/queue-item-not-found",
-                "queued item is no longer pending",
+                "queued item is no longer editable",
                 item_id=item_id,
             )
         return item

@@ -19,7 +19,6 @@ from loguru import logger
 
 from agent_server.services.message_queue import MessageQueueService
 
-
 # A session can accept a new turn in these states. Anything else means the
 # runtime is still working, and dispatching now would collide with it.
 DISPATCHABLE_STATUSES = frozenset({"idle", "error"})
@@ -66,9 +65,8 @@ class MessageQueueDispatcher:
         The item carries the id of the user who queued it, so ownership is read
         from the row rather than passed in — the two cannot disagree.
 
-        Returns whether a message was sent. The item is marked sent only after
-        the runtime accepted it, so a failure never silently drops the user's
-        message.
+        Returns whether a message was sent. The item is removed only after the
+        runtime accepts it, so a failure never silently drops the user's message.
         """
         async with self._lock_for(session_id):
             item = await self._queue.claim_next(session_id)

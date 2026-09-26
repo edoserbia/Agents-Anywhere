@@ -43,10 +43,9 @@ from agent_server.core.models import (
     InteractionRespondRequest,
     MessageCreateRequest,
     NoticeIn,
+    QueuedMessageView,
     QueueItemResponse,
     QueueItemUpdateRequest,
-    QueuedMessageView,
-    SessionQueueResponse,
     RpcError,
     RpcResponsePayload,
     RuntimeNoticeListResponse,
@@ -56,6 +55,7 @@ from agent_server.core.models import (
     SessionCreateAndStartRequest,
     SessionCreateRequest,
     SessionPatchRequest,
+    SessionQueueResponse,
     SessionResponse,
     SessionRuntimeState,
     SessionRuntimeStateResponse,
@@ -1368,9 +1368,32 @@ async def list_session_queue(
     user_id: str = Depends(current_user_id),
     run_service: SessionRunService = Depends(get_session_run_service),
 ) -> SessionQueueResponse:
-    """Messages currently held by the selected runtime's native queue."""
+    """Messages Agents Anywhere is holding until the current turn finishes."""
     try:
         items = await run_service.list_queue(session_id, user_id=user_id)
+    except SessionRunError as exc:
+        _raise_session_run_error(exc)
+    return SessionQueueResponse(
+        sessionId=session_id,
+        items=[QueuedMessageView(**item) for item in items],
+        serverTime=utc_now(),
+    )
+
+
+@router.post("/{session_id}/runtime/queue/{item_id}/insert", response_model=SessionQueueResponse)
+async def insert_session_queue_item(
+    session_id: str,
+    item_id: str,
+    user_id: str = Depends(current_user_id),
+    run_service: SessionRunService = Depends(get_session_run_service),
+) -> SessionQueueResponse:
+    """Interrupt the active turn and dispatch this queued item next."""
+    try:
+        items = await run_service.insert_queue_item(
+            session_id,
+            item_id,
+            user_id=user_id,
+        )
     except SessionRunError as exc:
         _raise_session_run_error(exc)
     return SessionQueueResponse(

@@ -23,7 +23,7 @@ test("the interrupt button yields to a send whenever something can be sent", () 
   assert.match(
     block,
     /queuesWhileRunning\s*&&/,
-    "only a runtime that queues counts, so steering runtimes keep their send",
+    "a running send-capable runtime uses the AA queue",
   )
   assert.match(
     block,

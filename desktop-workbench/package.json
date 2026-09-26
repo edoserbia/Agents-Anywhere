@@ -2,7 +2,7 @@
   "name": "agents-anywhere-desktop-workbench",
   "productName": "Agents Anywhere",
   "private": true,
-  "version": "2.0.17",
+  "version": "2.0.18",
   "description": "Electron shell for the Agents Anywhere web workbench",
   "packageManager": "yarn@4.6.0",
   "workspaces": [
@@ -126,6 +126,7 @@
     },
     "linux": {
       "icon": "build/icon-mac-source.png",
+      "artifactName": "Agents Anywhere-${version}-x86_64.${ext}",
       "target": "AppImage"
     }
   }

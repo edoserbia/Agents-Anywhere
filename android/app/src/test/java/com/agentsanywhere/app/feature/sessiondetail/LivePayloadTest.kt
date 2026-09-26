@@ -79,7 +79,7 @@ class LivePayloadTest {
 
     @Test
     fun `a running live DSH session queues rather than steers`() {
-        assertTrue(runtimeQueuesWhileRunning(SessionRuntimeStatus.Running, canSteer = false, canSendMessage = true))
+        assertTrue(runtimeQueuesWhileRunning(SessionRuntimeStatus.Running, canSendMessage = true))
     }
 
     @Test

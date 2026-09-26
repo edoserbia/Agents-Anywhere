@@ -836,16 +836,10 @@ fun SessionDetailScreen(
             runtimeId,
             runtimeType,
         )
-        val canSteerCapability = state.capabilities.isUsable(
-            SESSION_STEER_CAPABILITY,
-            runtimeId,
-            runtimeType,
-        )
-        // A runtime that cannot steer (DSH) must queue the message instead of
-        // having the submission refused mid-turn.
+        // Running sessions queue messages through Agents Anywhere, even when
+        // the runtime also supports steering.
         val queueWhileRunning = runtimeQueuesWhileRunning(
             currentRuntimeStatus,
-            canSteerCapability,
             canSendCapability,
         )
         val messageAction = state.capabilities.messageAction(runtimeId, currentRuntimeStatus, runtimeType)
@@ -854,7 +848,11 @@ fun SessionDetailScreen(
             return
         }
         val clientMessageId = retryClientMessageId ?: "opt_${UUID.randomUUID()}"
-        val requestAction = retryMessageAction ?: messageAction
+        val requestAction = if (queueWhileRunning) {
+            RuntimeMessageAction.Send
+        } else {
+            retryMessageAction ?: messageAction
+        }
         val actionAllowed = when (requestAction) {
             RuntimeMessageAction.Send -> state.capabilities.isUsable(
                 SESSION_SEND_MESSAGE_CAPABILITY,
@@ -908,8 +906,7 @@ fun SessionDetailScreen(
                     content = text,
                     clientMessageId = clientMessageId,
                     uploadedAttachments = uploadedAttachments,
-                    // A runtime that cannot steer (DSH) takes the message into
-                    // its queue instead of rejecting it mid-turn.
+                    // Running sessions hold the request in Agents Anywhere's queue.
                     queueWhenBusy = queueWhileRunning,
                 )
             }
@@ -938,6 +935,18 @@ fun SessionDetailScreen(
                     }
                 }
                 .onFailure { error ->
+                    if (queueWhileRunning) {
+                        val confirmedQueue = controller.loadQueue(id).getOrNull()
+                        if (confirmedQueue?.items?.any { it.clientMessageId == clientMessageId } == true) {
+                            state = controller.removeOptimisticMessage(
+                                sessionId = id,
+                                state = state.copy(queue = confirmedQueue),
+                                clientMessageId = clientMessageId,
+                            )
+                            clearComposerDraft()
+                            return@onFailure
+                        }
+                    }
                     val rawMessage = error.message
                     val message = rawMessage
                         ?.takeUnless(::isInternalRuntimeError)
@@ -1335,6 +1344,21 @@ fun SessionDetailScreen(
         if (!state.initialized) loadInitialSnapshot()
     }
 
+    LaunchedEffect(sessionId, appVisible, state.initialized, state.queue.items.size, state.effectiveRuntimeStatus()) {
+        if (sessionId == null || !appVisible || !state.initialized) return@LaunchedEffect
+        if (state.effectiveRuntimeStatus() != SessionRuntimeStatus.Running && state.queue.items.isEmpty()) {
+            return@LaunchedEffect
+        }
+        val activeSessionId = sessionId
+        while (true) {
+            delay(2_000)
+            if (sessionId != activeSessionId || !appVisible) break
+            controller.loadQueue(activeSessionId).onSuccess { queueState ->
+                state = state.copy(queue = queueState)
+            }
+        }
+    }
+
     LaunchedEffect(sessionId, appVisible, state.initialized, realtimeController) {
         if (sessionId == null || !appVisible || !state.initialized) return@LaunchedEffect
         val id = sessionId
@@ -1435,9 +1459,7 @@ fun SessionDetailScreen(
         val id = sessionId.orEmpty()
         openInteractions.filter { it.blocksSession(id) }
     }
-    // A running session accepts follow-up instructions through session.steer.
-    // When the runtime cannot steer (DSH), the message is queued instead, so a
-    // missing steer capability must not lock the composer out.
+    // Messages sent during a running turn are held in the Agents Anywhere queue.
     val runtimeBlocksSubmission = runtimeBlocksComposerSubmission(
         runtimeStatus,
         canUseSteer,
@@ -1447,7 +1469,6 @@ fun SessionDetailScreen(
     val commandQuery = draft.trimStart().removePrefix("/").trim()
     val queueWhileRunning = runtimeQueuesWhileRunning(
         runtimeStatus,
-        canUseSteer,
         canUseSendMessage,
     )
     // The capability facts are read once per entry. When they say the runtime
@@ -1808,6 +1829,18 @@ fun SessionDetailScreen(
                                                 .onSuccess { queueState -> state = state.copy(queue = queueState) }
                                                 .onFailure {
                                                     showError(context.getString(R.string.session_queue_delete_failed))
+                                                }
+                                        }
+                                    },
+                                    onInsert = { item ->
+                                        val activeSessionId = sessionId ?: return@SessionQueuePanel
+                                        scope.launch {
+                                            controller.insertQueuedMessage(activeSessionId, item.id)
+                                                .onSuccess { queueState -> state = state.copy(queue = queueState) }
+                                                .onFailure {
+                                                    showError(context.getString(R.string.session_queue_insert_failed))
+                                                    controller.loadQueue(activeSessionId)
+                                                        .onSuccess { queueState -> state = state.copy(queue = queueState) }
                                                 }
                                         }
                                     },

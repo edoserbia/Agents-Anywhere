@@ -590,9 +590,8 @@ internal fun runtimeBlocksComposerSubmission(
  */
 internal fun runtimeQueuesWhileRunning(
     status: SessionRuntimeStatus,
-    canSteer: Boolean,
     canSendMessage: Boolean,
-): Boolean = status == SessionRuntimeStatus.Running && !canSteer && canSendMessage
+): Boolean = status == SessionRuntimeStatus.Running && canSendMessage
 
 /**
  * Why the composer cannot send, as reported by the server.

@@ -13,7 +13,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +27,7 @@ import {
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_DIR = join(PROJECT_ROOT, "release");
+const RELEASE_VERSION = JSON.parse(readFileSync(join(PROJECT_ROOT, "package.json"), "utf8")).version;
 const UV_TARGETS = {
   "darwin-arm64": "darwin-arm64",
   "darwin-x64": "darwin-x64",
@@ -113,12 +114,14 @@ function describeSigning(credentials, missingLabel) {
   return `${source} (${identity})`;
 }
 
-function artifactPaths() {
-  if (!existsSync(OUTPUT_DIR)) return [];
-  return readdirSync(OUTPUT_DIR, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && /\.(dmg|exe|zip|pkg|AppImage)$/.test(entry.name))
-    .map((entry) => join(OUTPUT_DIR, entry.name))
-    .sort();
+function artifactPaths(platform) {
+  const names = {
+    mac: `Agents Anywhere-${RELEASE_VERSION}-universal.dmg`,
+    win: `Agents Anywhere Setup ${RELEASE_VERSION}.exe`,
+    linux: `Agents Anywhere-${RELEASE_VERSION}-x86_64.AppImage`,
+  };
+  const artifact = join(OUTPUT_DIR, names[platform]);
+  return existsSync(artifact) ? [artifact] : [];
 }
 
 function verifyMac({ signed, notarized, artifact }) {
@@ -188,7 +191,12 @@ async function main() {
     yarn(["bundle:uv"], { ...cleanEnvironment, UV_BUNDLE_TARGETS: uvTargets.join(",") });
     yarn(["build"], cleanEnvironment);
   }
-  rmSync(OUTPUT_DIR, { recursive: true, force: true });
+  mkdirSync(OUTPUT_DIR, { recursive: true });
+  const expectedArtifact = artifactPaths(platform)[0];
+  if (expectedArtifact) {
+    rmSync(expectedArtifact, { force: true });
+    rmSync(`${expectedArtifact}.blockmap`, { force: true });
+  }
 
   const builderEnvironment = { ...credentials.environment };
   electronBuilder([
@@ -203,7 +211,7 @@ async function main() {
     ...passthrough,
   ], Object.fromEntries(Object.entries(builderEnvironment).filter(([, entry]) => entry !== undefined)));
 
-  const artifacts = artifactPaths();
+  const artifacts = artifactPaths(platform);
   if (artifacts.length === 0) fail("electron-builder finished without producing an installer.");
   for (const artifact of artifacts) log(`Artifact: ${artifact}`);
   if (platform === "mac") {

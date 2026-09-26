@@ -4,19 +4,14 @@ A session runs one turn at a time. Sending a message while a turn is running
 used to be rejected, so the message was simply lost. The queue accepts it,
 holds it durably, and dispatches it when the current turn finishes.
 
-This applies to every runtime (Codex, Claude, DSH). A runtime that supports
-mid-turn steering (`session.steer`) is unaffected: there the message is steered
-into the running turn instead of queued.
+This applies to every runtime (Codex, Claude, DSH). Messages submitted while a
+turn is running wait in this server queue even when the runtime supports
+mid-turn steering; the queue is only dispatched after the current turn ends.
 
-## Why a queue and not steering
+## Queue behavior
 
-Steering is a runtime capability, not a platform one. DSH declares
-`steerTurn: false` and reports `session.steer` as unsupported, but it does
-support `session.send_message`. Treating "running and cannot steer" as "cannot
-send" is what previously left the composer disabled for the whole run.
-
-So the client asks for a queued send when the runtime can send but not steer,
-and steers when it can.
+All clients ask for a queued send while the runtime is running. Steering remains
+a separate operation and does not change already queued items.
 
 ## HTTP API
 
@@ -40,8 +35,8 @@ POST /sessions/{sessionId}/runtime/messages
   response carries `result.queued = true` plus `result.item`, the queued row.
 - Capabilities are still checked on the queueing path: a runtime that cannot
   send at all will not be able to send the queued message either.
-- Attachments are persisted when the message is queued, not when it is
-  dispatched, so a queued item survives a restart.
+- Attachments are uploaded before the message is queued; the queue retains their
+  stable file IDs so a queued item survives a client disconnect.
 
 ### List the queue
 
@@ -50,8 +45,8 @@ GET /sessions/{sessionId}/runtime/queue
 → { "sessionId": "…", "items": [QueuedMessageView…], "serverTime": "…" }
 ```
 
-Items are returned in dispatch order (oldest first). `items` includes rows that
-already left the queue, so a client can show what became of a message.
+Items are returned in dispatch order. Successfully dispatched items are removed
+immediately, so `items` contains only messages that still need user attention.
 
 ### Edit a queued message
 
@@ -68,16 +63,25 @@ DELETE /sessions/{sessionId}/runtime/queue/{itemId}
 → { "item": QueuedMessageView, "serverTime": "…" }
 ```
 
+### Insert a queued message
+
+```
+POST /sessions/{sessionId}/runtime/queue/{itemId}/insert
+→ { "sessionId": "…", "items": [QueuedMessageView…], "serverTime": "…" }
+```
+
+The selected item moves to the head. If a turn is running, the server interrupts
+it and sends the selected item as soon as the runtime is ready.
+
 ## Item states
 
 | `status` | Meaning | Editable / removable |
 | --- | --- | --- |
 | `queued` | Waiting for the current turn to finish. | Yes |
 | `sending` | Claimed for dispatch. | No |
-| `sent` | Handed to the runtime. | No |
-| `failed` | Dispatch failed; `errorCode`/`errorMessage` explain why. | No |
+| `failed` | Dispatch failed; `errorCode`/`errorMessage` explain why. | Yes |
 
-Only `queued` items can be changed. Once an item is claimed the runtime owns it,
+`queued` and `failed` items can be changed. Once an item is claimed the runtime owns it,
 and rewriting it would misreport what actually ran. Editing or removing a
 non-pending item answers `409` with
 `{"code": "session/queue-item-not-found"}`; the client should refresh the queue
@@ -100,8 +104,8 @@ Properties the implementation guarantees:
 - **FIFO.** Items are dispatched by `position`, which is assigned on enqueue.
 - **Exactly once.** Claiming is a single guarded `UPDATE … WHERE status =
   'queued'`, so two concurrent dispatchers cannot both take the same row.
-- **No silent loss.** An item is marked `sent` only after the runtime accepted
-  it. A dispatch failure marks it `failed` with the reason; a runtime that
+- **No silent loss.** An item is removed only after the runtime accepted it. A
+  dispatch failure marks it `failed` with the reason; a runtime that
   started working again in the meantime puts it back at `queued`.
 - **Isolated per session.** One session's queue never affects another's.
 
@@ -133,9 +137,13 @@ the queue head.
 
 - Show pending items above the composer so a reader can see the message was
   accepted rather than lost.
-- Offer edit and remove only for `queued` items.
+- Offer edit, remove, and insert for `queued` or `failed` items. A `sending`
+  item is already owned by the runtime and cannot be changed.
 - Refresh the queue after a queued send; the row appears immediately rather than
   looking dropped.
+- Remove the optimistic timeline item when the send response says `queued: true`.
+- Hide the queue panel when the server returns no items. The panel may be
+  collapsed while it still contains items.
 - Show a queue-aware composer placeholder while running instead of the
   "send an interrupt or wait" text, which describes a composer that would not
   accept typing at all.

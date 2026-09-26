@@ -351,6 +351,7 @@ export function SessionDetail({
     getOptimisticSessionState,
     isOptimisticSession,
     markOptimisticMessageFailed,
+    removeOptimisticMessage,
     replaceHome,
   } = useWorkspace()
   const initialOptimisticState = getOptimisticSessionState(sessionId)
@@ -1226,6 +1227,12 @@ export function SessionDetail({
     void refreshQueue()
   }, [refreshQueue])
 
+  React.useEffect(() => {
+    if (!session?.id || (!turnInProgress && queuedMessages.length === 0)) return
+    const timer = window.setInterval(() => void refreshQueue(), 2000)
+    return () => window.clearInterval(timer)
+  }, [session?.id, turnInProgress, queuedMessages.length, refreshQueue])
+
   const handleUpdateQueued = React.useCallback(
     async (item: QueuedMessage, content: string) => {
       if (!token || !session?.id) return
@@ -1247,6 +1254,20 @@ export function SessionDetail({
         await refreshQueue()
       } catch (err) {
         toast.error(err instanceof Error ? err.message : tSession("queueDeleteFailed"))
+      }
+    },
+    [token, session?.id, refreshQueue, tSession],
+  )
+
+  const handleInsertQueued = React.useCallback(
+    async (item: QueuedMessage) => {
+      if (!token || !session?.id) return
+      try {
+        const response = await dashboardApi.insertQueuedMessage(token, session.id, item.id)
+        setQueuedMessages(response.items ?? [])
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : tSession("queueInsertFailed"))
+        await refreshQueue()
       }
     },
     [token, session?.id, refreshQueue, tSession],
@@ -1307,14 +1328,43 @@ export function SessionDetail({
             : current,
         )
       }
-      await dashboardApi.sendSessionMessage(token, session.id, messageText, {
+      const response = await dashboardApi.sendSessionMessage(token, session.id, messageText, {
         attachments: uploadedAttachments.map((attachment) => ({ fileId: attachment.fileId })),
         clientMessageId,
         queueWhenBusy: options?.queueWhenBusy === true,
       })
+      const queued = options?.queueWhenBusy === true && Boolean(
+        response.result && typeof response.result === "object" &&
+        (response.result as { queued?: unknown }).queued === true,
+      )
+      if (queued) {
+        removeOptimisticMessage(clientMessageId)
+        setState((current) => current ? {
+          ...current,
+          state: current.state?.status === "waiting" ? previousRuntimeState : current.state,
+          items: current.items.filter((item) => timelineClientMessageId(item) !== clientMessageId),
+        } : current)
+      }
       if (options?.queueWhenBusy) void refreshQueue()
       return true
     } catch (err) {
+      if (options?.queueWhenBusy) {
+        try {
+          const response = await dashboardApi.getSessionQueue(token, session.id)
+          setQueuedMessages(response.items ?? [])
+          if (response.items?.some((item) => item.clientMessageId === clientMessageId)) {
+            removeOptimisticMessage(clientMessageId)
+            setState((current) => current ? {
+              ...current,
+              state: current.state?.status === "waiting" ? previousRuntimeState : current.state,
+              items: current.items.filter((item) => timelineClientMessageId(item) !== clientMessageId),
+            } : current)
+            return true
+          }
+        } catch {
+          // Keep the send error when the queue cannot confirm server acceptance.
+        }
+      }
       const nextSourceErrorCode = sessionSourceErrorCode(err)
       const message = nextSourceErrorCode
         ? sourceErrorMessage(nextSourceErrorCode, tSession, runtimeLabel(sessionRuntimeType(session)))
@@ -1955,6 +2005,7 @@ export function SessionDetail({
               items={queuedMessages}
               onUpdate={handleUpdateQueued}
               onDelete={handleDeleteQueued}
+              onInsert={handleInsertQueued}
             />
           </div>
           {onOpenReview && turnReviewDisplay.activeReview ? (

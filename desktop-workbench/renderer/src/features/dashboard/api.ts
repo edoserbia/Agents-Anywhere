@@ -776,6 +776,18 @@ export class DashboardApi {
     );
   }
 
+  insertQueuedMessage(
+    token: string,
+    sessionId: string,
+    itemId: string,
+  ): Promise<SessionQueueResponse> {
+    return this.client.post<SessionQueueResponse>(
+      `/sessions/${encodeURIComponent(sessionId)}/runtime/queue/${encodeURIComponent(itemId)}/insert`,
+      {},
+      { token },
+    );
+  }
+
   updateQueuedMessage(
     token: string,
     sessionId: string,

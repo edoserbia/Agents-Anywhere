@@ -46,23 +46,21 @@ class SendUnavailableReasonTest {
     }
 
     @Test
-    fun `a running non-steerable runtime queues the message`() {
+    fun `a running runtime with send support queues the message`() {
         assertTrue(
             runtimeQueuesWhileRunning(
                 SessionRuntimeStatus.Running,
-                canSteer = false,
                 canSendMessage = true,
             ),
         )
     }
 
     @Test
-    fun `a running steerable runtime steers instead of queueing`() {
+    fun `a running runtime without send support cannot queue`() {
         assertFalse(
             runtimeQueuesWhileRunning(
                 SessionRuntimeStatus.Running,
-                canSteer = true,
-                canSendMessage = true,
+                canSendMessage = false,
             ),
         )
     }
@@ -72,7 +70,6 @@ class SendUnavailableReasonTest {
         assertFalse(
             runtimeQueuesWhileRunning(
                 SessionRuntimeStatus.Idle,
-                canSteer = false,
                 canSendMessage = true,
             ),
         )

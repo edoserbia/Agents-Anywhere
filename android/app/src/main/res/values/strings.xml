@@ -511,12 +511,17 @@
     <string name="session_process_running">Working · %1$s</string>
     <string name="session_request_history_title">Requests</string>
     <string name="session_queue_title">Queued · %1$d</string>
+    <string name="session_queue_expand">Expand queue</string>
+    <string name="session_queue_collapse">Collapse queue</string>
+    <string name="session_queue_insert">Insert and send now</string>
+    <string name="session_queue_attachment_only">Attachment message</string>
     <string name="session_queue_edit">Edit queued message</string>
     <string name="session_queue_delete">Remove queued message</string>
     <string name="session_queue_save">Save</string>
     <string name="session_queue_cancel">Cancel</string>
     <string name="session_queue_update_failed">Could not update the queued message.</string>
     <string name="session_queue_delete_failed">Could not remove the queued message.</string>
+    <string name="session_queue_insert_failed">Could not insert the queued message.</string>
     <string name="session_queue_failed_item">This queued message could not be sent.</string>
     <string name="session_request_history_empty">No requests in this session yet</string>
     <string name="session_request_history_untitled">(empty request)</string>

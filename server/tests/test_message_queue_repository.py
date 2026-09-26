@@ -105,7 +105,7 @@ def test_enqueue_against_the_real_repository() -> None:
             assert updated.content == "edited"
             assert updated.updated_seq == item.updated_seq + 1
 
-            # A second message can still be edited and removed while pending.
+            # A second message can still be removed while pending.
             second = await service.enqueue(
                 session_id=session_id,
                 user_id=user_id,
@@ -114,16 +114,27 @@ def test_enqueue_against_the_real_repository() -> None:
             removed = await service.remove(session_id=session_id, item_id=second.id)
             assert removed.id == second.id
 
+            third = await service.enqueue(
+                session_id=session_id,
+                user_id=user_id,
+                content="third",
+            )
+            promoted = await service.prioritize(session_id=session_id, item_id=third.id)
+            assert promoted.position < item.position
             claimed = await service.claim_next(session_id)
-            assert claimed is not None and claimed.status == "sending"
+            assert claimed is not None and claimed.id == third.id and claimed.status == "sending"
 
+            await service.mark_sent(claimed.id)
+            claimed = await service.claim_next(session_id)
+            assert claimed is not None and claimed.id == item.id
             await service.mark_sent(claimed.id)
             assert (await service.claim_next(session_id)) is None
 
-            # A dispatched item is owned by the runtime: it must not be removable.
+            assert await service.list(session_id) == []
+
+            # A dispatched item has already left the queue.
             with pytest.raises(MessageQueueError):
-                await service.remove(session_id=session_id, item_id=item.id)
-            assert [entry.id for entry in await service.list(session_id)] == [item.id]
+                await service.remove(session_id=session_id, item_id=claimed.id)
         finally:
             await _cleanup(engine, session_id, user_id)
             await engine.dispose()

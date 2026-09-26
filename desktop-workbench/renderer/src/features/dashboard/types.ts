@@ -742,7 +742,7 @@ export type MessageSendOptions = {
   queueWhenBusy?: boolean;
 };
 
-/** A message currently held by the selected runtime's native queue. */
+/** A message currently held by Agents Anywhere until the current turn ends. */
 export type QueuedMessage = {
   id: string;
   sessionId: string;

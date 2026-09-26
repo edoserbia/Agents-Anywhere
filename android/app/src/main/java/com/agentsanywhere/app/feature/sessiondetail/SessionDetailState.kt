@@ -116,17 +116,16 @@ internal fun SessionDetailState.failSnapshotLoad(message: String?): SessionDetai
 )
 
 /**
- * Messages waiting in the selected engine's native queue.
+ * Messages waiting in the Agents Anywhere queue.
  *
- * The queue exists because a runtime can only run one turn at a time. A message
- * The server only projects this state; it does not own or dispatch these items.
+ * The server owns pending items and dispatches one when the current turn ends.
  */
 data class SessionMessageQueue(
     val items: List<QueuedMessage> = emptyList(),
     val isLoaded: Boolean = false,
     val errorMessage: String? = null,
 ) {
-    /** Items still waiting; only these can be edited or removed. */
+    /** Items that have not been accepted by the runtime and can still be changed. */
     val pending: List<QueuedMessage>
         get() = items.filter(QueuedMessage::pending)
 
@@ -147,4 +146,5 @@ data class QueuedMessage(
 ) {
     val pending: Boolean get() = status == "queued"
     val failed: Boolean get() = status == "failed"
+    val editable: Boolean get() = status == "queued" || status == "failed"
 }

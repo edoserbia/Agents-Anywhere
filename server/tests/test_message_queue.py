@@ -16,7 +16,6 @@ from agent_server.services.message_queue import (
     QUEUE_STATUS_FAILED,
     QUEUE_STATUS_QUEUED,
     QUEUE_STATUS_SENDING,
-    QUEUE_STATUS_SENT,
     MessageQueueError,
     MessageQueueService,
 )
@@ -64,10 +63,27 @@ class FakeQueueStore:
 
     async def update_content(self, item_id: str, **values):
         row = self.rows.get(item_id)
-        if row is None:
+        if row is None or row["status"] not in {QUEUE_STATUS_QUEUED, QUEUE_STATUS_FAILED}:
             return None
         values["attachments_json"] = json.dumps(values.pop("attachments") or [])
+        row["error_code"] = None
+        row["error_message"] = None
         row.update(values)
+        return dict(row)
+
+    async def prioritize(self, session_id: str, item_id: str, **values):
+        row = self.rows.get(item_id)
+        if (
+            row is None
+            or row["session_id"] != session_id
+            or row["status"] not in {QUEUE_STATUS_QUEUED, QUEUE_STATUS_FAILED}
+        ):
+            return None
+        lowest = min(
+            (item["position"] for item in self.rows.values() if item["session_id"] == session_id),
+            default=0,
+        )
+        row.update(position=lowest - 1, **values)
         return dict(row)
 
     async def set_status(self, item_id: str, **values) -> None:
@@ -77,6 +93,17 @@ class FakeQueueStore:
 
     async def remove(self, item_id: str) -> None:
         self.rows.pop(item_id, None)
+
+    async def remove_pending(self, session_id: str, item_id: str) -> bool:
+        row = self.rows.get(item_id)
+        if (
+            row is None
+            or row["session_id"] != session_id
+            or row["status"] not in {QUEUE_STATUS_QUEUED, QUEUE_STATUS_FAILED}
+        ):
+            return False
+        self.rows.pop(item_id, None)
+        return True
 
     async def clear_for_session(self, session_id: str) -> None:
         for key in [k for k, v in self.rows.items() if v["session_id"] == session_id]:
@@ -250,7 +277,7 @@ def test_claim_returns_items_in_fifo_order(service) -> None:
 
 def test_claim_marks_the_item_in_flight(service) -> None:
     async def run() -> None:
-        await _enqueue(service, "one")
+        first = await _enqueue(service, "one")
         claimed = await service.claim_next("s1")
         assert claimed is not None and claimed.status == QUEUE_STATUS_SENDING
 
@@ -278,7 +305,7 @@ def test_mark_sent_then_queue_is_empty(service) -> None:
         assert claimed is not None
         await service.mark_sent(claimed.id)
         assert await service.claim_next("s1") is None
-        assert (await service.list("s1"))[0].status == QUEUE_STATUS_SENT
+        assert await service.list("s1") == []
 
     asyncio.run(run())
 
@@ -380,14 +407,27 @@ def test_a_sending_item_still_cannot_be_removed(service) -> None:
     asyncio.run(run())
 
 
-def test_a_failed_item_cannot_be_edited(service) -> None:
-    """Editing still targets pending items only, since the item may yet resend."""
+def test_a_failed_item_can_be_edited_and_returns_to_the_queue(service) -> None:
 
     async def run() -> None:
         item = await _enqueue(service, "one")
         await service.claim_next("s1")
         await service.mark_failed(item.id, code="x", message="y")
-        with pytest.raises(MessageQueueError):
-            await service.update(session_id="s1", item_id=item.id, content="new")
+        updated = await service.update(session_id="s1", item_id=item.id, content="new")
+        assert updated.status == QUEUE_STATUS_QUEUED
+        assert updated.content == "new"
+
+    asyncio.run(run())
+
+
+def test_prioritize_moves_an_item_to_the_queue_head(service) -> None:
+    async def run() -> None:
+        first = await _enqueue(service, "one")
+        second = await _enqueue(service, "two")
+        await _enqueue(service, "three")
+        promoted = await service.prioritize(session_id="s1", item_id=second.id)
+        assert promoted.position < first.position
+        claimed = await service.claim_next("s1")
+        assert claimed is not None and claimed.id == second.id
 
     asyncio.run(run())

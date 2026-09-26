@@ -50,16 +50,15 @@ test("a running session stays editable when it can send but not steer", () => {
   )
 })
 
-test("running without steer is recognized as a queueing send", () => {
+test("all running send-capable runtimes use the Agents Anywhere queue", () => {
   const block = composerGateBlock()
-  assert.match(block, /const queuesWhileRunning = isRunning && !canUseSteer && canUseSendMessage/)
+  assert.match(block, /const queuesWhileRunning = isRunning && canUseSendMessage/)
   assert.match(block, /const acceptsUserInput/)
 })
 
-test("a running runtime that can steer keeps the old behaviour", () => {
-  // canUseSteer true => queuesWhileRunning false, so the steer path is used.
+test("a running steer-capable runtime still queues through the server", () => {
   const block = composerGateBlock()
-  assert.match(block, /!canUseSteer/, "queueing must require steer to be unavailable")
+  assert.match(block, /const queuesWhileRunning = isRunning && canUseSendMessage/)
 })
 
 test("the queueing submit asks the server to hold the message", () => {
@@ -88,9 +87,9 @@ test("the queue panel offers edit and delete for pending items", () => {
   assert.match(panelSource, /t\("queueEdit"\)/)
   assert.match(panelSource, /t\("queueDelete"\)/)
   assert.match(panelSource, /t\("queueSave"\)/)
-  // Only an item the runtime has not taken may be edited.
-  assert.match(panelSource, /const isPending = item\.status === "queued"/)
-  assert.match(panelSource, /isPending \? \(/, "the edit control is gated on pending")
+  assert.match(panelSource, /t\("queueInsert"\)/)
+  assert.match(panelSource, /aria-expanded={!collapsed}/, "the panel can be collapsed")
+  assert.match(panelSource, /const canMutate = item\.status === "queued" \|\| item\.status === "failed"/)
 })
 
 test("the session reads and mutates the queue through the API", () => {
@@ -98,6 +97,7 @@ test("the session reads and mutates the queue through the API", () => {
     "getSessionQueue",
     "updateQueuedMessage",
     "deleteQueuedMessage",
+    "insertQueuedMessage",
   ]) {
     assert.ok(apiSource.includes(call), `api must expose ${call}`)
     assert.ok(detailSource.includes(`dashboardApi.${call}`), `session must call ${call}`)
@@ -112,4 +112,6 @@ test("the session reads and mutates the queue through the API", () => {
     /if \(options\?\.queueWhenBusy\) void refreshQueue\(\)/,
     "a queued send must refresh the queue so the row appears",
   )
+  assert.match(detailSource, /removeOptimisticMessage\(clientMessageId\)/, "queued messages must not remain in the transcript")
+  assert.match(detailSource, /response\.items\?\.some\(\(item\) => item\.clientMessageId === clientMessageId\)/, "a lost send response is reconciled against the server queue")
 })

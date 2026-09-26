@@ -104,10 +104,10 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   ( cd desktop-workbench && yarn dist:mac )
   echo "==> building the Windows installer"
   rm -f "desktop-workbench/release/Agents Anywhere Setup ${VERSION}.exe"
-  ( cd desktop-workbench && yarn dist:win )
+  ( cd desktop-workbench && AA_ALLOW_CROSS_BUILD=1 yarn dist:win )
   echo "==> building the Linux AppImage"
   rm -f "desktop-workbench/release/Agents Anywhere-${VERSION}-x86_64.AppImage"
-  ( cd desktop-workbench && yarn dist )
+  ( cd desktop-workbench && AA_ALLOW_CROSS_BUILD=1 yarn dist:linux )
 fi
 
 APK="android/app/build/outputs/apk/debug/app-debug.apk"

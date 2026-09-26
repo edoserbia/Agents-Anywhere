@@ -14,6 +14,10 @@ const SOURCE = fs.readFileSync(
   new URL("../src/components/session/session-composer.tsx", import.meta.url),
   "utf8",
 )
+const DETAIL_SOURCE = fs.readFileSync(
+  new URL("../src/components/session-detail.tsx", import.meta.url),
+  "utf8",
+)
 
 test("the interrupt button yields to a send whenever something can be sent", () => {
   const start = SOURCE.indexOf("const canQueueWhileRunning")
@@ -23,7 +27,7 @@ test("the interrupt button yields to a send whenever something can be sent", () 
   assert.match(
     block,
     /queuesWhileRunning\s*&&/,
-    "only a runtime that queues counts, so steering runtimes keep their send",
+    "a running send-capable runtime uses the AA queue",
   )
   assert.match(
     block,
@@ -37,4 +41,12 @@ test("Enter submits rather than being inert while a turn runs", () => {
   assert.notEqual(start, -1, "Enter is handled")
   const block = SOURCE.slice(start, start + 400)
   assert.match(block, /void submit\(\)/, "Enter reaches submit, which queues")
+})
+
+test("a lost queue-send response is reconciled with server queue state", () => {
+  assert.match(
+    DETAIL_SOURCE,
+    /response\.items\?\.some\(\(item\) => item\.clientMessageId === clientMessageId\)/,
+    "an accepted queue item must not remain as a failed timeline message",
+  )
 })

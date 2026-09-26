@@ -126,11 +126,8 @@ export function SessionComposer({
   const connectorOnline = session.connectorStatus === "online"
   const canUseSendMessage = capabilityIsUsable(effectiveCapabilities, CAPABILITY.sendMessage, runtimeScope)
   const canUseSteer = capabilityIsUsable(effectiveCapabilities, CAPABILITY.steer, runtimeScope)
-  // A running runtime that cannot steer (DSH) still accepts a message: the
-  // server queues it and sends it when the turn ends. Treating "running and
-  // cannot steer" as "cannot type" is what used to lock the composer for the
-  // whole run, so a running session stays editable when it can send at all.
-  const queuesWhileRunning = isRunning && !canUseSteer && canUseSendMessage
+  // Messages submitted during a turn enter the Agents Anywhere queue for every runtime.
+  const queuesWhileRunning = isRunning && canUseSendMessage
   const acceptsUserInput =
     connectorOnline &&
     !sourceUnavailable &&
@@ -340,10 +337,7 @@ export function SessionComposer({
     hasInput &&
     attachmentsReady &&
     (attachments.length === 0 || canUseAttachments)
-  // While a turn runs the button means "interrupt" — but only when there is
-  // nothing to send. A running runtime that can accept a message (DSH) queues
-  // it, and offering only a pause left no way to reach that: the button
-  // interrupted and Enter did nothing at all.
+  // Keep the primary action available for queue submissions during a turn.
   const canQueueWhileRunning = queuesWhileRunning && (canSubmitCommand || canSubmitMessage)
   const showInterrupt =
     !creatingSession && canUseInterrupt && activeSessionCanInterrupt && !canQueueWhileRunning

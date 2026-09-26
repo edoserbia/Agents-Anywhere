@@ -478,8 +478,7 @@ class SessionsApi(
         val body = JSONObject()
             .put("content", content)
             .put("clientMessageId", clientMessageId)
-        // Ask the server to keep the message when the runtime is mid-turn
-        // The selected runtime owns the queue and dispatches it as the turn ends.
+        // Ask Agents Anywhere to hold the message when the runtime is mid-turn.
         if (queueWhenBusy) body.put("queueWhenBusy", true)
         if (attachments.isNotEmpty()) {
             body.put(
@@ -503,6 +502,20 @@ class SessionsApi(
         return client.getJson(
             serverUrl = serverUrl,
             path = "/sessions/${sessionId.urlEncode()}/runtime/queue",
+            authorizationToken = authorizationToken,
+        ).toRemoteSessionQueue()
+    }
+
+    fun insertQueuedMessage(
+        serverUrl: String,
+        authorizationToken: String,
+        sessionId: String,
+        itemId: String,
+    ): RemoteSessionQueue {
+        return client.postJson(
+            serverUrl = serverUrl,
+            path = "/sessions/${sessionId.urlEncode()}/runtime/queue/${itemId.urlEncode()}/insert",
+            body = JSONObject(),
             authorizationToken = authorizationToken,
         ).toRemoteSessionQueue()
     }

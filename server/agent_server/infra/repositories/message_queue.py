@@ -91,18 +91,64 @@ class MessageQueueRepository:
         attachments: list[dict[str, Any]] | None,
         updated_at: str,
         updated_seq: int,
+        status: str = "queued",
     ) -> dict[str, Any] | None:
         async with self._engine.begin() as conn:
-            await conn.execute(
+            result = await conn.execute(
                 update(queue_t)
-                .where(queue_t.c.id == item_id)
+                .where(
+                    queue_t.c.id == item_id,
+                    queue_t.c.status.in_(("queued", "failed")),
+                )
                 .values(
                     content=content,
                     attachments_json=json.dumps(attachments or [], ensure_ascii=False),
                     updated_at=updated_at,
                     updated_seq=updated_seq,
+                    status=status,
+                    error_code=None,
+                    error_message=None,
                 )
             )
+            if result.rowcount != 1:
+                return None
+        return await self.get(item_id)
+
+    async def prioritize(
+        self,
+        session_id: str,
+        item_id: str,
+        *,
+        status: str,
+        error_code: str | None,
+        error_message: str | None,
+        updated_at: str,
+    ) -> dict[str, Any] | None:
+        async with self._engine.begin() as conn:
+            lowest = (
+                await conn.execute(
+                    select(func.min(queue_t.c.position)).where(
+                        queue_t.c.session_id == session_id
+                    )
+                )
+            ).scalar()
+            result = await conn.execute(
+                update(queue_t)
+                .where(
+                    queue_t.c.id == item_id,
+                    queue_t.c.session_id == session_id,
+                    queue_t.c.status.in_(("queued", "failed")),
+                )
+                .values(
+                    position=int(lowest or 0) - 1,
+                    status=status,
+                    error_code=error_code,
+                    error_message=error_message,
+                    updated_at=updated_at,
+                )
+            )
+            if result.rowcount != 1:
+                return None
         return await self.get(item_id)
 
     async def set_status(
@@ -129,6 +175,17 @@ class MessageQueueRepository:
     async def remove(self, item_id: str) -> None:
         async with self._engine.begin() as conn:
             await conn.execute(delete(queue_t).where(queue_t.c.id == item_id))
+
+    async def remove_pending(self, session_id: str, item_id: str) -> bool:
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                delete(queue_t).where(
+                    queue_t.c.id == item_id,
+                    queue_t.c.session_id == session_id,
+                    queue_t.c.status.in_(("queued", "failed")),
+                )
+            )
+            return result.rowcount == 1
 
     async def clear_for_session(self, session_id: str) -> None:
         async with self._engine.begin() as conn:

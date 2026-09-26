@@ -9,7 +9,7 @@ object AppConfig {
     const val DESKTOP_DOWNLOAD_URL = "https://closex.cc/download"
     // Served by our own download page. The previous ModelScope path returned
     // 404, so an in-app update prompt could never resolve to a real file.
-    const val UPDATE_DOWNLOAD_URL = "https://closex.cc/download/agents-anywhere-2.0.17-debug.apk"
+    const val UPDATE_DOWNLOAD_URL = "https://closex.cc/download/agents-anywhere-2.0.18-debug.apk"
 
     fun isOfficialServer(serverUrl: String): Boolean {
         val officialOrigin = normalizeServerOrigin(OFFICIAL_SERVER_URL) ?: return false
