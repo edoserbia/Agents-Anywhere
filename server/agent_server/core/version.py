@@ -9,4 +9,4 @@ from __future__ import annotations
 
 from typing import Final
 
-SERVER_VERSION: Final = "2.0.18"
+SERVER_VERSION: Final = "2.0.19"
