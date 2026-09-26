@@ -22,6 +22,7 @@ RUN yarn install --immutable \
 FROM python:3.12-slim AS server
 
 ARG APT_MIRROR=
+ARG GIT_MIRROR=
 ARG PIP_INDEX_URL=
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -45,6 +46,11 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 
 COPY server/pyproject.toml ./server/
 RUN if [ -n "$PIP_INDEX_URL" ]; then export UV_INDEX_URL="$PIP_INDEX_URL"; fi \
+    && if [ -n "$GIT_MIRROR" ]; then \
+        export GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0="url.${GIT_MIRROR}.insteadOf" \
+        GIT_CONFIG_VALUE_0="https://github.com/"; \
+    fi \
     && cd server && uv sync --no-dev --no-install-project
 
 COPY server ./server
