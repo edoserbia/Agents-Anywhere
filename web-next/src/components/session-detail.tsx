@@ -1868,6 +1868,11 @@ export function SessionDetail({
               const group = block.group
               const groupKey = timelineGroupKey(group)
               const turnAction = turnActionsByGroupKey.get(groupKey)
+              const requestItem = timelineGroupItems(group)
+                .find((item) => item.type === "message" && item.role === "user")
+              const requestDeleteAction = requestItem
+                ? [...turnActionsByGroupKey.values()].find((action) => action.requestItemId === requestItem.id)
+                : undefined
               const completedTurnReview = timelineGroupItems(group)
                 .map((item) => completedTurnReviewsByEndItemId.get(item.id))
                 .find((turn) => turn !== undefined)
@@ -1887,6 +1892,14 @@ export function SessionDetail({
                       : (open) => handleTimelineGroupOpenChange(group.key, open)}
                     onItemOpenChange={handleTimelineItemOpenChange}
                     onRespondInteraction={handleRespondInteraction}
+                    deleteAction={requestDeleteAction?.requestItemId ? {
+                      token,
+                      sessionId: session.id,
+                      itemId: requestDeleteAction.requestItemId,
+                      onDeleted: (itemId) => setState((current) => current
+                        ? { ...current, items: current.items.filter((entry) => entry.id !== itemId) }
+                        : current),
+                    } : undefined}
                   />
                   {completedTurnReview && onOpenReview ? (
                     <SessionReviewCard
@@ -1903,13 +1916,6 @@ export function SessionDetail({
                       token={token}
                       sessionId={session.id}
                       action={turnAction}
-                      // Drop it locally too, so the row goes at once rather
-                      // than after the round trip through the server event.
-                      onDeleted={(itemId) => {
-                        setState((current) => current
-                          ? { ...current, items: current.items.filter((entry) => entry.id !== itemId) }
-                          : current)
-                      }}
                     />
                   ) : null}
                 </React.Fragment>
@@ -2261,7 +2267,7 @@ function buildTurnActionsByGroupKey(
   let requestItemId: string | undefined
 
   const commitTurn = () => {
-    if (endGroupKey && itemIds.length > 0) {
+    if (endGroupKey && (itemIds.length > 0 || requestItemId)) {
       actions.set(endGroupKey, {
         copyText: copyParts.join("\n\n").trim(),
         itemIds: [...new Set(itemIds)],
@@ -2429,6 +2435,7 @@ export function TimelineGroupEntry({
   onGroupOpenChange,
   onItemOpenChange,
   onRespondInteraction,
+  deleteAction,
 }: {
   group: TimelineGroup
   token: string
@@ -2443,6 +2450,7 @@ export function TimelineGroupEntry({
   onGroupOpenChange?: (open: boolean) => void
   onItemOpenChange: (itemId: string, open: boolean) => void
   onRespondInteraction: (noticeId: string, actionId: string, input?: Record<string, unknown>) => void
+  deleteAction?: { token: string; sessionId: string; itemId: string; onDeleted?: (itemId: string) => void }
 }) {
   if (group.kind === "reconnect") {
     return (
@@ -2504,6 +2512,7 @@ export function TimelineGroupEntry({
       attachmentUrl={attachmentUrl}
       onToolOpenChange={(open) => onItemOpenChange(group.item.id, open)}
       onRespondInteraction={onRespondInteraction}
+      deleteAction={deleteAction}
     />
   )
 }

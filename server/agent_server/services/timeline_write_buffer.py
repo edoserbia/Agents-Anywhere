@@ -350,6 +350,19 @@ class TimelineWriteBuffer:
                         existing.orderSeq,
                     )
 
+            if item.id in await self._store.timeline.hidden_item_ids(session_id):
+                if existing is not None:
+                    return TimelineItemWriteResult(item=existing, changed=False)
+                return TimelineItemWriteResult(
+                    item=timeline_item_from_runtime_input(
+                        item,
+                        updated_seq=0,
+                        now=utc_now(),
+                        order_seq=item.orderSeq,
+                    ),
+                    changed=False,
+                )
+
             unchanged = existing is not None and timeline_item_state_is_unchanged(
                 existing, item
             )

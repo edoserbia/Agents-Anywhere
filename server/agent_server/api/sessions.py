@@ -1466,8 +1466,6 @@ async def delete_timeline_item(
         item = await db.hide_timeline_item(session_id=session_id, item_id=item_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="timeline item not found") from None
-    if item is None:
-        raise HTTPException(status_code=404, detail="timeline item not found")
     # Tell every open client to drop it, so the deletion is consistent across
     # the desktop, the web console and Android without a reload.
     await broker.publish(

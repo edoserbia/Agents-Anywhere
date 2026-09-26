@@ -23,6 +23,7 @@ from agent_server.infra.db.schema import (
     session_message_queue,
     session_shares,
     sessions,
+    timeline_item_hides,
     timeline_items,
     users,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "session_message_queue",
     "session_shares",
     "sessions",
+    "timeline_item_hides",
     "timeline_items",
     "users",
 ]

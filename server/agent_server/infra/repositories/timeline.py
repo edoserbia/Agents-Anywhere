@@ -120,6 +120,7 @@ class TimelineRepositoryMixin:
             item.id: item for item in sorted(items, key=lambda value: value.updatedSeq)
         }
         async with self._timeline_lock(session_id):
+            hidden_ids = await self.timeline.hidden_item_ids(session_id)
             current_items = await self.timeline.read_many(
                 session_id,
                 set(incoming_by_id),
@@ -142,6 +143,7 @@ class TimelineRepositoryMixin:
                 persistable_items = [
                     item
                     for item in incoming_by_id.values()
+                    if item.id not in hidden_ids
                     if item.updatedSeq > timeline_reset_seq
                     and (
                         (existing := current_by_id.get(item.id)) is None
@@ -209,6 +211,7 @@ class TimelineRepositoryMixin:
 
         incoming_by_id = latest_timeline_items_by_id(items)
         async with self._timeline_lock(session_id):
+            hidden_ids = await self.timeline.hidden_item_ids(session_id)
             current_items = await self.timeline.read_many(
                 session_id,
                 set(incoming_by_id),
@@ -217,6 +220,7 @@ class TimelineRepositoryMixin:
             changed_inputs = [
                 item
                 for item_id, item in incoming_by_id.items()
+                if item_id not in hidden_ids
                 if (existing := current_by_id.get(item_id)) is None
                 or not timeline_item_state_is_unchanged(existing, item)
             ]
@@ -279,6 +283,7 @@ class TimelineRepositoryMixin:
 
         incoming_by_id = latest_timeline_items_by_id(items)
         async with self._timeline_lock(session_id):
+            hidden_ids = await self.timeline.hidden_item_ids(session_id)
             current_items = await self.timeline.read(session_id)
             current_by_id = {item.id: item for item in current_items}
             if timeline_snapshot_is_unchanged(current_by_id, incoming_by_id):
@@ -317,6 +322,7 @@ class TimelineRepositoryMixin:
                     )
                     for item in incoming_by_id.values()
                 ]
+                normalized = [item for item in normalized if item.id not in hidden_ids]
                 # ``timeline_item_from_snapshot`` returns the stored row itself
                 # for unchanged items, so only rebuilt rows need a write.
                 # Rewriting the whole session (delete-all + insert-all) turned
@@ -354,6 +360,18 @@ class TimelineRepositoryMixin:
         async with self._timeline_lock(session_id):
             now = utc_now()
             existing = await self.timeline.read_one(session_id, item.id)
+            if item.id in await self.timeline.hidden_item_ids(session_id):
+                if existing is not None:
+                    return TimelineItemWriteResult(item=existing, changed=False)
+                return TimelineItemWriteResult(
+                    item=timeline_item_from_runtime_input(
+                        item,
+                        updated_seq=0,
+                        now=now,
+                        order_seq=item.orderSeq,
+                    ),
+                    changed=False,
+                )
             unchanged = existing is not None and timeline_item_state_is_unchanged(
                 existing, item
             )

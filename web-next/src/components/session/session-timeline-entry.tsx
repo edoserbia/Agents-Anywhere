@@ -25,6 +25,7 @@ import { firstTextOf, messageText, recordsOf, textOf } from "@/components/sessio
 import { extractAttachments, stripInjectedAttachmentMentions } from "@/features/dashboard/attachments"
 import { MessageAttachments } from "@/components/session/message-attachments"
 import { CollapsibleUserMessage } from "@/components/session/collapsible-user-message"
+import { DeleteMessageAction } from "@/components/session/turn-actions"
 
 const MarkdownText = dynamic(() => import("../markdown-text").then((mod) => ({ default: mod.MarkdownText })), { ssr: false })
 const INLINE_REASONING_SUMMARY_MAX_CHARS = 80
@@ -42,6 +43,7 @@ export function TimelineEntry({
   attachmentUrl,
   onToolOpenChange,
   onRespondInteraction,
+  deleteAction,
 }: {
   token: string
   session: SessionView
@@ -55,10 +57,11 @@ export function TimelineEntry({
   attachmentUrl?: (fileId: string) => string
   onToolOpenChange?: (open: boolean) => void
   onRespondInteraction: (noticeId: string, actionId: string, input?: Record<string, unknown>) => void
+  deleteAction?: { token: string; sessionId: string; itemId: string; onDeleted?: (itemId: string) => void }
 }) {
   let entry: React.ReactNode
   if (item.type === "message") {
-    entry = <MessageCard token={token} session={session} item={item} readOnly={readOnly} attachmentUrl={attachmentUrl} />
+    entry = <MessageCard token={token} session={session} item={item} readOnly={readOnly} attachmentUrl={attachmentUrl} deleteAction={deleteAction} />
     return <TimelineEntryContextMenu item={item}>{entry}</TimelineEntryContextMenu>
   }
   if (item.type === "tool" || isFileChangeArtifact(item)) {
@@ -149,12 +152,14 @@ function MessageCard({
   item,
   readOnly,
   attachmentUrl,
+  deleteAction,
 }: {
   token: string
   session: SessionView
   item: TimelineItem
   readOnly: boolean
   attachmentUrl?: (fileId: string) => string
+  deleteAction?: { token: string; sessionId: string; itemId: string; onDeleted?: (itemId: string) => void }
 }) {
   const tSession = useTranslations("dashboard.session")
   const tNew = useTranslations("dashboard.new")
@@ -206,6 +211,11 @@ function MessageCard({
         ) : null}
         {!isUser ? attachmentList : null}
         {showUserStatus ? <TimelineStatusBadge status={item.status} /> : null}
+        {isUser && deleteAction?.itemId === item.id ? (
+          <div className="-mt-9 -ml-9 flex items-center gap-0.5 self-start">
+            <DeleteMessageAction {...deleteAction} />
+          </div>
+        ) : null}
       </div>
     </div>
   )

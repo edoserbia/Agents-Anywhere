@@ -12382,11 +12382,49 @@ def test_a_deleted_timeline_item_stays_deleted_across_a_resync(tmp_path):
     )
 
 
-def test_deleting_an_unknown_timeline_item_reports_not_found(tmp_path):
+def test_deleting_an_unknown_timeline_item_is_idempotent_and_stays_hidden(tmp_path):
     client = make_client(tmp_path)
-    _, _, session_id, headers = create_connector_and_session(client)
+    _, access_token, session_id, headers = create_connector_and_session(client)
 
     response = client.delete(
         f"/sessions/{session_id}/timeline/tl_never_existed", headers=headers
     )
-    assert response.status_code == 404, response.text
+    assert response.status_code == 200, response.text
+    assert response.json()["deleted"] is True
+
+    repeated = client.delete(
+        f"/sessions/{session_id}/timeline/tl_never_existed", headers=headers
+    )
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["deleted"] is True
+
+    # The runtime may report the item after the optimistic request failed. The
+    # local tombstone must keep it out of AA's timeline.
+    item = {
+        "id": "tl_never_existed",
+        "sessionId": session_id,
+        "turnId": "turn_missing",
+        "type": "message",
+        "status": "failed",
+        "role": "user",
+        "content": {"text": "failed request", "format": "markdown"},
+        "source": {"runtime": "codex", "sessionId": "thread_missing", "itemId": "item_missing"},
+        "orderSeq": 1,
+        "revision": 1,
+        "contentHash": "sha256:missing",
+    }
+    with client.websocket_connect(
+        "/connector/ws", headers={"Authorization": f"Bearer {access_token}"}
+    ) as ws:
+        ws.send_json(
+            {"type": "notification", "method": "timeline.itemUpsert", "params": {"sessionId": session_id, "item": item}}
+        )
+        wait_for_item_update(client, session_id, headers, 0)
+
+    timeline = client.get(
+        f"/sessions/{session_id}/timeline",
+        headers=headers,
+        params={"mode": "changes", "afterSeq": 0, "limit": 50},
+    )
+    assert timeline.status_code == 200, timeline.text
+    assert "tl_never_existed" not in {entry["id"] for entry in timeline.json()["items"]}

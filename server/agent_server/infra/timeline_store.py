@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from agent_server.core.models import TimelineItem
 from agent_server.core.utc import utc_now
-from agent_server.infra.db import timeline_items
+from agent_server.infra.db import timeline_item_hides, timeline_items
 from agent_server.infra.db.engine import SQLITE_BACKEND
 
 
@@ -51,6 +51,8 @@ class SqlTimelineStore:
         if len(ids) > limit:
             return [], True
         items = await self.read_many(session_id, set(ids))
+        hidden_ids = await self.hidden_item_ids(session_id)
+        items = [item for item in items if item.id not in hidden_ids]
         items.sort(key=lambda item: (item.orderSeq, item.updatedSeq, item.id))
         return items, False
 
@@ -132,6 +134,26 @@ class SqlTimelineStore:
         if not items:
             return
         values = [self._row_values(item) for item in items]
+        hidden_ids = set(
+            (
+                await conn.execute(
+                    select(timeline_item_hides.c.item_id).where(
+                        timeline_item_hides.c.session_id == items[0].sessionId,
+                        timeline_item_hides.c.item_id.in_({item.id for item in items}),
+                    )
+                )
+            ).scalars()
+        )
+        # A local tombstone must never be cleared by a Runtime upsert. The
+        # row itself remains useful for reconciliation, but stays hidden.
+        if hidden_ids:
+            values = [
+                value
+                for value in values
+                if value["id"] not in hidden_ids
+            ]
+        if not values:
+            return
         if self._backend == SQLITE_BACKEND:
             stmt = sqlite_insert(timeline_items)
             update_cols = {
@@ -285,8 +307,37 @@ class SqlTimelineStore:
                 )
                 .values(hidden_at=utc_now() if hidden else None)
             )
-            if result.rowcount != 1:
+            if hidden:
+                if self._backend == SQLITE_BACKEND:
+                    statement = sqlite_insert(timeline_item_hides).values(
+                        session_id=session_id,
+                        item_id=item_id,
+                        hidden_at=utc_now(),
+                    ).prefix_with("OR IGNORE")
+                else:
+                    statement = pg_insert(timeline_item_hides).values(
+                        session_id=session_id,
+                        item_id=item_id,
+                        hidden_at=utc_now(),
+                    ).on_conflict_do_nothing(
+                        index_elements=["session_id", "item_id"]
+                    )
+                await conn.execute(statement)
+            elif result.rowcount != 1:
+                await conn.execute(
+                    delete(timeline_item_hides).where(
+                        timeline_item_hides.c.session_id == session_id,
+                        timeline_item_hides.c.item_id == item_id,
+                    )
+                )
                 return None
+            if not hidden:
+                await conn.execute(
+                    delete(timeline_item_hides).where(
+                        timeline_item_hides.c.session_id == session_id,
+                        timeline_item_hides.c.item_id == item_id,
+                    )
+                )
         return await self.read_one(session_id, item_id)
 
     async def hidden_item_ids(self, session_id: str) -> set[str]:
@@ -300,7 +351,14 @@ class SqlTimelineStore:
                     )
                 )
             ).all()
-        return {row[0] for row in rows}
+            tombstones = (
+                await conn.execute(
+                    select(timeline_item_hides.c.item_id).where(
+                        timeline_item_hides.c.session_id == session_id,
+                    )
+                )
+            ).all()
+        return {row[0] for row in rows} | {row[0] for row in tombstones}
 
     def _row_values(self, item: TimelineItem) -> dict[str, Any]:
         return {

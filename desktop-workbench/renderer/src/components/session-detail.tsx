@@ -2286,7 +2286,7 @@ function buildTurnActionsByGroupKey(
   let requestItemId: string | undefined
 
   const commitTurn = () => {
-    if (endGroupKey && itemIds.length > 0) {
+    if (endGroupKey && (itemIds.length > 0 || requestItemId)) {
       actions.set(endGroupKey, {
         copyText: copyParts.join("\n\n").trim(),
         itemIds: [...new Set(itemIds)],

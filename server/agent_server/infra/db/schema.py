@@ -546,6 +546,21 @@ timeline_items = Table(
 )
 
 
+timeline_item_hides = Table(
+    "timeline_item_hides",
+    metadata,
+    Column(
+        "session_id",
+        Text,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("item_id", Text, nullable=False),
+    Column("hidden_at", Text, nullable=False),
+    PrimaryKeyConstraint("session_id", "item_id"),
+)
+
+
 session_shares = Table(
     "session_shares",
     metadata,

@@ -1125,9 +1125,9 @@ def test_unversioned_runtime_schema_is_classified_by_actual_columns(
     )
 
 
-def test_current_schema_version_is_v2_37() -> None:
-    assert CURRENT_SCHEMA_REVISION == "v2_37"
-    assert CURRENT_SCHEMA_VERSION == "2.37"
+def test_current_schema_version_is_v2_38() -> None:
+    assert CURRENT_SCHEMA_REVISION == "v2_38"
+    assert CURRENT_SCHEMA_VERSION == "2.38"
 
 
 def test_retiring_releases_preserves_history(tmp_path) -> None:
