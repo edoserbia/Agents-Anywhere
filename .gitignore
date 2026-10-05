@@ -38,6 +38,12 @@ desktop-workbench/.cache/
 desktop-workbench/release/
 desktop-next/build/uv/
 
+# Built Linux Connector tarball (devtools/build-connector-bundle.sh output).
+connector/release/
+
+# Scratch space for local release and debugging runs.
+tmp/
+
 # Generated reference-doc caches live under docs/reference locally.
 docs/reference/*
 !docs/reference/README.md
