@@ -9,7 +9,11 @@ trap 'rm -rf "$STAGE"' EXIT
 
 mkdir -p "$STAGE/agents-anywhere-connector"
 cp -R "$ROOT/connector" "$STAGE/agents-anywhere-connector/connector"
-find "$STAGE/agents-anywhere-connector/connector" -type d \( -name __pycache__ -o -name .pytest_cache -o -name release \) -prune -exec rm -rf {} +
+# Ship sources only. A local `uv sync` leaves a multi-hundred-megabyte `.venv`
+# in the tree, and copying it silently turned a ~0.5 MiB bundle into ~230 MiB.
+find "$STAGE/agents-anywhere-connector/connector" -type d \
+  \( -name __pycache__ -o -name .pytest_cache -o -name .ruff_cache -o -name .venv -o -name release \) \
+  -prune -exec rm -rf {} +
 cat > "$STAGE/agents-anywhere-connector/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
 set -euo pipefail
