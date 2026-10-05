@@ -72,6 +72,10 @@ internal fun RemoteSessionRuntimeState?.toSessionRuntimeState(serverTime: String
             "blocked" -> SessionRuntimeStatus.Blocked
             "disconnected" -> SessionRuntimeStatus.Disconnected
             "error" -> SessionRuntimeStatus.Error
+            // Turn terminal values can arrive from the runtime snapshot after
+            // an interrupt. They are session outcomes, not active runtime
+            // states; treating them as idle reopens the composer immediately.
+            "stopped", "completed", "cancelled", "canceled", "interrupted" -> SessionRuntimeStatus.Idle
             else -> SessionRuntimeStatus.Unknown
         },
         selections = selections,

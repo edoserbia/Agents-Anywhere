@@ -105,8 +105,10 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   echo "==> building the Windows installer"
   rm -f "desktop-workbench/release/Agents Anywhere Setup ${VERSION}.exe"
   ( cd desktop-workbench && AA_ALLOW_CROSS_BUILD=1 yarn dist:win )
-  echo "==> building the Linux AppImage"
-  rm -f "desktop-workbench/release/Agents Anywhere-${VERSION}-x86_64.AppImage"
+  echo "==> building Linux AppImage and Debian package"
+  mkdir -p connector/release
+  ./devtools/build-connector-bundle.sh "$VERSION"
+  rm -f "desktop-workbench/release/Agents Anywhere-${VERSION}-x86_64.AppImage" "desktop-workbench/release/agents-anywhere_${VERSION}_amd64.deb"
   ( cd desktop-workbench && AA_ALLOW_CROSS_BUILD=1 yarn dist:linux )
 fi
 
@@ -114,8 +116,11 @@ APK="android/app/build/outputs/apk/debug/app-debug.apk"
 DMG="desktop-workbench/release/Agents Anywhere-${VERSION}-universal.dmg"
 WIN="desktop-workbench/release/Agents Anywhere Setup ${VERSION}.exe"
 LINUX="desktop-workbench/release/Agents Anywhere-${VERSION}-x86_64.AppImage"
+DEB="desktop-workbench/release/Agents Anywhere-${VERSION}-x86_64.deb"
 
-for artifact in "$APK" "$DMG" "$WIN" "$LINUX"; do
+CLI="connector/release/Agents Anywhere-Connector-${VERSION}-linux-x86_64.tar.gz"
+
+for artifact in "$APK" "$DMG" "$WIN" "$LINUX" "$DEB" "$CLI"; do
   if [[ ! -f "$artifact" ]]; then
     echo "missing artifact: $artifact" >&2
     exit 1
@@ -127,13 +132,17 @@ scp -q "$APK" "$REMOTE:$DOWNLOAD_DIR/agents-anywhere-${VERSION}-debug.apk"
 scp -q "$DMG" "$REMOTE:$DOWNLOAD_DIR/Agents Anywhere-${VERSION}-universal.dmg"
 scp -q "$WIN" "$REMOTE:$DOWNLOAD_DIR/Agents Anywhere-${VERSION}-x64.exe"
 scp -q "$LINUX" "$REMOTE:$DOWNLOAD_DIR/Agents Anywhere-${VERSION}-x86_64.AppImage"
+scp -q "$DEB" "$REMOTE:$DOWNLOAD_DIR/Agents Anywhere-${VERSION}-x86_64.deb"
+scp -q "$CLI" "$REMOTE:$DOWNLOAD_DIR/Agents Anywhere-Connector-${VERSION}-linux-x86_64.tar.gz"
 
 echo "==> verifying the uploads byte for byte"
 for pair in \
   "$APK:agents-anywhere-${VERSION}-debug.apk" \
   "$DMG:Agents Anywhere-${VERSION}-universal.dmg" \
   "$WIN:Agents Anywhere-${VERSION}-x64.exe" \
-  "$LINUX:Agents Anywhere-${VERSION}-x86_64.AppImage"
+  "$LINUX:Agents Anywhere-${VERSION}-x86_64.AppImage" \
+  "$DEB:Agents Anywhere-${VERSION}-x86_64.deb" \
+  "$CLI:Agents Anywhere-Connector-${VERSION}-linux-x86_64.tar.gz"
 do
   local_path="${pair%%:*}"; remote_name="${pair##*:}"
   local_hash="$(shasum -a 256 "$local_path" | cut -d' ' -f1)"
@@ -152,11 +161,15 @@ DMG_HASH="$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
 APK_HASH="$(shasum -a 256 "$APK" | cut -d' ' -f1)"
 WIN_HASH="$(shasum -a 256 "$WIN" | cut -d' ' -f1)"
 LINUX_HASH="$(shasum -a 256 "$LINUX" | cut -d' ' -f1)"
+DEB_HASH="$(shasum -a 256 "$DEB" | cut -d' ' -f1)"
+CLI_HASH="$(shasum -a 256 "$CLI" | cut -d' ' -f1)"
 ssh "$REMOTE" "cat > '$DOWNLOAD_DIR/SHA256SUMS.txt'" <<EOF
 $DMG_HASH  Agents Anywhere-${VERSION}-universal.dmg
 $APK_HASH  agents-anywhere-${VERSION}-debug.apk
 $WIN_HASH  Agents Anywhere-${VERSION}-x64.exe
 $LINUX_HASH  Agents Anywhere-${VERSION}-x86_64.AppImage
+$DEB_HASH  Agents Anywhere-${VERSION}-x86_64.deb
+$CLI_HASH  Agents Anywhere-Connector-${VERSION}-linux-x86_64.tar.gz
 EOF
 ssh "$REMOTE" "cd '$DOWNLOAD_DIR' && shasum -a 256 -c SHA256SUMS.txt"
 

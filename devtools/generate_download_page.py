@@ -47,7 +47,8 @@ code{{background:#f3f4f6;padding:.1rem .3rem;border-radius:4px;font-size:.85em}}
 <section class="current"><h2>{html.escape(version)} 本次更新</h2>{markdown_body(current)}</section>
 <div class="card"><h2>macOS 桌面客户端（Universal）</h2><p>支持 Apple Silicon 与 Intel。</p><a class="btn" href="Agents%20Anywhere-{version}-universal.dmg" download>下载 DMG</a></div>
 <div class="card"><h2>Windows 桌面客户端</h2><p>Windows 安装程序。</p><a class="btn" href="Agents%20Anywhere-{version}-x64.exe" download>下载 EXE</a></div>
-<div class="card"><h2>Linux 桌面客户端</h2><p>Linux AppImage。</p><a class="btn" href="Agents%20Anywhere-{version}-x86_64.AppImage" download>下载 AppImage</a></div>
+<div class="card"><h2>Linux 桌面客户端</h2><p>Ubuntu / Debian 推荐安装包；其他发行版可使用便携版。</p><a class="btn" href="Agents%20Anywhere-{version}-x86_64.deb" download>下载 DEB</a><a class="btn" href="Agents%20Anywhere-{version}-x86_64.AppImage" download>下载 AppImage</a></div>
+<div class="card"><h2>Linux 命令行 Connector</h2><p>无桌面或远程 Linux 设备使用。下载后解压并运行 <code>install.sh</code>，再执行 <code>anywhere-cli pair</code>。</p><a class="btn" href="Agents%20Anywhere-Connector-{version}-linux-x86_64.tar.gz" download>下载 Connector</a></div>
 <div class="card"><h2>Android 客户端（APK）</h2><p>可直接安装的 APK。</p><a class="btn" href="agents-anywhere-{version}-debug.apk" download>下载 APK</a></div>
 <div class="card"><h2>更新记录</h2><p>查看当前版本和所有历史版本的完整变化。</p><a class="btn" href="CHANGELOG.html">打开 changelog</a> <a class="btn" href="CHANGELOG.md">下载 Markdown</a></div>
 <div class="card"><h2>服务端 Web 控制台</h2><a class="btn" href="{html.escape(server_url)}" target="_blank" rel="noreferrer">打开 Web 控制台</a></div>

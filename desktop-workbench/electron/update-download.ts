@@ -10,6 +10,9 @@ export async function downloadDesktopInstaller(options: {
   signal: AbortSignal;
   onProgress: (downloadedBytes: number, totalBytes: number | null) => void;
 }): Promise<string> {
+  // AppImage remains the portable Linux fallback. Installed Linux packages use
+  // the deb artifact and are selected by the release channel, so keep the
+  // updater's existing download contract portable and executable.
   const extension = { darwin: ".dmg", win32: ".exe", linux: ".AppImage" }[options.platform];
   if (!extension) throw new Error("Unsupported installer platform.");
   const url = new URL(options.url);

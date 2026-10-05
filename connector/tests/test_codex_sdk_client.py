@@ -404,6 +404,38 @@ def test_codex_sdk_client_resumes_thread_before_compact() -> None:
     asyncio.run(_test_codex_sdk_client_resumes_thread_before_compact())
 
 
+def test_codex_sdk_client_retries_turn_start_after_thread_not_loaded() -> None:
+    asyncio.run(_test_codex_sdk_client_retries_turn_start_after_thread_not_loaded())
+
+
+async def _test_codex_sdk_client_retries_turn_start_after_thread_not_loaded() -> None:
+    sdk = _FakeLowLevelSdkModule()
+    native = _FakeLowLevelAsyncCodex()
+    native.low_level.fail_next_turn_start = RuntimeError(
+        "JSON-RPC error -32600: thread not loaded: thread_existing"
+    )
+    client = CodexSdkClient(native, sdk=sdk)
+
+    async def handler(message: Any) -> None:
+        native.handled.append(message)
+
+    await client.start(handler)
+    await client.start_thread(CodexStartThreadRequest())
+    result = await client.start_turn(
+        CodexStartTurnRequest(thread_id="thread_low", content="retry after unloaded thread")
+    )
+    await asyncio.sleep(0)
+    await client.stop()
+
+    assert result.turn_id == "turn_low"
+    assert native.low_level.request_order == [
+        "thread/start",
+        "turn/start:thread_low",
+        "thread/resume:thread_low",
+        "turn/start:thread_low",
+    ]
+
+
 def test_codex_sdk_client_retries_turn_start_after_thread_not_found() -> None:
     asyncio.run(_test_codex_sdk_client_retries_turn_start_after_thread_not_found())
 

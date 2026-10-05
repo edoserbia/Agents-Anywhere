@@ -212,8 +212,14 @@ data class RuntimeNotice(
             ?: (context["timelineItemId"] as? String)?.takeIf(String::isNotBlank)
     }
 
+    /**
+     * Only an interaction that explicitly requires a response can hold the
+     * composer. Execution-error notices are blocking for presentation and
+     * history, but they have no response action; keeping them here would leave
+     * a failed Codex turn with a permanently disabled send button.
+     */
     fun blocksSession(sessionId: String): Boolean =
-        blocking?.scope == "session" && blocking.targetId == sessionId
+        responseRequired && blocking?.scope == "session" && blocking.targetId == sessionId
 
     private companion object {
         val RESPONDABLE_NOTICE_STATUSES = setOf("open", "failed")

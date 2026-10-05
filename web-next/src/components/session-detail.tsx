@@ -1980,6 +1980,9 @@ export function SessionDetail({
           entries={requestEntries}
           activeId={activeRequestId}
           onSelect={handleJumpToRequest}
+          onLoadMore={loadOlderTimeline}
+          canLoadMore={state?.hasMore ?? false}
+          loadingMore={loadingOlder}
         />
       </div>
 

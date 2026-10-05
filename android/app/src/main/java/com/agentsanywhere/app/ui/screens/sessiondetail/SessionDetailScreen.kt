@@ -1961,6 +1961,9 @@ fun SessionDetailScreen(
                         if (showRequestHistory) {
                             SessionRequestHistorySheet(
                                 entries = requestEntries,
+                                canLoadMore = state.hasMore,
+                                loadingMore = state.timeline.loadingOlder,
+                                onLoadMore = ::loadOlderMessages,
                                 onSelect = { entry ->
                                     showRequestHistory = false
                                     jumpToMessageId = entry.id

@@ -202,7 +202,7 @@ async function main() {
   electronBuilder([
     ...(process.env.WORKBENCH_ELECTRON_DIST ? [`--config.electronDist=${resolve(process.env.WORKBENCH_ELECTRON_DIST)}`] : []),
     `--${platform}`,
-    platform === "mac" ? "dmg" : platform === "win" ? "nsis" : "AppImage",
+    ...(platform === "mac" ? ["dmg"] : platform === "win" ? ["nsis"] : ["AppImage", "deb"]),
     ...builderFlags,
     "--publish",
     "never",

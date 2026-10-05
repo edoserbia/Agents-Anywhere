@@ -17,6 +17,60 @@ import org.junit.Test
  */
 class SendUnavailableReasonTest {
     @Test
+    fun `non responsive execution error does not block the composer`() {
+        val notice = RuntimeNotice(
+            noticeId = "error-1",
+            type = "interaction",
+            sessionId = "s1",
+            title = "Codex turn failed",
+            message = "Upstream rejected the request",
+            severity = "error",
+            status = "open",
+            interactionType = "execution_error",
+            blocking = RuntimeNoticeBlocking("session", "s1"),
+            responseRequired = false,
+            revision = 1,
+            updatedSeq = 1,
+            source = emptyMap(),
+            actions = emptyList(),
+            context = emptyMap(),
+            metadata = emptyMap(),
+            expiresAt = null,
+            createdAt = null,
+            updatedAt = null,
+            resolvedAt = null,
+        )
+        assertFalse(notice.blocksSession("s1"))
+    }
+
+    @Test
+    fun `response required notice still blocks the composer`() {
+        val notice = RuntimeNotice(
+            noticeId = "approval-1",
+            type = "interaction",
+            sessionId = "s1",
+            title = "Approval",
+            message = "Approve this action",
+            severity = "warning",
+            status = "open",
+            interactionType = "approval",
+            blocking = RuntimeNoticeBlocking("session", "s1"),
+            responseRequired = true,
+            revision = 1,
+            updatedSeq = 1,
+            source = emptyMap(),
+            actions = emptyList(),
+            context = emptyMap(),
+            metadata = emptyMap(),
+            expiresAt = null,
+            createdAt = null,
+            updatedAt = null,
+            resolvedAt = null,
+        )
+        assertTrue(notice.blocksSession("s1"))
+    }
+
+    @Test
     fun `running session allows composer submission when steering is usable`() {
         assertFalse(runtimeBlocksComposerSubmission(SessionRuntimeStatus.Running, canSteer = true))
     }

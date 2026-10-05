@@ -73,7 +73,11 @@ After `agents-anywhere-desktop://oauth/callback`, Main verifies `state` and
 exchanges the code and original verifier at the selected backend's
 `/api/v2/oauth/token`. Health does not provide or discover the Web origin.
 
-The packaged app uses the system browser. Development uses a separate Web
+The packaged app uses the system browser. Linux releases include both an
+AppImage (portable) and a Debian package (`.deb`). The Debian package installs
+the desktop entry and registers `agents-anywhere-desktop://` with the desktop
+environment, so the browser's OAuth callback is delivered back to Agents
+Anywhere. Development uses a separate Web
 window with the same OAuth flow, intercepting the callback without installing
 an OS protocol handler. After sign-in succeeds, the server is remembered in
 `desktop-server.json` in Electron's user-data directory; API requests, downloads,

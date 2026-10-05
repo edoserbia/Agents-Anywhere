@@ -509,6 +509,8 @@
     <string name="session_tool_summary_created_files">Created %1$d files</string>
     <string name="session_tool_summary_items">%1$d activities</string>
     <string name="session_process_running">Working · %1$s</string>
+    <string name="session_request_history_more">More</string>
+    <string name="session_request_history_loading">Loading…</string>
     <string name="session_request_history_title">Requests</string>
     <string name="session_queue_title">Queued · %1$d</string>
     <string name="session_queue_expand">Expand queue</string>

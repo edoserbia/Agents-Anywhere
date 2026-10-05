@@ -2,8 +2,13 @@
   "name": "agents-anywhere-desktop-workbench",
   "productName": "Agents Anywhere",
   "private": true,
-  "version": "2.0.19",
+  "version": "2.0.20",
   "description": "Electron shell for the Agents Anywhere web workbench",
+  "homepage": "https://closex.cc",
+  "author": {
+    "name": "Agents Anywhere",
+    "email": "support@closex.cc"
+  },
   "packageManager": "yarn@4.6.0",
   "workspaces": [
     "renderer"
@@ -127,7 +132,13 @@
     "linux": {
       "icon": "build/icon-mac-source.png",
       "artifactName": "Agents Anywhere-${version}-x86_64.${ext}",
-      "target": "AppImage"
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility",
+      "synopsis": "Agents Anywhere desktop workbench",
+      "description": "Agents Anywhere desktop workbench with secure browser sign-in"
     }
   }
 }

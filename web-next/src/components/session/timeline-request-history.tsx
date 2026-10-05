@@ -28,12 +28,18 @@ export function TimelineRequestHistory({
   entries,
   activeId,
   onSelect,
+  onLoadMore,
+  canLoadMore = false,
+  loadingMore = false,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   entries: TimelineRequestEntry[]
   activeId: string | null
   onSelect: (entry: TimelineRequestEntry) => void
+  onLoadMore?: () => void
+  canLoadMore?: boolean
+  loadingMore?: boolean
 }) {
   const tSession = useTranslations("dashboard.session")
   // Requests are listed newest first so the reader opens on the most recent
@@ -46,21 +52,14 @@ export function TimelineRequestHistory({
   React.useEffect(() => {
     if (!open) setVisibleCount(REQUEST_HISTORY_PAGE_SIZE)
   }, [open])
-  const firstEntryId = entries[0]?.id ?? null
-  React.useEffect(() => {
-    setVisibleCount(REQUEST_HISTORY_PAGE_SIZE)
-  }, [firstEntryId])
 
   const visible = requestHistoryWindow(entries, visibleCount)
-  const older = hasOlderRequests(entries, visibleCount)
-
-  // Reveal the next page when the reader scrolls to the older end (the bottom,
-  // since the list runs newest first).
-  const handleScroll = React.useCallback((event: React.UIEvent<HTMLDivElement>) => {
-    const node = event.currentTarget
-    if (node.scrollTop + node.clientHeight < node.scrollHeight - 24) return
-    setVisibleCount((current) => (current < entries.length ? current + REQUEST_HISTORY_PAGE_SIZE : current))
-  }, [entries.length])
+  const hasLocalOlder = hasOlderRequests(entries, visibleCount)
+  const hasOlder = hasLocalOlder || canLoadMore
+  const handleLoadMore = React.useCallback(() => {
+    setVisibleCount((current) => current + REQUEST_HISTORY_PAGE_SIZE)
+    if (!hasLocalOlder) onLoadMore?.()
+  }, [hasLocalOlder, onLoadMore])
 
   if (!open) return null
 
@@ -87,7 +86,7 @@ export function TimelineRequestHistory({
       {entries.length === 0 ? (
         <p className="px-3 py-4 text-xs text-muted-foreground">{tSession("requestHistory.empty")}</p>
       ) : (
-        <ScrollArea className="min-h-0 flex-1" viewportProps={{ onScroll: handleScroll }}>
+        <ScrollArea className="min-h-0 flex-1">
           <ul className="flex flex-col gap-0.5 p-1.5">
             {visible.map((entry) => (
               <li key={entry.id}>
@@ -114,13 +113,21 @@ export function TimelineRequestHistory({
               </li>
             ))}
           </ul>
-          {older ? (
-            // A count rather than a bare hint: it says how much is left, which
-            // is what makes scrolling this panel worth doing instead of the
-            // transcript.
-            <p className="px-3 pb-2 pt-1 text-center text-[10px] text-muted-foreground/70">
-              {tSession("requestHistory.older", { count: entries.length - visible.length })}
-            </p>
+          {hasOlder ? (
+            <div className="p-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="w-full"
+                disabled={loadingMore}
+                onClick={handleLoadMore}
+              >
+                {loadingMore
+                  ? tSession("requestHistory.loading")
+                  : tSession("requestHistory.more")}
+              </Button>
+            </div>
           ) : null}
         </ScrollArea>
       )}

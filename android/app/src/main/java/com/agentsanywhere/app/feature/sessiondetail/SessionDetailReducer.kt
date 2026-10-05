@@ -314,6 +314,9 @@ private fun SessionDetailState.applyTimelineRealtimeItems(
         ?.coerceAtMost(Int.MAX_VALUE.toLong())
         ?.toInt()
         ?: timeline.nextSeq
+    val terminalTimelineObserved = incoming.any {
+        it.status.lowercase() in setOf("done", "completed", "failed", "cancelled", "canceled", "interrupted")
+    }
     return copy(
         timeline = timeline.copy(
             messages = messages,
@@ -323,7 +326,8 @@ private fun SessionDetailState.applyTimelineRealtimeItems(
             isLoading = false,
             errorMessage = null,
         ),
-        sending = messages.hasPendingOptimisticSend(),
+        sending = messages.hasPendingOptimisticSend() && !terminalTimelineObserved,
+        interrupting = if (terminalTimelineObserved) false else interrupting,
     )
 }
 
