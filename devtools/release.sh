@@ -99,17 +99,22 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   echo "==> building the Android APK"
   ( cd android && ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}" ./gradlew assembleDebug --console=plain -q )
 
+  # electron-builder swaps the host's native optional dependencies (swc,
+  # lightningcss, sharp, @parcel/watcher, @tailwindcss/oxide) for the target
+  # platform's while packaging. `yarn build` runs on the host before that, so
+  # every platform in a multi-platform release has to restore the host's copies
+  # first — otherwise the next `next build` cannot find its own native binding.
   echo "==> building the macOS DMG (universal)"
   rm -f "desktop-workbench/release/Agents Anywhere-${VERSION}-universal.dmg"
-  ( cd desktop-workbench && yarn dist:mac )
+  ( cd desktop-workbench && yarn install && yarn dist:mac )
   echo "==> building the Windows installer"
   rm -f "desktop-workbench/release/Agents Anywhere Setup ${VERSION}.exe"
-  ( cd desktop-workbench && AA_ALLOW_CROSS_BUILD=1 yarn dist:win )
+  ( cd desktop-workbench && yarn install && AA_ALLOW_CROSS_BUILD=1 yarn dist:win )
   echo "==> building Linux AppImage and Debian package"
   mkdir -p connector/release
   ./devtools/build-connector-bundle.sh "$VERSION"
   rm -f "desktop-workbench/release/Agents Anywhere-${VERSION}-x86_64.AppImage" "desktop-workbench/release/agents-anywhere_${VERSION}_amd64.deb"
-  ( cd desktop-workbench && AA_ALLOW_CROSS_BUILD=1 yarn dist:linux )
+  ( cd desktop-workbench && yarn install && AA_ALLOW_CROSS_BUILD=1 yarn dist:linux )
 fi
 
 APK="android/app/build/outputs/apk/debug/app-debug.apk"
