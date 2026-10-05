@@ -103,9 +103,14 @@ composition test also reads persisted sessions through the real Python adapter.
 
 ## Event subscription (additive 1.x)
 
-The handshake advertises `features.syncMode = events` and `projectionVersion = 2`.
+The handshake advertises `features.syncMode = events` and `projectionVersion = 3`.
 `runtime.sync.subscribe` replaces this connection's previous subscription and returns
-`streamId` plus the projection version. `runtime.sync.batch` notifications follow
+`streamId` plus the projection version. The Connector accepts v2 and v3, and every
+batch must match the version returned by its own subscription. v3 reads rc.7
+tool-role results and PTC sub-dispatches; a v2 checkpoint therefore fails the
+version check and triggers a complete recalibration, which restores the results
+that v2 omitted. Update the Connector together with a v3 Host. `runtime.sync.batch`
+notifications follow
 `sync-batch.schema.json`, with monotonic `batchSeq`. The Connector acknowledges each
 batch via `runtime.sync.ack {streamId,batchSeq}` before the next batch is sent.
 
@@ -139,7 +144,7 @@ Connector state, which uses the existing periodic and shutdown flush. A crash
 before that flush permits retransmission, never skipping uncommitted history.
 `checkpoint.delete {externalSessionId}` invalidates an unavailable session.
 
-Checkpoint fields are `version:1`, `projectionVersion:2`, `throughSeq`,
+Checkpoint fields are `version:1`, `projectionVersion` (2 or 3), `throughSeq`,
 `historyHash` (SHA-256 of durable native events and attachment receipts, seeded
 with native/platform identity), and `settled`. The Host locally replays history
 and compares this fingerprint, independent of live/persisted SDK revision formats.

@@ -30,6 +30,12 @@ from connector.runtimes.dsh.bridge.models import notice as session_notice
 # never sends the completion event cannot leave the runtime unusable.
 DEFAULT_INVENTORY_GRACE_SECONDS = 90.0
 
+# Projection versions this Connector can ingest. A v3 Host reads rc.7 tool-role
+# results and PTC sub-dispatches, so a v2 checkpoint is not reused against it:
+# `_checkpoint` rejects the version and the session is recalibrated in full.
+# Each batch must still match the version returned by its own subscription.
+SUPPORTED_PROJECTION_VERSIONS = (2, 3)
+
 _DURABLE_NOTIFICATIONS = {
     "timeline.itemUpsert", "session.meta.upsert", "session.state.updated",
     "session.source.updated", "session.turnEnded",
@@ -41,7 +47,7 @@ def _checkpoint(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
     seq, fingerprint = value.get("throughSeq"), value.get("historyHash")
-    if (value.get("version") != 1 or value.get("projectionVersion") != 2
+    if (value.get("version") != 1 or value.get("projectionVersion") not in SUPPORTED_PROJECTION_VERSIONS
         or type(seq) is not int or not -1 <= seq <= 9007199254740991
         or type(value.get("settled")) is not bool or not isinstance(fingerprint, str)
         or len(fingerprint) != 64 or any(c not in "0123456789abcdef" for c in fingerprint)):
@@ -375,7 +381,8 @@ class SyncRelay:
                     "code": "runtime_initializing", "message": "正在同步 DSH 会话…", "retryable": True,
                 })
             subscription = await self.client.request("runtime.sync.subscribe", {"checkpointVersion": 1})
-            if subscription.get("projectionVersion") != 2:
+            projection_version = subscription.get("projectionVersion")
+            if projection_version not in SUPPORTED_PROJECTION_VERSIONS:
                 raise ValueError("Unsupported DSH projection version")
             stream_id, expected = subscription["streamId"], 1
             self.durable_checkpoints = subscription.get("checkpointVersion") == 1
@@ -388,7 +395,7 @@ class SyncRelay:
                     continue
                 if batch.get("batchSeq") != expected:
                     raise ValueError("Out-of-order event batch; reconnect to recalibrate")
-                if batch.get("projectionVersion") != 2 or not isinstance(batch.get("operations"), list) or not batch["operations"]:
+                if batch.get("projectionVersion") != projection_version or not isinstance(batch.get("operations"), list) or not batch["operations"]:
                     raise ValueError("Invalid DSH event batch")
                 self.loaded_checkpoint = None
                 for operation in batch["operations"]:
