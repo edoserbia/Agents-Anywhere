@@ -505,12 +505,62 @@ function desktopSettingsPath(): string {
   return path.join(app.getPath("userData"), "desktop-settings.json");
 }
 
+/**
+ * Where the Connector sources live for `uv run --project`.
+ *
+ * A packaged install keeps them on a read-only medium: the AppImage mount is
+ * squashfs and a `.deb` installs under `/opt`. `uv run` rewrites `uv.lock`
+ * whenever the configured index differs from the one the lock recorded — which
+ * the explicit `UV_DEFAULT_INDEX` in the supervisor guarantees, because the
+ * bundled `pyproject.toml` declares `.../simple/` while the setting carries no
+ * trailing slash. The write fails on the mount, uv exits non-zero, and the
+ * Connector never starts. Run uv against a writable copy instead.
+ */
 function resolveConnectorDir(): string {
   if (process.env.WORKBENCH_CONNECTOR_DIR?.trim()) {
     return path.resolve(process.env.WORKBENCH_CONNECTOR_DIR.trim());
   }
-  if (app.isPackaged) return path.join(process.resourcesPath, "connector");
-  return path.resolve(app.getAppPath(), "..", "connector");
+  if (!app.isPackaged) return path.resolve(app.getAppPath(), "..", "connector");
+  const bundled = path.join(process.resourcesPath, "connector");
+  if (isWritableDirectory(bundled)) return bundled;
+  return materializeConnectorDir(bundled);
+}
+
+function isWritableDirectory(directory: string): boolean {
+  try {
+    fs.accessSync(directory, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Copy the bundled Connector sources under `userData` once per app version.
+ * The stamp also carries the source path, so a relocated or repackaged app
+ * refreshes the copy instead of reusing a stale one.
+ */
+function materializeConnectorDir(bundled: string): string {
+  const target = path.join(app.getPath("userData"), "connector-src");
+  const stamp = `${app.getVersion()}\n${bundled}\n`;
+  try {
+    if (fs.readFileSync(path.join(target, "pyproject.toml"), "utf8").length > 0
+      && fs.readFileSync(path.join(target, ".bundled-source"), "utf8") === stamp) {
+      return target;
+    }
+  } catch {
+    // First run, an interrupted copy, or a copy from an older version.
+  }
+  try {
+    fs.rmSync(target, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.cpSync(bundled, target, { recursive: true, dereference: true });
+    fs.writeFileSync(path.join(target, ".bundled-source"), stamp);
+    return target;
+  } catch (error) {
+    console.error(`[connector] could not copy the bundled Connector to a writable path: ${String(error)}`);
+    return bundled;
+  }
 }
 
 /**
