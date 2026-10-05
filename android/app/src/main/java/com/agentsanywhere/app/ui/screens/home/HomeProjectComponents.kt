@@ -117,11 +117,12 @@ internal fun HomeProjectList(
     onOpenSession: (AgentSession) -> Unit,
     devices: List<AgentDevice> = emptyList(),
 ) {
-    var pinnedExpanded by remember { mutableStateOf(true) }
     var filterAnchor by remember { mutableStateOf<Rect?>(null) }
-    // Device sections start expanded and remember only what the user collapsed.
-    var collapsedDeviceIds by remember { mutableStateOf(emptySet<String>()) }
     val projectsExpanded = projectPreferences.projectsExpanded
+    // Devices and the pinned section are folded through the preferences, not a
+    // local `remember`: this list is disposed whenever a session is opened.
+    val collapsedDeviceIds = projectPreferences.collapsedDeviceIds
+    val pinnedExpanded = projectPreferences.pinnedExpanded
     val ordered = remember(projects, allSessions) {
         com.agentsanywhere.app.feature.sessions.sortProjectsByActivity(projects, allSessions)
     }
@@ -161,7 +162,7 @@ internal fun HomeProjectList(
                 HomeListSectionHeader(
                     label = stringResource(R.string.home_pinned),
                     expanded = pinnedExpanded,
-                    onClick = { pinnedExpanded = !pinnedExpanded },
+                    onClick = projectPreferences::togglePinnedSection,
                 )
             }
             if (pinnedExpanded) {
@@ -215,11 +216,10 @@ internal fun HomeProjectList(
                             group = group,
                             expanded = group.connectorId !in collapsedDeviceIds,
                             onClick = {
-                                collapsedDeviceIds = if (group.connectorId in collapsedDeviceIds) {
-                                    collapsedDeviceIds - group.connectorId
-                                } else {
-                                    collapsedDeviceIds + group.connectorId
-                                }
+                                projectPreferences.setDeviceCollapsed(
+                                    group.connectorId,
+                                    group.connectorId !in collapsedDeviceIds,
+                                )
                             },
                         )
                     }
