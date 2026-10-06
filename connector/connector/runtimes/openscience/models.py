@@ -137,9 +137,13 @@ def model_catalog(payload: Mapping[str, Any], *, revision: int) -> RuntimeModelC
     apply would be a lie. The prompt's ``effort`` is a separate axis and is
     always sent (see :data:`DEFAULT_EFFORT`).
 
-    Two models may legitimately share a name (the live catalog has twenty such
-    names across providers), so the title is qualified only when it is actually
-    ambiguous. Ids stay unique regardless: they are the routing pair.
+    The provider is always part of a model's title, because the same model name
+    is served by several providers (the live catalog has twenty such names) and
+    two rows reading "GPT-5.6 Terra" would be indistinguishable in the picker
+    even though they route to different backends. The one collision a provider
+    name cannot separate — two models of *one* provider sharing a display name —
+    is broken with the model id instead. Ids stay unique regardless: they are
+    the routing pair.
     """
 
     data = _mapping(payload, "provider catalog")
@@ -177,13 +181,12 @@ def model_catalog(payload: Mapping[str, Any], *, revision: int) -> RuntimeModelC
                 )
             )
 
+    # How many models *one provider* publishes under the same display name. A
+    # provider name cannot separate those rows, so the model id does.
     provider_count_by_name = Counter(
         (provider_id, model_name)
         for provider_id, _, _, model_name, _, _ in resolved
     )
-    providers_by_name: dict[str, set[str]] = {}
-    for provider_id, _, _, model_name, _, _ in resolved:
-        providers_by_name.setdefault(model_name, set()).add(provider_id)
 
     items = tuple(
         _model_item(
@@ -193,7 +196,6 @@ def model_catalog(payload: Mapping[str, Any], *, revision: int) -> RuntimeModelC
             model_name=model_name,
             is_default=is_default,
             model=model,
-            name_is_shared=len(providers_by_name[model_name]) > 1,
             name_is_repeated=provider_count_by_name[(provider_id, model_name)] > 1,
         )
         for (
@@ -247,14 +249,21 @@ def _model_item(
     model_name: str,
     is_default: bool,
     model: Mapping[str, Any],
-    name_is_shared: bool,
     name_is_repeated: bool,
 ) -> RuntimeModelItem:
+    """Build one picker item, titled so its provider is always visible.
+
+    The provider is unconditional rather than a tie-break: a name alone is not
+    an identity here, and the same id can be served by two providers, so a
+    title that hid the provider would make two distinct routes look like one
+    model. ``name_is_repeated`` is the residual case — one provider publishing
+    two different model ids under one display name — which only the id can
+    separate.
+    """
+
     status = _optional_string(model.get("status")) or "active"
     variants = _model_variants(model)
-    title = model_name
-    if name_is_shared:
-        title = f"{title} · {provider_name}"
+    title = f"{model_name} · {provider_name}"
     if name_is_repeated:
         title = f"{title} [{model_id}]"
     return RuntimeModelItem(

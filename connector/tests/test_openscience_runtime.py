@@ -1196,6 +1196,7 @@ def test_model_catalog_publishes_each_models_own_reasoning_levels() -> None:
     # The payload's own order is kept even when it is not sorted, because it is
     # the server's ladder and not a display accident.
     lab = by_id["local-lab/lab-terra"]
+    assert lab.title == "GPT-5.6 Terra · Local Lab"
     assert [item.id for item in lab.reasoning_items] == [
         "minimal",
         "low",
@@ -1209,9 +1210,10 @@ def test_model_catalog_publishes_each_models_own_reasoning_levels() -> None:
     assert minimax.reasoning_items == ()
     assert minimax.selection_id is not None
     assert minimax.metadata["variants"] == []
-    # An empty variants object is the same answer as a missing key.
+    # An empty variants object is the same answer as a missing key. The title
+    # names the provider even though no other provider serves this model.
     small = by_id["local-lab/lab-small"]
-    assert small.title == "Lab Small"
+    assert small.title == "Lab Small · Local Lab"
     assert small.reasoning_items == ()
     assert small.selection_id is not None
     # A model the server retired stays visible but cannot be selected.
@@ -1240,6 +1242,87 @@ def test_model_catalog_rejects_a_payload_without_providers() -> None:
         models.model_catalog({}, revision=1)
     with pytest.raises(TypeError):
         models.model_catalog({"providers": "cc-proxy"}, revision=1)
+
+
+def test_model_catalog_titles_always_name_the_provider() -> None:
+    """A name alone is not an identity: the provider is always in the title.
+
+    The live catalog serves eight model ids from two or three providers, so a
+    picker showing only the name would offer rows the user cannot tell apart
+    even though each routes to a different backend. The provider is therefore
+    appended unconditionally, not only when two providers happen to collide.
+    """
+
+    payload = {
+        "default": {},
+        "providers": [
+            {
+                "id": "cc-proxy",
+                "name": "Command Code Proxy",
+                "models": {
+                    "gpt-5.6-terra": {"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra"},
+                },
+            },
+            {
+                "id": "local-lab",
+                "name": "Local Lab",
+                "models": {
+                    # The same model id, served by a second provider.
+                    "gpt-5.6-terra": {"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra"},
+                    # A model no other provider serves is still qualified.
+                    "lab-small": {"id": "lab-small", "name": "Lab Small"},
+                },
+            },
+        ],
+    }
+    catalog = models.model_catalog(payload, revision=1)
+    assert [model.title for model in catalog.models] == [
+        "GPT-5.6 Terra · Command Code Proxy",
+        "GPT-5.6 Terra · Local Lab",
+        "Lab Small · Local Lab",
+    ]
+    # The two routes stay distinct by id *and* by title.
+    by_id = {model.id: model for model in catalog.models}
+    assert by_id["cc-proxy/gpt-5.6-terra"].title != by_id["local-lab/gpt-5.6-terra"].title
+    assert by_id["cc-proxy/gpt-5.6-terra"].selection_id != (
+        by_id["local-lab/gpt-5.6-terra"].selection_id
+    )
+
+
+def test_model_catalog_keeps_the_id_for_a_name_one_provider_repeats() -> None:
+    """One provider's own name collision is the one case a provider cannot break.
+
+    Two different model ids published by the same provider under one display
+    name would still read identically, so the model id stays in the title —
+    that is the collision `name_is_repeated` detects, and it is a different
+    question from the same name appearing under two providers.
+    """
+
+    payload = {
+        "default": {},
+        "providers": [
+            {
+                "id": "cc-proxy",
+                "name": "Command Code Proxy",
+                "models": {
+                    "gpt-5.6-terra": {"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra"},
+                    "gpt-5.6-terra-preview": {
+                        "id": "gpt-5.6-terra-preview",
+                        "name": "GPT-5.6 Terra",
+                    },
+                },
+            },
+        ],
+    }
+    catalog = models.model_catalog(payload, revision=1)
+    assert [model.title for model in catalog.models] == [
+        "GPT-5.6 Terra · Command Code Proxy [gpt-5.6-terra]",
+        "GPT-5.6 Terra · Command Code Proxy [gpt-5.6-terra-preview]",
+    ]
+    assert [model.id for model in catalog.models] == [
+        "cc-proxy/gpt-5.6-terra",
+        "cc-proxy/gpt-5.6-terra-preview",
+    ]
 
 
 def test_the_runtime_publishes_the_servers_model_catalog() -> None:

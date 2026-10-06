@@ -72,10 +72,25 @@ def capability_set(value: Any, *, connector_id: str) -> RuntimeCapabilitySet:
 
 
 def model_catalog(value: Any) -> RuntimeModelCatalog:
+    """Decode the bridge's model catalog, titling each model with its provider.
+
+    One DSH install serves the same model id through several providers (the
+    live catalog has 75 models across three), so the raw title is qualified
+    with ``metadata.providerName`` the way OpenScience qualifies its own. Only
+    the title is touched: the id is a base64 route tuple the DSH runtime
+    decodes, and a payload that carries no metadata keeps its raw title so an
+    absent provider can never drop or blank a model.
+    """
+
     data = _mapping(value, "model catalog")
     models: list[RuntimeModelItem] = []
     for raw in _list(data.get("models"), "models"):
         item = _mapping(raw, "model")
+        metadata = _dict(item.get("metadata"))
+        title = _required_string(item.get("title"), "model title")
+        provider_name = _optional_string(metadata.get("providerName"))
+        if provider_name is not None:
+            title = f"{title} · {provider_name}"
         reasoning: list[RuntimeReasoningItem] = []
         for raw_effort in _list(item.get("reasoningItems", []), "reasoningItems"):
             effort = _mapping(raw_effort, "reasoning item")
@@ -95,13 +110,13 @@ def model_catalog(value: Any) -> RuntimeModelCatalog:
         models.append(
             RuntimeModelItem(
                 id=_required_string(item.get("id"), "model id"),
-                title=_required_string(item.get("title"), "model title"),
+                title=title,
                 selection_id=_optional_string(item.get("selectionId")),
                 description=_optional_string(item.get("description")),
                 reasoning_items=tuple(reasoning),
                 enabled=_boolean(item.get("enabled"), True),
                 disabled_reason=_optional_string(item.get("disabledReason")),
-                metadata=_dict(item.get("metadata")),
+                metadata=metadata,
             )
         )
     return RuntimeModelCatalog(

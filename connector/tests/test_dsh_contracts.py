@@ -7,6 +7,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from connector.runtime_protocol import timeline_content_hash
+from connector.runtimes.dsh.bridge.models import model_catalog, timeline_item
 from connector.runtimes.dsh.identity import (
     decode_model_selection_id,
     decode_permission_selection_id,
@@ -14,7 +15,6 @@ from connector.runtimes.dsh.identity import (
     permission_selection_id,
     timeline_item_id,
 )
-from connector.runtimes.dsh.bridge.models import timeline_item
 from connector.runtimes.session_identity import stable_runtime_session_id
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -121,3 +121,113 @@ def test_canonical_item_preserves_turn_and_validates_content_hash() -> None:
     value["contentHash"] = "sha256:incorrect"
     with pytest.raises(ValueError, match="contentHash"):
         timeline_item(value)
+
+
+def _model_item(
+    *,
+    model_id: str,
+    title: str,
+    selection_id: str,
+    metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """One bridge model entry in the shape the live DSH payload uses."""
+
+    item: dict[str, object] = {
+        "id": model_id,
+        "title": title,
+        "selectionId": selection_id,
+        "description": None,
+        "reasoningItems": [],
+        "enabled": True,
+        "metadata": metadata if metadata is not None else {},
+    }
+    return item
+
+
+def test_dsh_model_catalog_titles_name_the_serving_provider() -> None:
+    """The bridge carries the provider in metadata; the picker has to show it.
+
+    The live DSH catalog serves 75 models through three providers, and the
+    same model id is reachable through more than one of them. Without the
+    provider in the title those rows read identically even though the base64
+    route id behind each one decodes to a different backend.
+    """
+
+    catalog = model_catalog(
+        {
+            "runtime": "dsh",
+            "revision": 31,
+            "models": [
+                _model_item(
+                    model_id="WyJjYy1wcm94eSIsImNsYXVkZS1zb25uZXQtNSJd",
+                    title="claude-sonnet-5",
+                    selection_id="sel_model_cc",
+                    metadata={
+                        "provider": "cc-proxy",
+                        "providerName": "Command Code Proxy",
+                        "model": "claude-sonnet-5",
+                        "modelName": "claude-sonnet-5",
+                        "reasoningEffort": None,
+                        "enabled": True,
+                    },
+                ),
+                _model_item(
+                    model_id="WyJvcGVuY29kZS1nbyIsImNsYXVkZS1zb25uZXQtNSJd",
+                    title="claude-sonnet-5",
+                    selection_id="sel_model_go",
+                    metadata={
+                        "provider": "opencode-go",
+                        "providerName": "OpenCode Go",
+                        "model": "claude-sonnet-5",
+                        "modelName": "claude-sonnet-5",
+                    },
+                ),
+            ],
+        }
+    )
+    assert catalog.revision == 31
+    assert [model.title for model in catalog.models] == [
+        "claude-sonnet-5 · Command Code Proxy",
+        "claude-sonnet-5 · OpenCode Go",
+    ]
+    # Only the title is qualified: the ids stay the bridge's own route tuples.
+    assert [model.id for model in catalog.models] == [
+        "WyJjYy1wcm94eSIsImNsYXVkZS1zb25uZXQtNSJd",
+        "WyJvcGVuY29kZS1nbyIsImNsYXVkZS1zb25uZXQtNSJd",
+    ]
+    assert catalog.models[0].selection_id == "sel_model_cc"
+    assert catalog.models[0].metadata["provider"] == "cc-proxy"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,  # no metadata object at all
+        {},  # metadata without a provider name
+        {"provider": "cc-proxy"},  # provider id but no display name
+        {"providerName": ""},  # blank display name
+        {"providerName": None},
+    ],
+)
+def test_dsh_model_catalog_keeps_the_raw_title_without_a_provider_name(
+    metadata: dict[str, object] | None,
+) -> None:
+    """An absent provider must never drop or blank a model."""
+
+    catalog = model_catalog(
+        {
+            "runtime": "dsh",
+            "revision": 1,
+            "models": [
+                _model_item(
+                    model_id="gpt-plain",
+                    title="gpt-plain",
+                    selection_id="sel_model_plain",
+                    metadata=metadata,
+                )
+            ],
+        }
+    )
+    assert [model.title for model in catalog.models] == ["gpt-plain"]
+    assert catalog.models[0].id == "gpt-plain"
+    assert catalog.models[0].selection_id == "sel_model_plain"
