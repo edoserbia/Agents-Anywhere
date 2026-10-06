@@ -478,8 +478,13 @@ class OpenScienceRuntime(AgentRuntime):
         if not content.strip() and not attachments:
             raise RuntimeInvalidRequestError("a message or an attachment is required")
         client = await self._ensure_client()
+        scope = await self._session_scope(client, cwd)
         created = await self._call(
-            lambda: client.create_session(title=title, workspace=self._workspace(cwd)),
+            lambda: client.create_session(
+                title=title,
+                workspace=self._workspace(scope),
+                directory=scope,
+            ),
             "session.create",
         )
         external = _required_string(created.get("id"), "created session id")
@@ -742,19 +747,56 @@ class OpenScienceRuntime(AgentRuntime):
             output.append(models.session_meta(payload, session_id=platform))
         return tuple(output)
 
-    def _workspace(self, cwd: str | None) -> str:
-        """Use the project workspace only when the platform asked for it.
+    async def _session_scope(
+        self, client: OpenScienceClient, cwd: str | None
+    ) -> str | None:
+        """The project a new session belongs to, or the configured default.
 
-        ``project`` makes relative tool paths resolve inside the server's
-        configured project; anything else stays in the server's isolated
-        scratch workspace, because the server cannot honor a directory this
-        connector was not configured with.
+        The platform passes the workspace path of the project the user picked.
+        Without a scope the server files the session under its own
+        working-directory project, which is not the one the user was looking
+        at, so the session would never appear where they expect it.
+
+        Only a directory the server already manages is accepted: OpenScience
+        opens a project for any path it is handed, and a path the platform
+        invented would leave an empty project behind that nobody asked for.
         """
 
-        directory = self.config.values.get("directory")
-        if isinstance(cwd, str) and isinstance(directory, str) and cwd == directory:
-            return "project"
-        return "isolated"
+        if not isinstance(cwd, str) or not cwd:
+            return None
+        configured = self.config.values.get("directory")
+        if isinstance(configured, str) and cwd == configured:
+            return cwd
+        return cwd if cwd in await self._project_worktrees(client) else None
+
+    async def _project_worktrees(self, client: OpenScienceClient) -> set[str]:
+        """Every worktree OpenScience manages, for placing a new session."""
+
+        try:
+            projects = await client.list_projects()
+        except (
+            OpenScienceConnectionError,
+            OpenScienceProtocolError,
+            OpenScienceHTTPError,
+        ):
+            # Placing the session in the server's own project beats refusing to
+            # create it because the catalog could not be read this once.
+            return set()
+        return {
+            worktree
+            for project in projects
+            if isinstance(worktree := project.get("worktree"), str) and worktree
+        }
+
+    def _workspace(self, scope: str | None) -> str:
+        """Use the project workspace only for a directory the server manages.
+
+        ``project`` makes relative tool paths resolve inside that project;
+        anything else stays in the server's isolated scratch workspace, because
+        the server cannot honor a directory it does not know.
+        """
+
+        return "project" if scope else "isolated"
 
     def _register_session(
         self,

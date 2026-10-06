@@ -491,9 +491,15 @@ class FakeClient:
             if item.get("directory") == self.current_directory
         ]
 
-    async def create_session(self, *, title: str | None = None, workspace: str | None = None) -> dict[str, Any]:
+    async def create_session(
+        self,
+        *,
+        title: str | None = None,
+        workspace: str | None = None,
+        directory: str | None = None,
+    ) -> dict[str, Any]:
         self.calls.append("create_session")
-        self.created.append({"title": title, "workspace": workspace})
+        self.created.append({"title": title, "workspace": workspace, "directory": directory})
         payload = session_payload(f"ses_new{len(self.created)}", title=title)
         self.sessions.append(payload)
         self.snapshots[payload["id"]] = snapshot_payload(payload["id"])
@@ -988,7 +994,9 @@ def test_create_and_start_creates_then_prompts() -> None:
             assert result.ok is True
             assert result.result["externalSessionId"] == "ses_new1"
             assert result.result["sessionId"] == "sess_platform"
-            assert client.created == [{"title": "Calibration", "workspace": "isolated"}]
+            assert client.created == [
+                {"title": "Calibration", "workspace": "isolated", "directory": None}
+            ]
             assert client.prompts[0]["message"] == "Analyze the calibration data"
             assert client.prompts[0]["requestID"]
             host.session_meta_upsert.assert_awaited()
@@ -999,9 +1007,12 @@ def test_create_and_start_creates_then_prompts() -> None:
 
 
 def test_create_uses_the_project_workspace_only_when_it_matches(tmp_path: Path) -> None:
+    """A directory the server does not manage must not become a project."""
+
     async def exercise() -> None:
         host = make_host()
-        client = FakeClient()
+        managed = str(tmp_path / "managed")
+        client = FakeClient(projects=[{"id": "prj_1", "name": "Managed", "worktree": managed}])
         runtime = build_runtime(
             host, client=client, config=runtime_config(directory=str(tmp_path))
         )
@@ -1011,9 +1022,21 @@ def test_create_uses_the_project_workspace_only_when_it_matches(tmp_path: Path) 
                 "sess_a", "hello", cwd=str(tmp_path), client_message_id="cm_1"
             )
             await runtime.create_and_start_session(
-                "sess_b", "hello", cwd="/somewhere/else", client_message_id="cm_2"
+                "sess_b", "hello", cwd=managed, client_message_id="cm_2"
             )
-            assert [item["workspace"] for item in client.created] == ["project", "isolated"]
+            await runtime.create_and_start_session(
+                "sess_c", "hello", cwd="/somewhere/else", client_message_id="cm_3"
+            )
+            assert [item["workspace"] for item in client.created] == [
+                "project",
+                "project",
+                "isolated",
+            ]
+            assert [item["directory"] for item in client.created] == [
+                str(tmp_path),
+                managed,
+                None,
+            ]
         finally:
             await runtime.stop()
 

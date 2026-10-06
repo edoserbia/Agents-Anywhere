@@ -415,8 +415,9 @@ class OpenScienceClient:
         *,
         title: str | None = None,
         workspace: str | None = None,
+        directory: ProjectScope = None,
     ) -> dict[str, Any]:
-        """Create a session in the client's default project.
+        """Create a session in one project.
 
         The receipt names the project the server actually chose, and the
         runtime remembers it from there, so every later call for this session
@@ -428,7 +429,10 @@ class OpenScienceClient:
             body["title"] = title
         if workspace:
             body["workspace"] = workspace
-        return _object(await self._request("POST", "/session", body=body), "session")
+        return _object(
+            await self._request("POST", "/session", body=body, directory=directory),
+            "session",
+        )
 
     async def messages(
         self,
