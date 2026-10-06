@@ -26,7 +26,7 @@ from typing import Any, Final
 
 import httpx
 
-from connector.runtimes.openscience import discovery, provider_config
+from connector.runtimes.openscience import discovery, models, provider_config
 
 # Payload ceilings mirror the reference SDK: a runtime response is bounded, and
 # a single SSE frame that exceeds its budget is a protocol failure rather than
@@ -337,6 +337,21 @@ class OpenScienceClient:
             await self._request("GET", "/project", directory=UNSCOPED), "projects"
         )
 
+    async def list_providers(self) -> dict[str, Any]:
+        """Read the model catalog the server itself is configured with.
+
+        The route is global for the same reason ``/project`` is: providers are
+        resolved from OpenScience's own configuration, not from a project, so
+        the catalog is read with no selector and a client pinned to one project
+        still sees every provider. The payload is returned as it arrived — the
+        mapping onto the Connector's catalog is ``models.model_catalog``.
+        """
+
+        return _object(
+            await self._request("GET", "/config/providers", directory=UNSCOPED),
+            "provider catalog",
+        )
+
     async def list_sessions(self, *, directory: ProjectScope = None) -> list[dict[str, Any]]:
         """List one project's sessions; the route is not paginated.
 
@@ -419,21 +434,47 @@ class OpenScienceClient:
         request_id: str,
         message: str | None = None,
         parts: list[dict[str, Any]] | None = None,
-        effort: str = "normal",
+        model: Mapping[str, str] | None = None,
+        effort: str | None = None,
         message_id: str | None = None,
         directory: ProjectScope = None,
     ) -> dict[str, Any]:
+        """Admit one run, optionally pinning the model and reasoning effort.
+
+        ``model`` and ``effort`` are omitted when not supplied so the server
+        applies its own configuration; the caller decides that, because only it
+        knows whether the user actually chose something. When they are supplied
+        they are passed through verbatim — OpenScience owns the catalog and the
+        effort vocabulary, and translating either here would send the user a
+        different model than the one they picked.
+        """
+
         if not request_id or not request_id.strip():
             raise ValueError("a persisted requestID is required before submitting work")
         if (message is None) == (parts is None):
             raise ValueError("supply exactly one of message or parts")
-        if effort not in ("normal", "ultra"):
-            raise ValueError("effort must be normal or ultra")
+        if effort is not None and effort not in models.OPENSCIENCE_EFFORTS:
+            raise ValueError(
+                "effort must be one of " + ", ".join(models.OPENSCIENCE_EFFORTS)
+            )
+        if model is not None:
+            provider_id = model.get("providerID")
+            model_id = model.get("modelID")
+            if not isinstance(provider_id, str) or not provider_id:
+                raise ValueError("model.providerID must be a non-empty string")
+            if not isinstance(model_id, str) or not model_id:
+                raise ValueError("model.modelID must be a non-empty string")
         body: dict[str, Any] = {
             "sessionID": session_id,
             "requestID": request_id,
-            "effort": effort,
         }
+        if model is not None:
+            body["model"] = {
+                "providerID": model["providerID"],
+                "modelID": model["modelID"],
+            }
+        if effort is not None:
+            body["effort"] = effort
         if message is not None:
             body["message"] = message
         if parts is not None:

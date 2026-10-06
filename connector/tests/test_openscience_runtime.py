@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ from connector.runtime_protocol import (
     RuntimeUnavailableError,
     RuntimeUnsupportedError,
 )
+from connector.runtimes.catalog_revisions import runtime_catalog_revision
 from connector.runtimes.openscience import discovery, models, provider_config
 from connector.runtimes.openscience.client import (
     UNSCOPED,
@@ -43,6 +45,7 @@ from connector.runtimes.openscience.client import (
 )
 from connector.runtimes.openscience.provider import OpenScienceProvider
 from connector.runtimes.openscience.runtime import (
+    OPENSCIENCE_MODEL_CATALOG_STATIC_REVISION,
     OpenScienceRelay,
     OpenScienceRuntime,
     runtime_capabilities,
@@ -209,6 +212,116 @@ def question_payload(request_id: str = "que_1") -> dict[str, Any]:
     }
 
 
+def model_payload(
+    model_id: str,
+    name: str,
+    *,
+    provider_id: str,
+    reasoning: bool = True,
+    status: str = "active",
+    **overrides: Any,
+) -> dict[str, Any]:
+    """One `Provider.Info.models` entry, shaped like the server's own model."""
+
+    return {
+        "id": model_id,
+        "name": name,
+        "providerID": provider_id,
+        "api": {"id": model_id, "npm": "@ai-sdk/openai-compatible"},
+        "status": status,
+        "capabilities": {
+            "temperature": True,
+            "reasoning": reasoning,
+            "attachment": False,
+            "toolcall": True,
+            "input": {"text": True, "image": False, "audio": False, "video": False, "pdf": False},
+            "output": {"text": True, "image": False, "audio": False, "video": False, "pdf": False},
+            "interleaved": False,
+        },
+        "cost": {"input": 0, "output": 0, "cache": {"read": 0, "write": 0}},
+        "limit": {"context": 200_000, "output": 200_000},
+        **overrides,
+    }
+
+
+def provider_catalog() -> dict[str, Any]:
+    """A realistic `GET /config/providers` payload.
+
+    It carries what the live server actually exercises: two providers whose
+    default model is not the first key in `models`, a model that does not
+    reason, a model the server no longer considers active, and one model name
+    served by both providers.
+    """
+
+    return {
+        "default": {"cc-proxy": "gpt-5.6-terra", "local-lab": "lab-small"},
+        "providers": [
+            {
+                "id": "cc-proxy",
+                "name": "Command Code Proxy",
+                "env": [],
+                "options": {},
+                "source": "config",
+                "models": {
+                    "MiniMaxAI/MiniMax-M2.5": model_payload(
+                        "MiniMaxAI/MiniMax-M2.5", "MiniMax M2.5", provider_id="cc-proxy"
+                    ),
+                    "gpt-5.6-terra": model_payload(
+                        "gpt-5.6-terra", "GPT-5.6 Terra", provider_id="cc-proxy"
+                    ),
+                    "gpt-5.6-sol": model_payload(
+                        "gpt-5.6-sol",
+                        "GPT-5.6 Sol",
+                        provider_id="cc-proxy",
+                        status="deprecated",
+                    ),
+                },
+            },
+            {
+                "id": "local-lab",
+                "name": "Local Lab",
+                "env": [],
+                "options": {},
+                "source": "config",
+                "models": {
+                    "lab-small": model_payload(
+                        "lab-small",
+                        "Lab Small",
+                        provider_id="local-lab",
+                        reasoning=False,
+                    ),
+                    "lab-terra": model_payload(
+                        "lab-terra", "GPT-5.6 Terra", provider_id="local-lab"
+                    ),
+                },
+            },
+        ],
+    }
+
+
+def selection_id_for(
+    catalog: Any,
+    provider_id: str,
+    model_id: str,
+    effort: str | None = None,
+) -> str:
+    """The platform selection id a picker would send for one model/effort."""
+
+    for model in catalog.models:
+        if (
+            model.metadata["providerID"] != provider_id
+            or model.metadata["modelID"] != model_id
+        ):
+            continue
+        if effort is None:
+            assert model.selection_id is not None
+            return model.selection_id
+        for reasoning in model.reasoning_items:
+            if reasoning.id == effort:
+                return reasoning.selection_id
+    raise AssertionError(f"{provider_id}/{model_id} is not in the catalog")
+
+
 def make_host(**overrides: Any) -> SimpleNamespace:
     """A host with a real key/value store so cursor and receipt tests are honest."""
 
@@ -264,6 +377,7 @@ class FakeClient:
         protocol: str = "1.0",
         server_version: str = "2.0.147",
         current_directory: str | None = None,
+        providers: dict[str, Any] | None = None,
     ) -> None:
         self.sessions = list(sessions or [])
         self.projects = list(projects or [])
@@ -271,6 +385,7 @@ class FakeClient:
         self.messages_by_session = dict(messages or {})
         self.snapshots = dict(snapshots or {})
         self.event_scripts = dict(events or {})
+        self.providers = providers if providers is not None else provider_catalog()
         self.protocol = protocol
         self.server_version = server_version
         self.prompts: list[dict[str, Any]] = []
@@ -285,6 +400,7 @@ class FakeClient:
         self.fail_snapshot: set[str] = set()
         self.fail_messages: set[str] = set()
         self.fail_projects = False
+        self.fail_providers = False
         self.fail_list: set[str] = set()
         self.gap_sessions: set[str] = set()
         self.expired_sessions: set[str] = set()
@@ -316,6 +432,12 @@ class FakeClient:
         if self.fail_projects:
             raise OpenScienceConnectionError("project catalog unavailable")
         return [dict(item) for item in self.projects]
+
+    async def list_providers(self) -> dict[str, Any]:
+        self.calls.append("list_providers")
+        if self.fail_providers:
+            raise OpenScienceConnectionError("provider catalog unavailable")
+        return copy.deepcopy(self.providers)
 
     async def list_sessions(self, *, directory: Any = None) -> list[dict[str, Any]]:
         self.calls.append("list_sessions")
@@ -379,7 +501,8 @@ class FakeClient:
         request_id: str,
         message: str | None = None,
         parts: list[dict[str, Any]] | None = None,
-        effort: str = "normal",
+        model: dict[str, str] | None = None,
+        effort: str | None = None,
         message_id: str | None = None,
         directory: Any = None,
     ) -> dict[str, Any]:
@@ -391,6 +514,7 @@ class FakeClient:
                 "requestID": request_id,
                 "message": message,
                 "parts": parts,
+                "model": dict(model) if model is not None else None,
                 "effort": effort,
             }
         )
@@ -571,7 +695,7 @@ def test_provider_identity_and_descriptor_capabilities() -> None:
         assert descriptor.capabilities["interactions"] is True
         assert descriptor.capabilities["attachments"] is True
         assert descriptor.capabilities["ipc"] is True
-        assert descriptor.capabilities["modelCatalog"] is False
+        assert descriptor.capabilities["modelCatalog"] is True
         assert descriptor.capabilities["commands"] is False
         assert descriptor.capabilities["steerTurn"] is False
         assert descriptor.capabilities["permissionCatalog"] is False
@@ -775,7 +899,9 @@ def test_start_attaches_and_publishes_capabilities() -> None:
             ids = {item.capability_id for item in capabilities.capabilities}
             assert {"session.send_message", "session.interrupt", "runtime.attachment"} <= ids
             declined = {item.capability_id: item for item in capabilities.capabilities}
-            assert declined["catalog.model"].supported is False
+            assert declined["catalog.model"].supported is True
+            assert declined["catalog.effort"].supported is True
+            assert declined["catalog.permission"].supported is False
             assert declined["session.send_message"].supported is True
             assert capabilities.metadata["sessionNotices"] is True
 
@@ -936,6 +1062,357 @@ def test_start_turn_requires_a_stable_client_message_id() -> None:
             assert client.prompts == []
         finally:
             await runtime.stop()
+
+    run(exercise())
+
+
+# --- model catalog and selections -------------------------------------------
+
+
+def test_model_catalog_maps_the_servers_providers_and_efforts() -> None:
+    """The catalog is OpenScience's, translated and not re-invented."""
+
+    catalog = models.model_catalog(provider_catalog(), revision=7)
+    assert catalog.runtime == "openscience"
+    assert catalog.revision == 7
+    by_id = {model.id: model for model in catalog.models}
+    assert list(by_id) == [
+        "cc-proxy/gpt-5.6-terra",
+        "cc-proxy/MiniMaxAI/MiniMax-M2.5",
+        "cc-proxy/gpt-5.6-sol",
+        "local-lab/lab-small",
+        "local-lab/lab-terra",
+    ]
+    # The provider's own default leads its group: the Connector catalog has no
+    # default marker, so order is what the picker falls back to.
+    terra = by_id["cc-proxy/gpt-5.6-terra"]
+    assert terra.title == "GPT-5.6 Terra · Command Code Proxy"
+    assert terra.metadata["default"] is True
+    assert terra.metadata["providerName"] == "Command Code Proxy"
+    assert terra.enabled is True
+    assert [item.id for item in terra.reasoning_items] == ["normal", "ultra"]
+    assert [item.title for item in terra.reasoning_items] == ["Normal", "Ultra"]
+    assert terra.reasoning_items[0].metadata["default"] is True
+    # A model that does not reason carries a plain selection and no efforts.
+    small = by_id["local-lab/lab-small"]
+    assert small.title == "Lab Small"
+    assert small.reasoning_items == ()
+    assert small.selection_id is not None
+    # A model the server retired stays visible but cannot be selected.
+    retired = by_id["cc-proxy/gpt-5.6-sol"]
+    assert retired.enabled is False
+    assert retired.disabled_reason == "OpenScience reports this model as deprecated"
+    # Every selection id resolves back to the exact route that produced it.
+    assert models.model_route(catalog, terra.reasoning_items[1].selection_id) == (
+        models.ModelRoute(
+            provider_id="cc-proxy", model_id="gpt-5.6-terra", effort="ultra"
+        )
+    )
+    assert models.model_route(catalog, small.selection_id) == models.ModelRoute(
+        provider_id="local-lab", model_id="lab-small"
+    )
+    assert models.model_route(catalog, "sel_model_unknown") is None
+
+
+def test_model_catalog_rejects_a_payload_without_providers() -> None:
+    with pytest.raises(TypeError):
+        models.model_catalog({}, revision=1)
+    with pytest.raises(TypeError):
+        models.model_catalog({"providers": "cc-proxy"}, revision=1)
+
+
+def test_the_runtime_publishes_the_servers_model_catalog() -> None:
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = connected(host, client)
+        catalog = await runtime.list_model_catalog()
+        assert len(catalog.models) == 5
+        assert catalog.revision == runtime_catalog_revision(
+            runtime.config.revision, OPENSCIENCE_MODEL_CATALOG_STATIC_REVISION
+        )
+        # One read serves both the picker and the resolution of a selection.
+        await runtime.list_model_catalog()
+        assert client.calls.count("list_providers") == 1
+
+        filtered = await runtime.list_model_catalog(query="local lab")
+        assert [model.id for model in filtered.models] == [
+            "local-lab/lab-small",
+            "local-lab/lab-terra",
+        ]
+        limited = await runtime.list_model_catalog(limit=2)
+        assert [model.id for model in limited.models] == [
+            "cc-proxy/gpt-5.6-terra",
+            "cc-proxy/MiniMaxAI/MiniMax-M2.5",
+        ]
+
+    run(exercise())
+
+
+def test_a_selected_model_and_effort_reach_the_prompt() -> None:
+    """The platform patches a selection once; every later turn keeps using it."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = connected(host, client)
+        catalog = await runtime.list_model_catalog()
+        selection = selection_id_for(catalog, "cc-proxy", "gpt-5.6-terra", "ultra")
+
+        result = await runtime.update_session_selections(
+            "sess_x", "ses_1", {"model": selection}
+        )
+        assert result.ok is True
+        assert result.result["selections"] == {"model": selection}
+
+        await runtime.start_turn("sess_x", "ses_1", "hello", client_message_id="cm_1")
+        assert client.prompts[0]["model"] == {
+            "providerID": "cc-proxy",
+            "modelID": "gpt-5.6-terra",
+        }
+        assert client.prompts[0]["effort"] == "ultra"
+
+    run(exercise())
+
+
+def test_a_turn_can_carry_its_own_selection() -> None:
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = connected(host, client)
+        catalog = await runtime.list_model_catalog()
+        selection = selection_id_for(catalog, "local-lab", "lab-terra", "normal")
+
+        await runtime.start_turn(
+            "sess_x",
+            "ses_1",
+            "hello",
+            selections={"model": selection},
+            client_message_id="cm_1",
+        )
+        assert client.prompts[0]["model"] == {
+            "providerID": "local-lab",
+            "modelID": "lab-terra",
+        }
+        assert client.prompts[0]["effort"] == "normal"
+        # The turn's selection is also the session's, so the next message that
+        # carries none still uses it.
+        await runtime.start_turn("sess_x", "ses_1", "again", client_message_id="cm_2")
+        assert client.prompts[1]["model"] == {
+            "providerID": "local-lab",
+            "modelID": "lab-terra",
+        }
+
+    run(exercise())
+
+
+def test_a_prompt_without_a_selection_sends_no_model_and_the_servers_default() -> None:
+    """Nothing is selected, so OpenScience runs its own default model.
+
+    The effort is still sent because the server's prompt schema requires one
+    and resolves an unselected turn to `normal`; that is what the runtime has
+    always sent and what the server itself would default to.
+    """
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = connected(host, client)
+        await runtime.start_turn("sess_x", "ses_1", "hello", client_message_id="cm_1")
+        assert client.prompts[0]["model"] is None
+        assert client.prompts[0]["effort"] == "normal"
+        # No selection means no catalog read: a plain turn stays one request.
+        assert "list_providers" not in client.calls
+
+    run(exercise())
+
+
+def test_an_effort_scope_alone_is_passed_through() -> None:
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = connected(host, client)
+        await runtime.update_session_selections("sess_x", "ses_1", {"effort": "ultra"})
+        await runtime.start_turn("sess_x", "ses_1", "hello", client_message_id="cm_1")
+        assert client.prompts[0]["model"] is None
+        assert client.prompts[0]["effort"] == "ultra"
+
+    run(exercise())
+
+
+def test_a_model_that_cannot_reason_offers_no_effort_choice() -> None:
+    """`capabilities.reasoning` decides the picker's effort options.
+
+    A model without it gets a plain model selection and no reasoning items, so
+    the platform never shows an effort choice it cannot honour. The prompt still
+    carries the server's default effort, because the endpoint requires one.
+    """
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = connected(host, client)
+        catalog = await runtime.list_model_catalog()
+        small = next(m for m in catalog.models if m.id == "local-lab/lab-small")
+        assert small.reasoning_items == ()
+        assert small.metadata["reasoning"] is False
+
+        await runtime.start_turn(
+            "sess_x",
+            "ses_1",
+            "hello",
+            selections={"model": small.selection_id},
+            client_message_id="cm_1",
+        )
+        assert client.prompts[0]["model"] == {
+            "providerID": "local-lab",
+            "modelID": "lab-small",
+        }
+        assert client.prompts[0]["effort"] == "normal"
+
+    run(exercise())
+
+
+def test_an_unknown_or_unsupported_selection_is_refused() -> None:
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = connected(host, client)
+
+        unknown = await runtime.update_session_selections(
+            "sess_x", "ses_1", {"model": "sel_model_nope"}
+        )
+        assert unknown.ok is False
+        assert unknown.code == "openscience_invalid_selection"
+        assert "list_providers" in client.calls
+
+        scope = await runtime.update_session_selections(
+            "sess_x", "ses_1", {"permission": "sel_permission_1"}
+        )
+        assert scope.ok is False
+        assert scope.code == "openscience_unsupported_selection_scope"
+
+        empty = await runtime.update_session_selections("sess_x", "ses_1", {})
+        assert empty.ok is False
+        assert empty.code == "openscience_empty_selection_update"
+
+        # A refused selection never reaches a prompt.
+        await runtime.start_turn("sess_x", "ses_1", "hello", client_message_id="cm_1")
+        assert client.prompts[0]["model"] is None
+        assert client.prompts[0]["effort"] == "normal"
+
+    run(exercise())
+
+
+def test_a_retry_with_a_different_selection_is_refused_locally() -> None:
+    """The selection is part of what a requestID was admitted with."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = connected(host, client)
+        catalog = await runtime.list_model_catalog()
+        terra = selection_id_for(catalog, "cc-proxy", "gpt-5.6-terra", "normal")
+        ultra = selection_id_for(catalog, "cc-proxy", "gpt-5.6-terra", "ultra")
+
+        await runtime.start_turn(
+            "sess_x",
+            "ses_1",
+            "hello",
+            selections={"model": terra},
+            client_message_id="cm_1",
+        )
+        with pytest.raises(RuntimeInvalidRequestError):
+            await runtime.start_turn(
+                "sess_x",
+                "ses_1",
+                "hello",
+                selections={"model": ultra},
+                client_message_id="cm_1",
+            )
+        assert len(client.prompts) == 1
+        # The identical retry still recovers the original receipt.
+        again = await runtime.start_turn(
+            "sess_x",
+            "ses_1",
+            "hello",
+            selections={"model": terra},
+            client_message_id="cm_1",
+        )
+        assert again.result["runID"] == "run_1"
+        assert client.prompts[1]["requestID"] == client.prompts[0]["requestID"]
+
+    run(exercise())
+
+
+def test_state_updates_republish_the_session_selection() -> None:
+    """A state refresh must not erase the model the user picked."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime, relay = connected_relay(host, client)
+        catalog = await runtime.list_model_catalog()
+        selection = selection_id_for(catalog, "cc-proxy", "gpt-5.6-terra", "ultra")
+        await runtime.update_session_selections("sess_x", "ses_1", {"model": selection})
+        runtime._register_session("ses_1", session_id="sess_x")
+
+        await relay._publish_state("sess_x", "ses_1", snapshot_payload("ses_1"))
+        published = host.session_state_update.await_args
+        assert published.kwargs["selections"] == {"model": selection}
+
+    run(exercise())
+
+
+def test_a_selection_missing_from_the_cache_is_re_read_before_it_is_refused() -> None:
+    """A model added after the cache was filled is still selectable."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = connected(host, client)
+        await runtime.list_model_catalog()
+        assert client.calls.count("list_providers") == 1
+        # A model the cached catalog has never seen, published on the next read.
+        client.providers["providers"][0]["models"]["gpt-6-new"] = model_payload(
+            "gpt-6-new", "GPT-6 New", provider_id="cc-proxy"
+        )
+        fresh = models.model_catalog(client.providers, revision=1)
+        selection = selection_id_for(fresh, "cc-proxy", "gpt-6-new", "ultra")
+
+        result = await runtime.update_session_selections(
+            "sess_x", "ses_1", {"model": selection}
+        )
+        assert result.ok is True
+        # The stale cache was not trusted: one forced re-read resolved it.
+        assert client.calls.count("list_providers") == 2
+        await runtime.start_turn("sess_x", "ses_1", "hello", client_message_id="cm_1")
+        assert client.prompts[0]["model"] == {
+            "providerID": "cc-proxy",
+            "modelID": "gpt-6-new",
+        }
+        assert client.prompts[0]["effort"] == "ultra"
+
+    run(exercise())
+
+
+def test_a_catalog_read_failure_does_not_invent_a_selection() -> None:
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = connected(host, client)
+        client.fail_providers = True
+        with pytest.raises(RuntimeUnavailableError):
+            await runtime.list_model_catalog()
+        with pytest.raises(RuntimeUnavailableError):
+            await runtime.start_turn(
+                "sess_x",
+                "ses_1",
+                "hello",
+                selections={"model": "sel_model_anything"},
+                client_message_id="cm_1",
+            )
+        assert client.prompts == []
 
     run(exercise())
 
@@ -1388,15 +1865,73 @@ def test_prompt_is_addressed_by_request_id() -> None:
 
     async def exercise() -> None:
         client = http_client(handler)
-        receipt = await client.prompt("ses_1", request_id="req_1", message="hello")
+        receipt = await client.prompt(
+            "ses_1",
+            request_id="req_1",
+            message="hello",
+            model={"providerID": "cc-proxy", "modelID": "gpt-5.6-terra"},
+            effort="ultra",
+        )
         await client.close()
         assert receipt == {"runID": "run_7", "acceptedAt": 5}
         assert seen[0] == {
             "sessionID": "ses_1",
             "requestID": "req_1",
+            "model": {"providerID": "cc-proxy", "modelID": "gpt-5.6-terra"},
+            "effort": "ultra",
+            "message": "hello",
+        }
+
+    run(exercise())
+
+
+def test_prompt_omits_the_selection_it_was_not_given() -> None:
+    """Neither field is invented: an absent selection stays absent."""
+
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(202, json={"runID": "run_7", "acceptedAt": 5})
+
+    async def exercise() -> None:
+        client = http_client(handler)
+        await client.prompt("ses_1", request_id="req_1", message="hello")
+        await client.prompt("ses_1", request_id="req_2", message="hello", effort="normal")
+        await client.close()
+        assert seen[0] == {
+            "sessionID": "ses_1",
+            "requestID": "req_1",
+            "message": "hello",
+        }
+        assert seen[1] == {
+            "sessionID": "ses_1",
+            "requestID": "req_2",
             "effort": "normal",
             "message": "hello",
         }
+
+    run(exercise())
+
+
+def test_list_providers_reads_the_global_catalog() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=provider_catalog())
+
+    async def exercise() -> None:
+        client = http_client(handler, directory="/srv/default")
+        payload = await client.list_providers()
+        await client.close()
+        assert seen[0].url.path == "/config/providers"
+        # Providers come from the server's own configuration, not a project.
+        assert "x-openscience-directory" not in seen[0].headers
+        assert [provider["id"] for provider in payload["providers"]] == [
+            "cc-proxy",
+            "local-lab",
+        ]
 
     run(exercise())
 
@@ -1412,6 +1947,20 @@ def test_prompt_requires_a_request_id_and_exactly_one_input() -> None:
             await client.prompt("ses_1", request_id="req_1", message="a", parts=[{"type": "text"}])
         with pytest.raises(ValueError):
             await client.prompt("ses_1", request_id="req_1", message="a", effort="turbo")
+        with pytest.raises(ValueError):
+            await client.prompt(
+                "ses_1",
+                request_id="req_1",
+                message="a",
+                model={"providerID": "", "modelID": "gpt-5.6-terra"},
+            )
+        with pytest.raises(ValueError):
+            await client.prompt(
+                "ses_1",
+                request_id="req_1",
+                message="a",
+                model={"providerID": "cc-proxy"},
+            )
         await client.close()
 
     run(exercise())
@@ -1801,10 +2350,29 @@ def test_declared_capabilities_are_implemented_ones() -> None:
     assert declared["attachments"] is True
     assert declared["interactions"] is True
     assert declared["ipc"] is True
-    assert declared["modelCatalog"] is False
+    assert declared["modelCatalog"] is True
     assert declared["permissionCatalog"] is False
     assert declared["commands"] is False
     assert declared["steerTurn"] is False
+
+
+def test_the_model_catalog_publishes_both_model_and_effort_capabilities() -> None:
+    """The effort picker is the catalog's reasoning items, so it is advertised too."""
+
+    async def exercise() -> None:
+        host = make_host()
+        runtime = build_runtime(host, client=FakeClient())
+        capabilities = await runtime.get_runtime_capabilities()
+        published = {
+            capability.capability_id: capability for capability in capabilities.capabilities
+        }
+        assert published["catalog.model"].supported is True
+        assert published["catalog.model"].available is True
+        assert published["catalog.effort"].supported is True
+        assert published["catalog.effort"].available is True
+        assert published["catalog.permission"].supported is False
+
+    run(exercise())
 
 
 # --- relay -----------------------------------------------------------------
@@ -2164,7 +2732,7 @@ def test_unsupported_operations_are_not_advertised() -> None:
             with pytest.raises(RuntimeUnsupportedError):
                 await runtime.steer_turn("sess_x", "ses_1", "more")
             with pytest.raises(RuntimeUnsupportedError):
-                await runtime.list_model_catalog()
+                await runtime.list_permission_catalog()
             with pytest.raises(RuntimeUnsupportedError):
                 await runtime.create_and_start_session(
                     "sess_x", "hello", runtime_options={"model": "x"}

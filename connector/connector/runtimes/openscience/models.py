@@ -2,19 +2,24 @@
 
 Everything here is a function of its arguments: the runtime owns transport and
 lifecycle, the relay owns cursors, and this module owns the translation so the
-mapping rules can be tested without a server. Two shapes recur:
+mapping rules can be tested without a server. Three shapes recur:
 
 * a **session** is OpenScience's ``ses_…`` record, and its transcript is the
   durable message list rather than the event journal — the journal is a bounded
   window, the transcript is not;
 * a **decision** (permission or question) is only actionable while the
   connected server still lists it in a fresh snapshot, so a notice always
-  carries the native request id that a decision is addressed to.
+  carries the native request id that a decision is addressed to;
+* a **model** comes from the server's own ``/config/providers`` catalog, and a
+  platform selection is only an opaque id until it is resolved back to the
+  provider, model and effort the server would run.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -35,6 +40,9 @@ from connector.runtime_protocol import (
     MessageTimelineItem,
     PlatformTimelineItem,
     ReasoningSystemContent,
+    RuntimeModelCatalog,
+    RuntimeModelItem,
+    RuntimeReasoningItem,
     RuntimeStatus,
     RuntimeTimelineItem,
     RuntimeTimelineSnapshot,
@@ -50,8 +58,20 @@ from connector.runtime_protocol import (
     ToolTimelineItem,
     complete_tool_content,
 )
+from connector.server.protocol import protocol_selection_id
 
 RUNTIME = "openscience"
+
+# The reasoning-effort vocabulary is OpenScience's own (`ResearchEffort`), and
+# it is a closed two-value enum on the server. The catalog republishes exactly
+# these ids and the prompt passes the chosen one through untouched: a third
+# value, or a translation into another runtime's labels, would name an effort
+# the server does not have.
+OPENSCIENCE_EFFORTS: tuple[str, str] = ("normal", "ultra")
+# `resolveResearchEffort` falls back to "normal", so that is the server's own
+# default and the value an unselected turn keeps sending.
+DEFAULT_EFFORT = "normal"
+_EFFORT_TITLES = {"normal": "Normal", "ultra": "Ultra"}
 
 PERMISSION_NOTICE_PREFIX = "notice_openscience_permission_"
 QUESTION_NOTICE_PREFIX = "notice_openscience_question_"
@@ -64,6 +84,219 @@ _ACTIVE_RUN_STATES = frozenset({"accepted", "running"})
 
 _SHELL_TOOLS = frozenset({"bash", "shell", "run", "terminal", "exec", "command"})
 _FILE_TOOLS = frozenset({"edit", "write", "patch", "str_replace", "multiedit", "notebookedit"})
+
+_CATALOG_SOURCE = "openscience.config.providers"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRoute:
+    """The native routing a platform model selection resolves to.
+
+    The platform only ever hands back the opaque ``selectionId`` it was shown,
+    so the provider/model pair — which is what ``POST /runtime/prompt`` needs —
+    has to be recovered from the catalog that produced the id.
+    """
+
+    provider_id: str
+    model_id: str
+    effort: str | None = None
+
+
+def model_catalog(payload: Mapping[str, Any], *, revision: int) -> RuntimeModelCatalog:
+    """Map ``GET /config/providers`` onto the platform's model catalog.
+
+    OpenScience owns the model configuration, so this is a translation and not
+    a policy: one item per provider/model pair, named exactly as the server
+    names it, with the provider's ``default`` model first in its group because
+    the Connector's catalog has no default marker of its own and the platform
+    falls back to the first enabled item. A model's ``capabilities.reasoning``
+    decides whether the two OpenScience effort values are offered as reasoning
+    items — the picker's effort options *are* those items, which is why the
+    effort capability is published alongside the model catalog.
+
+    Two models may legitimately share a name (the live catalog has twenty such
+    names across providers), so the title is qualified only when it is actually
+    ambiguous. Ids stay unique regardless: they are the routing pair.
+    """
+
+    data = _mapping(payload, "provider catalog")
+    raw_providers = data.get("providers")
+    if not isinstance(raw_providers, Sequence) or isinstance(raw_providers, (str, bytes)):
+        raise TypeError("OpenScience provider catalog must carry a providers array")
+    defaults = data.get("default") if isinstance(data.get("default"), Mapping) else {}
+
+    resolved: list[tuple[str, str, str, str, bool, Mapping[str, Any]]] = []
+    for raw_provider in raw_providers:
+        provider = _mapping(raw_provider, "provider")
+        provider_id = _required_string(provider.get("id"), "provider id")
+        provider_name = _optional_string(provider.get("name")) or provider_id
+        raw_models = provider.get("models")
+        if not isinstance(raw_models, Mapping):
+            continue
+        default_model_id = _optional_string(defaults.get(provider_id))
+        models = [model for model in raw_models.values() if isinstance(model, Mapping)]
+        # `default[providerID]` names the model OpenScience itself would run,
+        # so it leads its group; the rest keep the server's own order.
+        models.sort(key=lambda model: 0 if model.get("id") == default_model_id else 1)
+        for model in models:
+            model_id = _optional_string(model.get("id"))
+            if model_id is None:
+                continue
+            model_name = _optional_string(model.get("name")) or model_id
+            resolved.append(
+                (
+                    provider_id,
+                    provider_name,
+                    model_id,
+                    model_name,
+                    model_id == default_model_id,
+                    model,
+                )
+            )
+
+    provider_count_by_name = Counter(
+        (provider_id, model_name)
+        for provider_id, _, _, model_name, _, _ in resolved
+    )
+    providers_by_name: dict[str, set[str]] = {}
+    for provider_id, _, _, model_name, _, _ in resolved:
+        providers_by_name.setdefault(model_name, set()).add(provider_id)
+
+    items = tuple(
+        _model_item(
+            provider_id=provider_id,
+            provider_name=provider_name,
+            model_id=model_id,
+            model_name=model_name,
+            is_default=is_default,
+            model=model,
+            name_is_shared=len(providers_by_name[model_name]) > 1,
+            name_is_repeated=provider_count_by_name[(provider_id, model_name)] > 1,
+        )
+        for (
+            provider_id,
+            provider_name,
+            model_id,
+            model_name,
+            is_default,
+            model,
+        ) in resolved
+    )
+    return RuntimeModelCatalog(runtime=RUNTIME, revision=revision, models=items)
+
+
+def model_route(
+    catalog: RuntimeModelCatalog, selection_id: str
+) -> ModelRoute | None:
+    """Recover the native routing behind one selection id, if it is known.
+
+    A selection id that resolves to nothing is not silently treated as the
+    server default: the caller refuses it, because the user asked for a
+    specific model and quietly running another one is worse than an error.
+    """
+
+    for model in catalog.models:
+        provider_id = _metadata_string(model.metadata, "providerID")
+        model_id = _metadata_string(model.metadata, "modelID")
+        if provider_id is None or model_id is None:
+            continue
+        if model.selection_id == selection_id:
+            return ModelRoute(provider_id=provider_id, model_id=model_id)
+        for reasoning in model.reasoning_items:
+            if reasoning.selection_id == selection_id:
+                return ModelRoute(
+                    provider_id=provider_id, model_id=model_id, effort=reasoning.id
+                )
+    return None
+
+
+def effort_value(value: Any) -> str | None:
+    """Return the value only when it is an effort OpenScience actually accepts."""
+
+    return value if isinstance(value, str) and value in OPENSCIENCE_EFFORTS else None
+
+
+def _model_item(
+    *,
+    provider_id: str,
+    provider_name: str,
+    model_id: str,
+    model_name: str,
+    is_default: bool,
+    model: Mapping[str, Any],
+    name_is_shared: bool,
+    name_is_repeated: bool,
+) -> RuntimeModelItem:
+    status = _optional_string(model.get("status")) or "active"
+    reasoning = _reasoning_supported(model)
+    title = model_name
+    if name_is_shared:
+        title = f"{title} · {provider_name}"
+    if name_is_repeated:
+        title = f"{title} [{model_id}]"
+    return RuntimeModelItem(
+        # The provider/model pair, because the same model id is served by
+        # several providers and a platform id has to select exactly one route.
+        id=f"{provider_id}/{model_id}",
+        title=title,
+        selection_id=(
+            None
+            if reasoning
+            else protocol_selection_id(
+                RUNTIME, "model", _selection_identity(provider_id, model_id, None)
+            )
+        ),
+        reasoning_items=(
+            tuple(
+                RuntimeReasoningItem(
+                    id=effort,
+                    title=_EFFORT_TITLES[effort],
+                    selection_id=protocol_selection_id(
+                        RUNTIME, "model", _selection_identity(provider_id, model_id, effort)
+                    ),
+                    metadata={
+                        "source": _CATALOG_SOURCE,
+                        "effort": effort,
+                        "default": effort == DEFAULT_EFFORT,
+                    },
+                )
+                for effort in OPENSCIENCE_EFFORTS
+            )
+            if reasoning
+            else ()
+        ),
+        enabled=status == "active",
+        disabled_reason=(
+            None if status == "active" else f"OpenScience reports this model as {status}"
+        ),
+        metadata={
+            "source": _CATALOG_SOURCE,
+            "providerID": provider_id,
+            "providerName": provider_name,
+            "modelID": model_id,
+            "modelName": model_name,
+            "reasoning": reasoning,
+            "status": status,
+            "default": is_default,
+        },
+    )
+
+
+def _selection_identity(
+    provider_id: str, model_id: str, effort: str | None
+) -> dict[str, Any]:
+    """The routing a selection id commits to, hashed by the protocol helper."""
+
+    return {"provider_id": provider_id, "model_id": model_id, "effort": effort}
+
+
+def _reasoning_supported(model: Mapping[str, Any]) -> bool:
+    capabilities = model.get("capabilities")
+    return isinstance(capabilities, Mapping) and capabilities.get("reasoning") is True
+
+
+def _metadata_string(metadata: Mapping[str, Any], key: str) -> str | None:
+    return _optional_string(metadata.get(key))
 
 
 def session_meta(

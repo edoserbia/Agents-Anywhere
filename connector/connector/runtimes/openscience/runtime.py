@@ -39,6 +39,7 @@ from connector.runtime_protocol import (
     RuntimeConflictError,
     RuntimeIdentity,
     RuntimeInvalidRequestError,
+    RuntimeModelCatalog,
     RuntimeOperationResult,
     RuntimeTimelineSnapshot,
     RuntimeUnavailableError,
@@ -50,6 +51,7 @@ from connector.runtime_protocol import (
     SessionState,
 )
 from connector.runtime_protocol.host import RuntimeHostClient
+from connector.runtimes.catalog_revisions import runtime_catalog_revision
 from connector.runtimes.openscience import discovery, models, provider_config
 from connector.runtimes.openscience.client import (
     UNSCOPED,
@@ -88,6 +90,14 @@ MAX_STREAM_RETRY_SECONDS = 30.0
 # may have moved to another port.
 INVENTORY_FAILURES_BEFORE_REPROBE = 3
 MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024
+# The model catalog belongs to the server's configuration, not to this
+# connector, and it is read for every selection a turn carries. It is cached
+# briefly so a prompt does not pay for an 87 KB catalog read, and re-read
+# whenever a selection does not resolve against the cached copy.
+MODEL_CATALOG_CACHE_SECONDS = 30.0
+# Folded into the catalog revision alongside the config revision, the way the
+# other runtimes version a catalog that is not derived from config alone.
+OPENSCIENCE_MODEL_CATALOG_STATIC_REVISION = 1
 
 _ATTACHMENT_ID = re.compile(r"file_[\w-]{1,128}")
 _TERMINAL_RUN_EVENTS = {
@@ -110,6 +120,10 @@ _DECISION_EVENTS = {
     "question.replied",
     "question.rejected",
 }
+# Selection scopes this runtime understands. `model` carries the provider,
+# model and effort the platform's picker produced; `effort` is accepted on its
+# own so a caller that knows only the reasoning strength can still set it.
+_SELECTION_SCOPES = frozenset({"model", "effort"})
 
 ClientFactory = Callable[[str, Mapping[str, Any]], OpenScienceClient]
 Prober = Callable[[dict[str, Any]], Awaitable[discovery.OpenScienceDiscovery]]
@@ -118,13 +132,16 @@ Prober = Callable[[dict[str, Any]], Awaitable[discovery.OpenScienceDiscovery]]
 def runtime_capabilities() -> dict[str, bool]:
     """Capabilities this adapter actually implements.
 
-    Catalogs, commands and steering are absent rather than false-by-omission:
-    the platform reads these keys to decide which affordances to offer, and
-    advertising one this runtime cannot serve is worse than omitting it.
+    The model catalog is served from OpenScience's own ``/config/providers``,
+    and the reasoning-effort picker is that catalog's reasoning items, so
+    ``modelCatalog`` also publishes ``catalog.effort``. Permissions, commands
+    and steering are absent rather than false-by-omission: the platform reads
+    these keys to decide which affordances to offer, and advertising one this
+    runtime cannot serve is worse than omitting it.
     """
 
     return {
-        "modelCatalog": False,
+        "modelCatalog": True,
         "permissionCatalog": False,
         "sessionDiscovery": True,
         "sessionSnapshot": True,
@@ -178,6 +195,13 @@ class OpenScienceRuntime(AgentRuntime):
         # remembered from the inventory entry that discovered the session.
         self._directories: dict[str, str] = {}
         self._record_cache: dict[str, dict[str, Any]] = {}
+        # Platform session id -> the model/effort selection the platform made.
+        # The platform sends a selection once (`session.selections.update`) and
+        # not with every message, so the runtime is what keeps it applied; it
+        # is republished with every state update so a refresh cannot drop it.
+        self._selections: dict[str, dict[str, str | None]] = {}
+        # (monotonic read time, catalog) for the server-owned model catalog.
+        self._model_catalog_cache: tuple[float, RuntimeModelCatalog] | None = None
 
     @property
     def identity(self) -> RuntimeIdentity:
@@ -241,6 +265,39 @@ class OpenScienceRuntime(AgentRuntime):
 
     async def get_runtime_capabilities(self) -> RuntimeCapabilitySet:
         return self._capability_set()
+
+    async def list_model_catalog(
+        self,
+        query: str | None = None,
+        limit: int = 100,
+    ) -> RuntimeModelCatalog:
+        """Publish the models OpenScience is configured with.
+
+        The catalog is read from the server rather than declared here: the
+        models, their display names, which one each provider defaults to and
+        which of them reason are all OpenScience's configuration. Only
+        filtering and the page limit are applied locally.
+        """
+
+        catalog = await self._model_catalog()
+        selected = catalog.models
+        if query:
+            lowered = query.casefold()
+            selected = tuple(
+                model
+                for model in selected
+                if lowered in model.id.casefold()
+                or lowered in model.title.casefold()
+                or any(
+                    lowered in str(model.metadata.get(key, "")).casefold()
+                    for key in ("providerID", "providerName", "modelID")
+                )
+            )
+        return RuntimeModelCatalog(
+            runtime=RUNTIME,
+            revision=catalog.revision,
+            models=selected[: max(0, limit)],
+        )
 
     async def list_sessions(
         self,
@@ -442,6 +499,67 @@ class OpenScienceRuntime(AgentRuntime):
             }
         )
 
+    async def update_session_selections(
+        self,
+        session_id: str,
+        external_session_id: str | None,
+        selections: Mapping[str, str | None],
+    ) -> RuntimeOperationResult:
+        """Validate and remember the model and effort this session will use.
+
+        A selection is only accepted once it resolves against the catalog the
+        server itself publishes, so the platform can never pin a model
+        OpenScience does not have. The choice is kept here because the platform
+        sends it once and not with every message, and it is republished with
+        every state update so a refresh cannot drop it.
+        """
+
+        if not selections:
+            return RuntimeOperationResult(
+                ok=False,
+                code="openscience_empty_selection_update",
+                message="At least one selection scope is required.",
+                result={
+                    "sessionId": session_id,
+                    "externalSessionId": external_session_id,
+                },
+            )
+        unsupported = set(selections) - _SELECTION_SCOPES
+        if unsupported:
+            return RuntimeOperationResult(
+                ok=False,
+                code="openscience_unsupported_selection_scope",
+                message=f"Unsupported OpenScience selection scope: {min(unsupported)}",
+                result={
+                    "sessionId": session_id,
+                    "externalSessionId": external_session_id,
+                    "selections": dict(selections),
+                },
+            )
+        effective = self._effective_selections(session_id, selections)
+        try:
+            await self._selection_route(effective)
+        except RuntimeInvalidRequestError as error:
+            return RuntimeOperationResult(
+                ok=False,
+                code="openscience_invalid_selection",
+                message=str(error),
+                result={
+                    "sessionId": session_id,
+                    "externalSessionId": external_session_id,
+                    "selections": effective,
+                },
+            )
+        self._selections[session_id] = effective
+        return RuntimeOperationResult(
+            result={
+                "updated": True,
+                "sessionId": session_id,
+                "externalSessionId": external_session_id,
+                "selections": effective,
+            }
+        )
+
     async def interrupt_session(
         self,
         session_id: str,
@@ -561,17 +679,19 @@ class OpenScienceRuntime(AgentRuntime):
             revision=1,
             capabilities=tuple(
                 RuntimeCapability(
-                    capability_id=_capability_id(name),
+                    capability_id=protocol_id,
                     scope="runtime",
                     runtime=RUNTIME,
-                    supported=enabled,
-                    available=enabled,
-                    allowed=enabled,
-                    unavailable_reason=None if enabled else "openscience.capabilities",
-                    metadata={"inventoryKey": name},
+                    supported=declared[inventory_key],
+                    available=declared[inventory_key],
+                    allowed=declared[inventory_key],
+                    unavailable_reason=(
+                        None if declared[inventory_key] else "openscience.capabilities"
+                    ),
+                    metadata={"inventoryKey": inventory_key},
                 )
-                for name, enabled in declared.items()
-                if _capability_id(name) is not None
+                for inventory_key, protocol_id in _CAPABILITY_IDS
+                if inventory_key in declared
             ),
             metadata={"source": "openscience.runtime.capabilities", **declared},
         )
@@ -676,6 +796,75 @@ class OpenScienceRuntime(AgentRuntime):
                     )
                 )
 
+    def _effective_selections(
+        self,
+        session_id: str,
+        selections: Mapping[str, str | None] | None,
+    ) -> dict[str, str | None]:
+        """Merge one update into the session's remembered selection.
+
+        The platform patches single scopes, so an update naming only the model
+        must not forget an effort chosen earlier (and the other way round).
+        """
+
+        effective = dict(self._selections.get(session_id, {}))
+        effective.update(dict(selections or {}))
+        return effective
+
+    async def _model_catalog(self, *, force: bool = False) -> RuntimeModelCatalog:
+        """Read the server's model catalog, briefly cached.
+
+        The catalog is the server's configuration and only changes when the
+        user edits it, so a short cache keeps a prompt from paying for a large
+        read while still noticing a change on the next turn.
+        """
+
+        cached = self._model_catalog_cache
+        now = monotonic()
+        if (
+            not force
+            and cached is not None
+            and now - cached[0] < MODEL_CATALOG_CACHE_SECONDS
+        ):
+            return cached[1]
+        client = await self._ensure_client()
+        payload = await self._call(client.list_providers, "config.providers")
+        catalog = models.model_catalog(
+            payload,
+            revision=runtime_catalog_revision(
+                self.config.revision, OPENSCIENCE_MODEL_CATALOG_STATIC_REVISION
+            ),
+        )
+        self._model_catalog_cache = (now, catalog)
+        return catalog
+
+    async def _selection_route(
+        self,
+        selections: Mapping[str, str | None],
+        *,
+        force_catalog: bool = False,
+    ) -> models.ModelRoute | None:
+        """Resolve a platform model selection onto the server's routing.
+
+        A selection the cached catalog does not know is checked once more
+        against a fresh read before it is refused: the user may have picked a
+        model that appeared since the cache was filled.
+        """
+
+        selection_id = _optional_string(selections.get("model"))
+        if selection_id is None:
+            return None
+        route = models.model_route(
+            await self._model_catalog(force=force_catalog), selection_id
+        )
+        if route is None and not force_catalog:
+            route = models.model_route(
+                await self._model_catalog(force=True), selection_id
+            )
+        if route is None:
+            raise RuntimeInvalidRequestError("unknown OpenScience model selection")
+        return route
+
     async def _submit(
         self,
         session_id: str,
@@ -710,8 +899,29 @@ class OpenScienceRuntime(AgentRuntime):
             message = None
         else:
             parts, message = None, content
-        effort = _effort(selections)
-        fingerprint = _prompt_fingerprint(message, parts, effort)
+        # The turn's own selection wins, and it also becomes the session's
+        # selection: the platform patches a selection once and then sends
+        # messages without one, so a turn that names a model is a change of
+        # preference, not a one-off.
+        effective = self._effective_selections(session_id, selections)
+        route = await self._selection_route(effective)
+        if selections:
+            self._selections[session_id] = effective
+        model = (
+            {"providerID": route.provider_id, "modelID": route.model_id}
+            if route is not None
+            else None
+        )
+        # OpenScience requires an effort on every prompt and its own default is
+        # "normal" (`resolveResearchEffort`), so an unselected turn keeps
+        # sending that default: omitting the field is rejected as invalid input
+        # rather than treated as "use your default".
+        effort = (
+            (route.effort if route is not None else None)
+            or models.effort_value(effective.get("effort"))
+            or models.DEFAULT_EFFORT
+        )
+        fingerprint = _prompt_fingerprint(message, parts, model, effort)
         key = _turn_key(external_session_id, client_message_id)
         record = await self._read_record(key)
         if record is not None and record.get("fingerprint") != fingerprint:
@@ -737,6 +947,7 @@ class OpenScienceRuntime(AgentRuntime):
                 request_id=request_id,
                 message=message,
                 parts=parts,
+                model=model,
                 effort=effort,
                 directory=self._directory_for(external_session_id),
             ),
@@ -1230,6 +1441,10 @@ class OpenScienceRelay:
             external_session_id=external,
             status_reason=state.status_reason,
             error=state.error,
+            # The platform replaces the stored selection with whatever a state
+            # update carries, so the session's chosen model and effort are
+            # republished here; omitting them would erase the user's choice.
+            selections=self.runtime._selections.get(platform, {}),
             metadata=state.metadata,
         )
         for notice in models.notices(
@@ -1330,19 +1545,20 @@ class OpenScienceRelay:
             )
 
 
-def _capability_id(inventory_key: str) -> str | None:
-    """Map an inventory capability key onto the protocol capability id."""
-
-    return {
-        "modelCatalog": "catalog.model",
-        "permissionCatalog": "catalog.permission",
-        "startTurn": "session.send_message",
-        "steerTurn": "session.steer",
-        "interruptTurn": "session.interrupt",
-        "commands": "session.commands",
-        "interactions": "session.interaction.approval",
-        "attachments": "runtime.attachment",
-    }.get(inventory_key)
+# Inventory capability key -> protocol capability id. `modelCatalog` publishes
+# two ids because the effort picker is the model catalog's reasoning items, the
+# same pairing `connector/server/capabilities.py` applies to this runtime.
+_CAPABILITY_IDS: tuple[tuple[str, str], ...] = (
+    ("modelCatalog", "catalog.model"),
+    ("modelCatalog", "catalog.effort"),
+    ("permissionCatalog", "catalog.permission"),
+    ("startTurn", "session.send_message"),
+    ("steerTurn", "session.steer"),
+    ("interruptTurn", "session.interrupt"),
+    ("commands", "session.commands"),
+    ("interactions", "session.interaction.approval"),
+    ("attachments", "runtime.attachment"),
+)
 
 
 def _require_protocol(version: str) -> None:
@@ -1350,22 +1566,27 @@ def _require_protocol(version: str) -> None:
         raise RuntimeUnsupportedError(f"OpenScience runtime protocol {version}")
 
 
-def _effort(selections: Mapping[str, str | None] | None) -> str:
-    value = (selections or {}).get("effort")
-    return value if value in ("normal", "ultra") else "normal"
-
-
 def _prompt_fingerprint(
-    message: str | None, parts: list[dict[str, Any]] | None, effort: str
+    message: str | None,
+    parts: list[dict[str, Any]] | None,
+    model: Mapping[str, str] | None,
+    effort: str,
 ) -> str:
     """Bind a requestID to the exact input it was admitted with.
 
-    The server answers 409 when a requestID is reused with different input, so
-    the same comparison is made locally to explain the conflict instead of
-    surfacing a bare transport error.
+    The model and effort are part of that input: the server answers 409 when a
+    requestID is reused with different input, so the same comparison is made
+    locally — including the selection — to explain the conflict instead of
+    surfacing a bare transport error, and to stop a retry from silently running
+    a different model under an id the server already admitted.
     """
 
-    payload = {"message": message, "parts": parts, "effort": effort}
+    payload = {
+        "message": message,
+        "parts": parts,
+        "model": tuple(sorted(model.items())) if model is not None else None,
+        "effort": effort,
+    }
     encoded = repr(sorted(payload.items(), key=lambda item: item[0]))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
