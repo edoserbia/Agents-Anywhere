@@ -273,6 +273,7 @@ class DevicesApi(
             status = RemoteDeviceRuntimeStatus.fromWireValue(optString("status", "unknown")),
             discovery = optJSONObject("discovery").toMap(),
             metadata = optJSONObject("metadata").toMap(),
+            capabilities = optJSONObject("capabilities").toBooleanMap(),
             schema = optJSONObject("schema")?.toMap(),
             uiSchema = optJSONObject("uiSchema").toMap(),
             config = optJSONObject("config")?.toMap(),

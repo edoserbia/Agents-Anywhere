@@ -33,6 +33,14 @@ data class RemoteDeviceRuntime(
     val status: RemoteDeviceRuntimeStatus,
     val discovery: Map<String, Any?>,
     val metadata: Map<String, Any?> = emptyMap(),
+    /**
+     * The runtime type's own capability flags, published with every runtime in
+     * the device inventory. The server reads `createProject` from the same map
+     * before it lets a runtime create a project, so the list is the one place a
+     * client can tell which runtimes own project creation without loading each
+     * runtime's capability set in turn.
+     */
+    val capabilities: Map<String, Boolean> = emptyMap(),
     val schema: Map<String, Any?>?,
     val uiSchema: Map<String, Any?>,
     val config: Map<String, Any?>?,

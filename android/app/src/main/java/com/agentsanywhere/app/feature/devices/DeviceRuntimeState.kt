@@ -23,6 +23,8 @@ data class DeviceRuntime(
     val status: DeviceRuntimeStatus,
     val discovery: Map<String, Any?>,
     val metadata: Map<String, Any?> = emptyMap(),
+    /** The runtime type's own capability flags, as published in the inventory. */
+    val capabilities: Map<String, Boolean> = emptyMap(),
     val schema: Map<String, Any?>?,
     val uiSchema: Map<String, Any?>,
     val config: Map<String, Any?>?,
@@ -233,6 +235,7 @@ internal fun RemoteDeviceRuntime.toDeviceRuntime(): DeviceRuntime {
         status = status.toDeviceRuntimeStatus(),
         discovery = discovery,
         metadata = metadata,
+        capabilities = capabilities,
         schema = schema,
         uiSchema = uiSchema,
         config = config,

@@ -83,8 +83,13 @@ export function ProjectEditorDialog({
   }>
   preferredConnectorId?: string
   /**
-   * The runtime the caller already chose, when it has one. The form hides its
-   * path field only when that runtime creates project directories itself.
+   * The runtime the caller already chose by hand, when it has one. The form
+   * hides its path field only when that runtime creates project directories
+   * itself. A runtime the caller merely defaulted to must not be passed: with
+   * no choice the form prefers the device's own project-creating runtime,
+   * because "New project" only means something for an engine that can create
+   * one — for every other engine the directory *is* the project, so the user
+   * is really just picking an existing folder.
    */
   preferredRuntimeId?: string
   projects: ProjectView[]

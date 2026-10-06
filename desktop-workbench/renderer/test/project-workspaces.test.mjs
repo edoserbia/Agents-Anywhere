@@ -149,6 +149,18 @@ test("without a named runtime the device's active path-creating runtime answers"
   assert.equal(projectCreatingRuntime(undefined), null)
 })
 
+test("a hand-picked engine decides even when the device hosts several project creators", () => {
+  const runtimes = [
+    runtime("openscience-1", { createProject: true }),
+    runtime("openscience-2", { createProject: true }),
+  ]
+  // The user's engine wins for the rest of the flow...
+  assert.equal(projectCreatingRuntime(runtimes, "openscience-2")?.runtimeId, "openscience-2")
+  // ...while no choice at all is not a choice: the device's own first
+  // project-creating runtime answers, unranked.
+  assert.equal(projectCreatingRuntime(runtimes)?.runtimeId, "openscience-1")
+})
+
 test("the create request names exactly one workspace source", () => {
   assert.deepEqual(
     projectCreateRequest({ name: "analysis", connectorId: "mac", runtimeId: "openscience", workspacePath: "/ignored" }),

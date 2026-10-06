@@ -56,6 +56,7 @@ import com.agentsanywhere.app.model.AgentProject
 import com.agentsanywhere.app.model.AgentSession
 import com.agentsanywhere.app.feature.sessions.availableProjectName
 import com.agentsanywhere.app.feature.sessions.activeNewSessionRuntimes
+import com.agentsanywhere.app.feature.sessions.createsProject
 import com.agentsanywhere.app.feature.sessions.workspaceProject
 import com.agentsanywhere.app.feature.sessions.workspaceProjectName
 import com.agentsanywhere.app.feature.sessions.workspacePathKey
@@ -111,7 +112,10 @@ fun NewSessionScreen(
         sessionsState.devices.filter { it.online }
     }
     val inventory = rememberNewSessionRuntimeInventory(
-        connectorIds = if (projectOnly) emptyList() else onlineDevices.map { it.id },
+        // The project form also needs the device's runtimes: which engine it
+        // opens on, and whether that engine owns the project directory, both
+        // come from the inventory's own capability flags.
+        connectorIds = onlineDevices.map { it.id },
         onLoad = onListRuntimes,
         loadError = stringResource(R.string.new_session_runtime_load_failed),
     )
@@ -160,6 +164,15 @@ fun NewSessionScreen(
     var expandedConfiguration by remember { mutableStateOf<NewSessionConfigurationKey?>(null) }
     val workspaceListState = rememberLazyListState()
     var creatingProject by rememberSaveable { mutableStateOf(projectOnly) }
+    /**
+     * Whether the user picked this flow's engine by hand.
+     *
+     * A defaulted engine is not a choice: only an engine the user actually
+     * tapped outlives the switch into "New project", where the form is free to
+     * open on a runtime that owns project creation instead. Nothing is stored
+     * for it — the choice lives as long as this form does.
+     */
+    var runtimeChosenExplicitly by rememberSaveable { mutableStateOf(false) }
     val devices = if (creatingProject) onlineDevices else onlineDevices.filter { device ->
         device.id !in inventory.errors && activeNewSessionRuntimes(inventory.results[device.id]?.runtimes.orEmpty()).isNotEmpty()
     }
@@ -193,6 +206,21 @@ fun NewSessionScreen(
         } ?: preference
     }
 
+    /**
+     * The engine to keep when a device's runtime inventory arrives.
+     *
+     * A plain session keeps the device's remembered engine, as it always has. A
+     * project keeps only an engine the user picked by hand in this flow: its
+     * form has to stay free to open on a project-creating runtime instead, and
+     * the remembered engine is merely whatever the last session happened to use.
+     */
+    fun preferredRuntimeIdFor(connectorId: String): String? = if (creatingProject) {
+        runtimeSelection.selectedRuntimeId
+            ?.takeIf { runtimeChosenExplicitly && runtimeSelection.connectorId == connectorId }
+    } else {
+        preference?.runtimeId?.takeIf { preference?.connectorId == connectorId }
+    }
+
     fun selectDevice(id: String?, persist: Boolean = false) {
         if (selectedDeviceId != id) {
             selectedDeviceId = id
@@ -205,11 +233,13 @@ fun NewSessionScreen(
             pathLoading = false
             projectCreateError = null
             choosePath = false
+            // A chosen engine belongs to the device it was chosen for.
+            runtimeChosenExplicitly = false
         }
         if (id != null) {
             val next = runtimeSelection.beginRuntimeInventory(id)
             runtimeSelection = inventory.results[id]?.let {
-                next.replaceRuntimeInventory(it, preference?.runtimeId?.takeIf { preference?.connectorId == id })
+                next.replaceRuntimeInventory(it, preferredRuntimeIdFor(id), creatingProject)
             } ?: next
             if (persist) persistSelection(NewSessionConfigurationKey.Device)
         }
@@ -297,12 +327,15 @@ fun NewSessionScreen(
         !runtimeSelection.runtimesLoading && runtimeSelection.runtimesErrorMessage == null &&
         activeNewSessionRuntimes(inventory.results[selectedDevice.id]?.runtimes.orEmpty()).any { it.id == selectedRuntime?.id }
     // A runtime that creates project directories owns the workspace, so the
-    // project form asks for a name only. The capabilities must belong to the
-    // device that is selected right now, or the form would hide its path field
-    // for a runtime the user has already switched away from.
-    val projectRuntimeId = selectedRuntime
-        ?.takeIf { runtimeSelection.connectorId == selectedDevice?.id && runtimeSelection.runtimeCreatesProject }
-        ?.id
+    // project form asks for a name only. The device's inventory answers as soon
+    // as its runtimes arrive — the same flag the server reads before it lets a
+    // runtime create a project — while the capability set only arrives once that
+    // runtime's own details have loaded. Either source must belong to the device
+    // that is selected right now, or the form would hide its path field for a
+    // runtime the user has already switched away from.
+    val selectedRuntimeCreatesProject = runtimeSelection.connectorId == selectedDevice?.id &&
+        (selectedRuntime?.createsProject == true || runtimeSelection.runtimeCreatesProject)
+    val projectRuntimeId = selectedRuntime?.id?.takeIf { selectedRuntimeCreatesProject }
     val setupState = if (creatingProject) null else newSessionSetupState(
         sessions = sessionsState,
         inventory = inventory,
@@ -373,8 +406,7 @@ fun NewSessionScreen(
         }
     }
 
-    LaunchedEffect(selectedDevice?.id, inventory.results[selectedDevice?.id], inventory.errors[selectedDevice?.id], preference?.connectorId, preference?.runtimeId, creatingProject) {
-        if (creatingProject) return@LaunchedEffect
+    LaunchedEffect(selectedDevice?.id, inventory.results[selectedDevice?.id], inventory.errors[selectedDevice?.id], preference?.connectorId, preference?.runtimeId, creatingProject, runtimeChosenExplicitly) {
         val connectorId = selectedDevice?.id
         if (connectorId == null) {
             runtimeSelection = NewSessionRuntimeSelectionState(
@@ -384,7 +416,7 @@ fun NewSessionScreen(
         } else {
             val next = runtimeSelection.beginRuntimeInventory(connectorId)
             runtimeSelection = inventory.results[connectorId]?.let {
-                next.replaceRuntimeInventory(it, preference?.runtimeId?.takeIf { preference?.connectorId == connectorId })
+                next.replaceRuntimeInventory(it, preferredRuntimeIdFor(connectorId), creatingProject)
             } ?: next
             inventory.errors[connectorId]?.let {
                 runtimeSelection = runtimeSelection.failRuntimeInventory(connectorId, it)
@@ -393,7 +425,10 @@ fun NewSessionScreen(
     }
 
     LaunchedEffect(selectedDevice?.id, runtimeSelection.connectorId, selectedRuntime?.id, selectedRuntime?.type, creatingProject, setupState?.reason) {
-        if (!creatingProject && setupState == null && selectedDevice != null && selectedRuntime != null && runtimeSelection.connectorId == selectedDevice.id) {
+        // The project form reads the selected runtime's capability set to decide
+        // whether it asks for a directory, so details load while creating a
+        // project too — and are then ready for the session that follows.
+        if (setupState == null && selectedDevice != null && selectedRuntime != null && runtimeSelection.connectorId == selectedDevice.id) {
             loadRuntimeDetails()
         }
     }
@@ -710,7 +745,14 @@ fun NewSessionScreen(
             ?.takeIf { id -> onlineDevices.any { it.id == id } }
             ?: preference?.connectorId?.takeIf { id -> onlineDevices.any { it.id == id } }
             ?: onlineDevices.firstOrNull()?.id
+        if (preferredDeviceId != selectedDeviceId) {
+            // A chosen engine belongs to the device it was chosen for.
+            runtimeChosenExplicitly = false
+        }
         selectedDeviceId = preferredDeviceId
+        // The inventory effect re-reads this device's runtimes in project mode,
+        // which is what lets the form open on an engine that can create a
+        // project rather than on whichever engine a session would default to.
     }
 
     fun createProject(confirmRename: Boolean = false) {
@@ -935,6 +977,7 @@ fun NewSessionScreen(
                                 selectDevice(id, persist = !creatingProject)
                             }
                             NewSessionConfigurationKey.Agent -> {
+                                runtimeChosenExplicitly = true
                                 runtimeSelection = runtimeSelection.selectRuntime(id)
                             }
                             NewSessionConfigurationKey.Model -> {

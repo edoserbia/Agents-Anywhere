@@ -266,6 +266,15 @@ export function TaskComposer() {
   )
 
   const [selectedAgent, setSelectedAgent] = React.useState(agentOptions[0]?.id ?? "")
+  /**
+   * Whether the user picked this engine by hand.
+   *
+   * A defaulted engine is not a choice: only an engine the user actually chose
+   * is handed to the project form, which otherwise opens on the device's own
+   * project-creating runtime. Nothing is stored for it — the choice lives as
+   * long as this composer does.
+   */
+  const [agentChosenExplicitly, setAgentChosenExplicitly] = React.useState(false)
   const selectedRuntime = activeRuntimes(runtimeInventory[selectedConnectorId])
     .find((runtime) => runtime.runtimeId === selectedAgent) ?? null
   // A runtime that creates project directories must not be offered a raw
@@ -612,6 +621,8 @@ export function TaskComposer() {
     const nextAgent = preferredAgent && targetOptions.some((runtime) => runtime.runtimeId === preferredAgent)
       ? preferredAgent
       : targetOptions[0]?.runtimeId ?? ""
+    // The engine belongs to the device it was chosen for.
+    setAgentChosenExplicitly(false)
     setSelectedDevice(connectorId)
     if (nextAgent) {
       setSelectedAgent(nextAgent)
@@ -634,6 +645,7 @@ export function TaskComposer() {
 
   const handleAgentChange = React.useCallback((agent: string) => {
     if (!selectedConnectorId || !agentOptions.some((option) => option.id === agent)) return
+    setAgentChosenExplicitly(true)
     setSelectedAgent(agent)
     persistTargetPreference(selectedConnectorId, agent)
   }, [agentOptions, persistTargetPreference, selectedConnectorId])
@@ -1069,7 +1081,10 @@ export function TaskComposer() {
         editor={projectEditor}
         connectors={connectors}
         preferredConnectorId={selectedConnectorId}
-        preferredRuntimeId={selectedRuntime?.runtimeId}
+        // Only an engine the user picked by hand is a choice. A defaulted one
+        // leaves the form free to open on the device's project-creating
+        // runtime, which is the mode "New project" is actually asking for.
+        preferredRuntimeId={agentChosenExplicitly ? selectedRuntime?.runtimeId : undefined}
         projects={projects}
         onOpenChange={(open) => {
           if (!open) setProjectEditor(null)

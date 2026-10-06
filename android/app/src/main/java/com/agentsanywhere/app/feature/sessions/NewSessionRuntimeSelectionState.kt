@@ -17,6 +17,24 @@ const val ATTACHMENT_CAPABILITY = "runtime.attachment"
  */
 const val PROJECT_CREATE_CAPABILITY = "project.create"
 
+/**
+ * The inventory spelling of [PROJECT_CREATE_CAPABILITY].
+ *
+ * A runtime type declares `createProject` as a plain flag in its descriptor,
+ * and the device's runtime list carries that map for every runtime at once —
+ * it is the same field the server reads before it lets a runtime create a
+ * project. Reading it here tells the project form which runtimes own project
+ * creation before any of their capability sets has been loaded.
+ */
+const val PROJECT_CREATE_INVENTORY_FLAG = "createProject"
+
+/**
+ * True when this runtime's own descriptor promises to create project
+ * directories, as published with every runtime in the device inventory.
+ */
+val DeviceRuntime.createsProject: Boolean
+    get() = capabilities[PROJECT_CREATE_INVENTORY_FLAG] == true
+
 data class NewSessionRuntimeRequestKey(
     val connectorId: String,
     val runtimeId: String,
@@ -283,11 +301,37 @@ data class NewSessionRuntimeSelectionState(
         }
     }
 
-    fun replaceRuntimeInventory(result: DeviceRuntimeList, preferredRuntimeId: String? = null): NewSessionRuntimeSelectionState {
+    /**
+     * Adopt a device's runtime inventory, choosing which runtime is selected.
+     *
+     * [preferredRuntimeId] is a choice the caller already made and wants kept —
+     * a runtime the user picked by hand, or the device's remembered one for a
+     * plain session. [creatingProject] says the form is creating a project
+     * rather than starting a session, which changes what an unstated choice
+     * should default to:
+     *
+     * "New project" only means something for an engine that can create one —
+     * for every other engine the directory *is* the project, so the user is
+     * really just picking an existing folder. Preferring a project-creating
+     * engine opens the form in the mode that matches the action, without
+     * changing which engine a plain new session starts on. Several
+     * project-creating runtimes are not ranked: the first in inventory order
+     * wins.
+     */
+    fun replaceRuntimeInventory(
+        result: DeviceRuntimeList,
+        preferredRuntimeId: String? = null,
+        creatingProject: Boolean = false,
+    ): NewSessionRuntimeSelectionState {
         if (result.connectorId != connectorId) return this
         val selectableRuntimes = activeNewSessionRuntimes(result.runtimes)
+        val projectCreatingRuntimeId = selectableRuntimes
+            .firstOrNull(DeviceRuntime::createsProject)
+            ?.id
+            ?.takeIf { creatingProject }
         val nextRuntimeId = preferredRuntimeId
             ?.takeIf { preferred -> selectableRuntimes.any { it.id == preferred } }
+            ?: projectCreatingRuntimeId
             ?: selectedRuntimeId
             ?.takeIf { selected -> selectableRuntimes.any { it.id == selected } }
             ?: selectableRuntimes.firstOrNull()?.id

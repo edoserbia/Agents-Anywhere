@@ -23,6 +23,14 @@ export function runtimeCreatesProject(
  * active path-creating runtime answers instead, which is the only honest answer
  * for a form that has no agent picker — and it must already be active, because
  * a stopped runtime cannot create anything.
+ *
+ * The unnamed case is what a project form gets when the caller has no engine of
+ * its own to keep: "New project" only means something for an engine that can
+ * create one — for every other engine the directory *is* the project, so the
+ * user is really just picking an existing folder. Preferring a project-creating
+ * engine opens the form in the mode that matches the action, without changing
+ * which engine a plain new session starts on. Several project-creating runtimes
+ * are not ranked: the first in the device's own order wins.
  */
 export function projectCreatingRuntime(
   runtimes: DeviceRuntimeView[] | undefined,

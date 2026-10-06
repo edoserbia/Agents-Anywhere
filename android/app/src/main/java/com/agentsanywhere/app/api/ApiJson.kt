@@ -38,6 +38,11 @@ internal fun JSONObject?.toMap(): Map<String, Any?> {
     }
 }
 
+internal fun JSONObject?.toBooleanMap(): Map<String, Boolean> {
+    if (this == null) return emptyMap()
+    return keys().asSequence().associateWith { key -> optBoolean(key, false) }
+}
+
 internal fun Map<String, Any?>.toJsonObject(): JSONObject {
     val json = JSONObject()
     forEach { (key, value) ->
