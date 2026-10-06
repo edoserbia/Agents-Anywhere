@@ -528,6 +528,31 @@ class OpenScienceRuntime(AgentRuntime):
             lambda: client.snapshot(external_session_id), "runtime.snapshot"
         )
 
+    async def _publish_meta(self, external_session_id: str, payload: Mapping[str, Any]) -> None:
+        """Publish one session's identity, and where it came from."""
+
+        platform = self._register_session(external_session_id)
+        meta = models.session_meta(payload, session_id=platform)
+        await self.host.session_meta_upsert(
+            session_id=platform,
+            runtime=RUNTIME,
+            external_session_id=external_session_id,
+            title=meta.title,
+            cwd=meta.cwd,
+            ordering_time=meta.ordering_time,
+            metadata=meta.metadata,
+        )
+        if meta.source_state is not None:
+            with suppress(Exception):
+                await self.host.session_source_update(
+                    SessionSourceObservation(
+                        session_id=platform,
+                        external_session_id=external_session_id,
+                        runtime=RUNTIME,
+                        state=meta.source_state,
+                    )
+                )
+
     async def _submit(
         self,
         session_id: str,
@@ -548,12 +573,20 @@ class OpenScienceRuntime(AgentRuntime):
             raise RuntimeInvalidRequestError(
                 "a stable clientMessageId is required to submit a turn"
             )
-        parts = await self._attachment_parts(session_id, attachments)
-        message = None if parts else content
-        if message is None and not content.strip() and not parts:
+        attachment_parts = await self._attachment_parts(session_id, attachments)
+        if not content.strip() and not attachment_parts:
             raise RuntimeInvalidRequestError("a message or an attachment is required")
-        if message is None and content.strip():
-            parts = [{"type": "text", "text": content}, *parts]
+        # The API takes exactly one of `message` or `parts`, so a plain turn
+        # stays a message and only a rich turn becomes parts.
+        message: str | None
+        parts: list[dict[str, Any]] | None
+        if attachment_parts:
+            parts = (
+                [{"type": "text", "text": content}] if content.strip() else []
+            ) + attachment_parts
+            message = None
+        else:
+            parts, message = None, content
         effort = _effort(selections)
         fingerprint = _prompt_fingerprint(message, parts, effort)
         key = _turn_key(external_session_id, client_message_id)
@@ -955,27 +988,7 @@ class OpenScienceRelay:
             self._cursor_dirty.add(external)
 
     async def _publish_meta(self, external: str, payload: Mapping[str, Any]) -> None:
-        platform = self.runtime._register_session(external)
-        meta = models.session_meta(payload, session_id=platform)
-        await self.host.session_meta_upsert(
-            session_id=platform,
-            runtime=RUNTIME,
-            external_session_id=external,
-            title=meta.title,
-            cwd=meta.cwd,
-            ordering_time=meta.ordering_time,
-            metadata=meta.metadata,
-        )
-        if meta.source_state is not None:
-            with suppress(Exception):
-                await self.host.session_source_update(
-                    SessionSourceObservation(
-                        session_id=platform,
-                        external_session_id=external,
-                        runtime=RUNTIME,
-                        state=meta.source_state,
-                    )
-                )
+        await self.runtime._publish_meta(external, payload)
 
     async def _stream(self, external: str) -> None:
         backoff = STREAM_RETRY_SECONDS
