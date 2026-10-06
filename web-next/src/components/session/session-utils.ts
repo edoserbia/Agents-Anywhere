@@ -28,6 +28,7 @@ export function runtimeLabel(runtime: string): string {
   if (runtime === "claude") return "Claude Code"
   if (runtime === "dsh") return "DeepSeek Harness"
   if (runtime === "opencode") return "OpenCode"
+  if (runtime === "openscience") return "OpenScience"
   return runtime.slice(0, 1).toUpperCase() + runtime.slice(1)
 }
 

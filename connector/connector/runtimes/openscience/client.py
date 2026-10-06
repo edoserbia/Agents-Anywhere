@@ -1,0 +1,481 @@
+"""Async HTTP and SSE transport for the OpenScience runtime protocol.
+
+This client only ever talks to a server somebody else started: OpenScience owns
+the agent loop, the permissions and the event journal, and the Connector is a
+reader of them. Two protocol properties shape the whole module:
+
+* a prompt is admitted by ``requestID``, so a transport failure after a
+  submission is ambiguous rather than failed. Nothing here retries a command;
+  recovery means re-reading the receipt with the same id;
+* events are sequenced per session and retained in a bounded window, so a
+  cursor can expire. That is reported as its own error kind, because the only
+  correct recovery is a fresh snapshot.
+"""
+
+from __future__ import annotations
+
+import json
+import urllib.parse
+from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
+from typing import Any
+
+import httpx
+
+from connector.runtimes.openscience import discovery, provider_config
+
+# Payload ceilings mirror the reference SDK: a runtime response is bounded, and
+# a single SSE frame that exceeds its budget is a protocol failure rather than
+# something to hold in memory.
+MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+MAX_EVENT_BYTES = 4 * 1024 * 1024
+
+# The server heartbeats an idle subscription every 30 seconds. A read that
+# stays silent for three heartbeat periods means the stream is gone; the caller
+# resumes from its persisted cursor.
+STREAM_READ_TIMEOUT_SECONDS = 90.0
+
+
+class OpenScienceError(RuntimeError):
+    """Base class for every failure this transport reports."""
+
+
+class OpenScienceProtocolError(OpenScienceError):
+    """The response cannot be interpreted as the advertised protocol."""
+
+
+class OpenScienceConnectionError(OpenScienceError):
+    """The transport failed; a submitted command may already have been accepted."""
+
+
+class OpenScienceHTTPError(OpenScienceError):
+    def __init__(self, status: int, body: Any) -> None:
+        self.status = status
+        self.body = body
+        self.code = body.get("error") if isinstance(body, Mapping) else None
+        super().__init__(
+            f"OpenScience HTTP {status}" + (f": {self.code}" if self.code else "")
+        )
+
+
+class OpenScienceCursorError(OpenScienceHTTPError):
+    """The event cursor left the retained window; take a new snapshot."""
+
+    @property
+    def oldest_sequence(self) -> int | None:
+        value = self.body.get("oldestSequence") if isinstance(self.body, Mapping) else None
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    @property
+    def latest_sequence(self) -> int | None:
+        value = self.body.get("latestSequence") if isinstance(self.body, Mapping) else None
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+class OpenScienceEventGapError(OpenScienceProtocolError):
+    """A live frame skipped past the cursor, so the journal has a hole."""
+
+    def __init__(self, expected: int, received: int) -> None:
+        self.expected = expected
+        self.received = received
+        super().__init__(
+            f"runtime event gap: expected {expected}, received {received}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class OpenScienceEvent:
+    """One sequenced journal entry, already validated against its SSE frame."""
+
+    sequence: int
+    type: str
+    session_id: str
+    run_id: str
+    time: int
+    properties: Mapping[str, Any]
+
+
+def _headers(values: Mapping[str, Any]) -> dict[str, str]:
+    """Mirror the discovery probe's credentials and project selector.
+
+    The server resolves the project from ``x-openscience-directory`` exactly as
+    it does from the ``directory`` query parameter, and every request in this
+    module goes through here so a session never silently changes project.
+    """
+
+    headers = {"accept": "application/json"}
+    token = values.get("authToken")
+    if isinstance(token, str) and token:
+        headers["authorization"] = f"Bearer {token}"
+    directory = values.get("directory")
+    if isinstance(directory, str) and directory:
+        headers["x-openscience-directory"] = directory
+    return headers
+
+
+def _timeout_seconds(values: Mapping[str, Any]) -> float:
+    value = values.get("requestTimeoutMs")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(0.1, value / 1000)
+    return provider_config.DEFAULT_REQUEST_TIMEOUT_MS / 1000
+
+
+def _decode(raw: bytes) -> Any:
+    try:
+        return json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise OpenScienceProtocolError("runtime response is not valid JSON") from error
+
+
+def _decode_error(status: int, raw: bytes) -> OpenScienceHTTPError:
+    body: Any = None
+    if len(raw) <= MAX_RESPONSE_BYTES:
+        try:
+            body = _decode(raw)
+        except OpenScienceProtocolError:
+            body = None
+    if (
+        status == 409
+        and isinstance(body, Mapping)
+        and body.get("error") in ("cursor_expired", "cursor_ahead")
+    ):
+        return OpenScienceCursorError(status, body)
+    return OpenScienceHTTPError(status, body)
+
+
+def _parse_event(
+    data: bytes, *, event_id: str, event_type: str, session_id: str
+) -> OpenScienceEvent:
+    """Validate one frame against the sequence contract before it is applied.
+
+    An SSE id that disagrees with the body, or a name that disagrees with the
+    payload type, means the stream is not the protocol this client speaks.
+    Accepting it would corrupt the persisted cursor.
+    """
+
+    parsed = _decode(data)
+    if not isinstance(parsed, dict):
+        raise OpenScienceProtocolError("runtime SSE data must be an object")
+    sequence = parsed.get("sequence")
+    if type(sequence) is not int or sequence < 1 or event_id != str(sequence):
+        raise OpenScienceProtocolError("SSE id must match a positive runtime sequence")
+    if not isinstance(parsed.get("type"), str) or event_type != parsed["type"]:
+        raise OpenScienceProtocolError("SSE event name must match the runtime event type")
+    for key in ("sessionID", "runID"):
+        if not isinstance(parsed.get(key), str) or not parsed[key]:
+            raise OpenScienceProtocolError("runtime event is missing its run identity")
+    if parsed["sessionID"] != session_id:
+        raise OpenScienceProtocolError("runtime stream contains a different session")
+    if type(parsed.get("time")) is not int or not isinstance(parsed.get("properties"), dict):
+        raise OpenScienceProtocolError("runtime event is missing its timestamp or properties")
+    return OpenScienceEvent(
+        sequence=sequence,
+        type=parsed["type"],
+        session_id=parsed["sessionID"],
+        run_id=parsed["runID"],
+        time=parsed["time"],
+        properties=parsed["properties"],
+    )
+
+
+async def _iter_sse(
+    response: httpx.Response, session_id: str
+) -> AsyncIterator[OpenScienceEvent]:
+    """Decode an event stream, dispatching only on a complete blank-line frame.
+
+    A socket that closes mid-frame must not be applied as a shorter event, so a
+    trailing partial frame is reported as a connection failure instead.
+    """
+
+    data: list[str] = []
+    event_id = ""
+    event_type = "message"
+    size = 0
+    async for line in response.aiter_lines():
+        size += len(line.encode("utf-8")) + 1
+        if size > MAX_EVENT_BYTES:
+            raise OpenScienceProtocolError("runtime SSE event exceeds the size limit")
+        if not line:
+            if data:
+                yield _parse_event(
+                    "\n".join(data).encode("utf-8"),
+                    event_id=event_id,
+                    event_type=event_type,
+                    session_id=session_id,
+                )
+            data, event_id, event_type, size = [], "", "message", 0
+            continue
+        if line.startswith(":"):
+            continue
+        field, _, value = line.partition(":")
+        value = value.removeprefix(" ")
+        if field == "data":
+            data.append(value)
+        elif field == "event":
+            event_type = value
+        elif field == "id" and "\x00" not in value:
+            event_id = value
+    if data:
+        raise OpenScienceConnectionError("runtime event stream ended within an SSE event")
+
+
+class OpenScienceClient:
+    """One connection pool speaking runtime protocol 1.0 to one server."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        values: Mapping[str, Any],
+        request_timeout: float | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.values = dict(values)
+        self.request_timeout = (
+            request_timeout if request_timeout is not None else _timeout_seconds(values)
+        )
+        self._headers = _headers(values)
+        self._transport = transport
+        self._http: httpx.AsyncClient | None = None
+
+    def _client(self) -> httpx.AsyncClient:
+        if self._http is None:
+            self._http = httpx.AsyncClient(
+                headers=self._headers,
+                timeout=httpx.Timeout(
+                    self.request_timeout, connect=min(10.0, self.request_timeout)
+                ),
+                follow_redirects=False,
+                transport=self._transport,
+            )
+        return self._http
+
+    async def close(self) -> None:
+        http, self._http = self._http, None
+        if http is not None:
+            await http.aclose()
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        body: Mapping[str, Any] | None = None,
+    ) -> Any:
+        try:
+            response = await self._client().request(
+                method, f"{self.base_url}{path}", params=params, json=body
+            )
+        except (httpx.HTTPError, OSError) as error:
+            raise OpenScienceConnectionError(
+                "runtime connection failed; a submitted command may already be accepted"
+            ) from error
+        if len(response.content) > MAX_RESPONSE_BYTES:
+            raise OpenScienceProtocolError("runtime response exceeds the size limit")
+        if response.status_code >= 400:
+            raise _decode_error(response.status_code, response.content)
+        if not response.content:
+            return None
+        return _decode(response.content)
+
+    async def capabilities(self) -> dict[str, Any]:
+        body = await self._request("GET", discovery.CAPABILITIES_PATH)
+        if not isinstance(body, dict):
+            raise OpenScienceProtocolError("runtime capabilities must be an object")
+        return body
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        return _object_array(await self._request("GET", "/session"), "sessions")
+
+    async def create_session(
+        self,
+        *,
+        title: str | None = None,
+        workspace: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {}
+        if title:
+            body["title"] = title
+        if workspace:
+            body["workspace"] = workspace
+        return _object(await self._request("POST", "/session", body=body), "session")
+
+    async def messages(self, session_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+        params = {"limit": limit} if limit is not None else None
+        return _object_array(
+            await self._request("GET", f"/session/{_segment(session_id)}/message", params=params),
+            "messages",
+        )
+
+    async def snapshot(self, session_id: str) -> dict[str, Any]:
+        return _object(
+            await self._request("GET", "/runtime/snapshot", params={"sessionID": session_id}),
+            "snapshot",
+        )
+
+    async def get_run(self, session_id: str, run_id: str) -> dict[str, Any]:
+        return _object(
+            await self._request(
+                "GET", "/runtime/run", params={"sessionID": session_id, "runID": run_id}
+            ),
+            "run",
+        )
+
+    async def prompt(
+        self,
+        session_id: str,
+        *,
+        request_id: str,
+        message: str | None = None,
+        parts: list[dict[str, Any]] | None = None,
+        effort: str = "normal",
+        message_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not request_id or not request_id.strip():
+            raise ValueError("a persisted requestID is required before submitting work")
+        if (message is None) == (parts is None):
+            raise ValueError("supply exactly one of message or parts")
+        if effort not in ("normal", "ultra"):
+            raise ValueError("effort must be normal or ultra")
+        body: dict[str, Any] = {
+            "sessionID": session_id,
+            "requestID": request_id,
+            "effort": effort,
+        }
+        if message is not None:
+            body["message"] = message
+        if parts is not None:
+            body["parts"] = parts
+        if message_id is not None:
+            body["messageID"] = message_id
+        return _object(await self._request("POST", "/runtime/prompt", body=body), "receipt")
+
+    async def cancel_run(self, session_id: str, run_id: str) -> dict[str, Any]:
+        return _object(
+            await self._request(
+                "POST", "/runtime/cancel", body={"sessionID": session_id, "runID": run_id}
+            ),
+            "run",
+        )
+
+    async def reply_permission(
+        self, session_id: str, request_id: str, reply: str
+    ) -> dict[str, Any]:
+        if reply not in ("once", "session", "project", "always", "reject"):
+            raise ValueError("invalid permission reply")
+        return _object(
+            await self._request(
+                "POST",
+                "/runtime/decision",
+                body={
+                    "kind": "permission",
+                    "sessionID": session_id,
+                    "requestID": request_id,
+                    "reply": reply,
+                },
+            ),
+            "decision",
+        )
+
+    async def reply_question(
+        self, session_id: str, request_id: str, answers: list[list[str]]
+    ) -> dict[str, Any]:
+        return _object(
+            await self._request(
+                "POST",
+                "/runtime/decision",
+                body={
+                    "kind": "question",
+                    "sessionID": session_id,
+                    "requestID": request_id,
+                    "answers": answers,
+                },
+            ),
+            "decision",
+        )
+
+    async def reject_question(self, session_id: str, request_id: str) -> dict[str, Any]:
+        return _object(
+            await self._request(
+                "POST",
+                "/runtime/decision",
+                body={
+                    "kind": "question_reject",
+                    "sessionID": session_id,
+                    "requestID": request_id,
+                },
+            ),
+            "decision",
+        )
+
+    async def events(
+        self, session_id: str, *, after_sequence: int | None = None
+    ) -> AsyncIterator[OpenScienceEvent]:
+        """Stream one session's journal, resuming strictly after a cursor.
+
+        Duplicates at or below the cursor are dropped, and a frame that skips
+        ahead raises instead of being applied: the caller re-snapshots rather
+        than observing a session with a hole in its history.
+        """
+
+        if after_sequence is not None and (
+            type(after_sequence) is not int or after_sequence < 0
+        ):
+            raise ValueError("after_sequence must be a nonnegative integer")
+        cursor = after_sequence
+        headers = {"accept": "text/event-stream"}
+        params: dict[str, Any] = {"sessionID": session_id}
+        if cursor is not None:
+            headers["Last-Event-ID"] = str(cursor)
+            params["afterSequence"] = cursor
+        try:
+            async with self._client().stream(
+                "GET",
+                f"{self.base_url}/runtime/events",
+                params=params,
+                headers=headers,
+                timeout=httpx.Timeout(
+                    self.request_timeout,
+                    connect=min(10.0, self.request_timeout),
+                    read=STREAM_READ_TIMEOUT_SECONDS,
+                ),
+            ) as response:
+                if response.status_code >= 400:
+                    await response.aread()
+                    raise _decode_error(response.status_code, response.content)
+                content_type = response.headers.get("content-type", "")
+                if "text/event-stream" not in content_type.lower():
+                    raise OpenScienceProtocolError(
+                        "runtime subscription did not return text/event-stream"
+                    )
+                async for event in _iter_sse(response, session_id):
+                    if cursor is not None and event.sequence <= cursor:
+                        continue
+                    if cursor is not None and event.sequence != cursor + 1:
+                        raise OpenScienceEventGapError(cursor + 1, event.sequence)
+                    cursor = event.sequence
+                    yield event
+        except httpx.HTTPError as error:
+            raise OpenScienceConnectionError(
+                "runtime event stream interrupted; reconnect from the last applied sequence"
+            ) from error
+
+
+def _segment(value: str) -> str:
+    if not isinstance(value, str) or not value or value in (".", ".."):
+        raise ValueError("resource ids must be nonempty strings")
+    return urllib.parse.quote(value, safe="")
+
+
+def _object(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise OpenScienceProtocolError(f"runtime {label} must be an object")
+    return value
+
+
+def _object_array(value: Any, label: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise OpenScienceProtocolError(f"runtime {label} must be an array of objects")
+    return value
