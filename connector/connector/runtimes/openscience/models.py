@@ -142,7 +142,14 @@ def session_state(
     questions = _request_list(data.get("questions"))
     state = _optional_string(run.get("state")) if run is not None else None
     status, reason = _run_status(state)
-    if status not in ("error",) and (permissions or questions) and state in _ACTIVE_RUN_STATES:
+    # A live decision means the agent is blocked on the user. Only a failed
+    # receipt outranks it: a cancelled or completed run cannot still be
+    # waiting, and the server drops its pending requests when that happens.
+    if (
+        status != "error"
+        and (permissions or questions)
+        and (state is None or state in _ACTIVE_RUN_STATES)
+    ):
         status, reason = "waiting_approval", "waiting for a permission or question reply"
     error: dict[str, Any] | None = None
     if run is not None and isinstance(run.get("error"), Mapping):

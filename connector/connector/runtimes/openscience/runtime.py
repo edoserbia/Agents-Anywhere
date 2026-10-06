@@ -94,6 +94,13 @@ _TERMINAL_RUN_EVENTS = {
     "runtime.cancelled": "cancelled",
 }
 _RUN_EVENTS = {"runtime.accepted", "runtime.completed", "runtime.failed", "runtime.cancelled"}
+# A terminal receipt is reported with the outcome names the platform accepts.
+_TURN_OUTCOMES = {
+    "completed": "completed",
+    "failed": "failed",
+    "cancelled": "cancelled",
+    "interrupted": "interrupted",
+}
 _DECISION_EVENTS = {
     "permission.asked",
     "permission.replied",
@@ -163,7 +170,7 @@ class OpenScienceRuntime(AgentRuntime):
         # under two identities.
         self._sessions: dict[str, str] = {}
         self._platform_ids: dict[str, str] = {}
-        self._turn_cache: dict[str, dict[str, Any]] = {}
+        self._record_cache: dict[str, dict[str, Any]] = {}
 
     @property
     def identity(self) -> RuntimeIdentity:
@@ -590,7 +597,7 @@ class OpenScienceRuntime(AgentRuntime):
         effort = _effort(selections)
         fingerprint = _prompt_fingerprint(message, parts, effort)
         key = _turn_key(external_session_id, client_message_id)
-        record = await self._read_turn_record(key)
+        record = await self._read_record(key)
         if record is not None and record.get("fingerprint") != fingerprint:
             raise RuntimeInvalidRequestError(
                 "clientMessageId was already used for a different message"
@@ -598,7 +605,7 @@ class OpenScienceRuntime(AgentRuntime):
         request_id = _optional_string(record.get("requestID")) if record else None
         if request_id is None:
             request_id = f"aa-{uuid4().hex}"
-            await self._write_turn_record(
+            await self._write_record(
                 key,
                 {
                     "requestID": request_id,
@@ -618,7 +625,7 @@ class OpenScienceRuntime(AgentRuntime):
             ),
             "runtime.prompt",
         )
-        await self._write_turn_record(
+        await self._write_record(
             key,
             {
                 "requestID": request_id,
@@ -670,8 +677,8 @@ class OpenScienceRuntime(AgentRuntime):
             )
         return parts
 
-    async def _read_turn_record(self, key: str) -> dict[str, Any] | None:
-        cached = self._turn_cache.get(key)
+    async def _read_record(self, key: str) -> dict[str, Any] | None:
+        cached = self._record_cache.get(key)
         if cached is not None:
             return cached
         try:
@@ -680,23 +687,23 @@ class OpenScienceRuntime(AgentRuntime):
             return None
         except Exception as error:  # noqa: BLE001 - a storage fault must not block a turn
             logger.warning(
-                "OpenScience turn record read failed error_type={}", type(error).__name__
+                "OpenScience state record read failed error_type={}", type(error).__name__
             )
             return None
         if not isinstance(stored, Mapping):
             return None
         record = dict(stored)
-        self._turn_cache[key] = record
+        self._record_cache[key] = record
         return record
 
-    async def _write_turn_record(self, key: str, record: dict[str, Any]) -> None:
-        self._turn_cache[key] = record
+    async def _write_record(self, key: str, record: dict[str, Any]) -> None:
+        self._record_cache[key] = record
         try:
             await self.host.sync_state_write(key, record)
         except NotImplementedError:
             # Without durable storage the in-process cache still makes a retry
             # from this runtime idempotent, which is the common case.
-            logger.warning("OpenScience turn records are not durable on this host")
+            logger.warning("OpenScience state records are not durable on this host")
         except Exception as error:  # noqa: BLE001 - never fail a turn over its receipt
             logger.warning(
                 "OpenScience turn record write failed error_type={}", type(error).__name__
@@ -1037,22 +1044,48 @@ class OpenScienceRelay:
                 self.runtime._register_session(external), external, snapshot
             )
         if event.type in _TERMINAL_RUN_EVENTS:
-            platform = self.runtime._register_session(external)
-            with suppress(Exception):
-                await self.host.session_turn_ended(
-                    session_id=platform,
-                    runtime=RUNTIME,
-                    external_session_id=external,
-                    turn_id=event.run_id,
-                    outcome=_TERMINAL_RUN_EVENTS[event.type],
-                    metadata={
-                        "runId": event.run_id,
-                        "crashRecovery": "interrupt",
-                        "source": "openscience.runtime.events",
-                    },
-                )
+            await self._report_turn_end(
+                external,
+                run_id=event.run_id,
+                outcome=_TERMINAL_RUN_EVENTS[event.type],
+            )
         if event.type.startswith("message.") or event.type in _RUN_EVENTS:
             self._dirty_timeline.setdefault(external, monotonic())
+
+    async def _report_turn_end(
+        self, external: str, *, run_id: str | None, outcome: str | None
+    ) -> None:
+        """Report a terminal run exactly once, even when its event was missed.
+
+        The journal is a bounded window and a subscription can begin after the
+        run already ended, so the durable receipt — not the event — decides
+        that a turn finished. The persisted marker is what keeps the report
+        single across both paths and across a Connector restart.
+        """
+
+        if run_id is None or outcome is None:
+            return
+        key = _run_key(external)
+        record = await self.runtime._read_record(key)
+        if record is not None and record.get("reportedRunId") == run_id:
+            return
+        platform = self.runtime._register_session(external)
+        with suppress(Exception):
+            await self.host.session_turn_ended(
+                session_id=platform,
+                runtime=RUNTIME,
+                external_session_id=external,
+                turn_id=run_id,
+                outcome=outcome,
+                metadata={
+                    "runId": run_id,
+                    "crashRecovery": "interrupt",
+                    "source": "openscience.runtime.snapshot",
+                },
+            )
+        await self.runtime._write_record(
+            key, {"reportedRunId": run_id, "outcome": outcome}
+        )
 
     async def _publish_state(
         self, platform: str, external: str, snapshot: Mapping[str, Any]
@@ -1073,6 +1106,13 @@ class OpenScienceRelay:
             snapshot, session_id=platform, external_session_id=external
         ):
             await self.host.notice_upsert(notice)
+        run = models.latest_run(snapshot)
+        if run is not None:
+            await self._report_turn_end(
+                external,
+                run_id=_optional_string(run.get("runID")),
+                outcome=_TURN_OUTCOMES.get(_optional_string(run.get("state")) or ""),
+            )
 
     async def _resnapshot(self, external: str) -> None:
         platform = self.runtime._register_session(external)
@@ -1202,6 +1242,10 @@ def _turn_key(external_session_id: str, client_message_id: str) -> str:
 
 def _cursor_key(external_session_id: str) -> str:
     return f"openscience/events/{external_session_id}"
+
+
+def _run_key(external_session_id: str) -> str:
+    return f"openscience/runs/{external_session_id}"
 
 
 def _pending_request(

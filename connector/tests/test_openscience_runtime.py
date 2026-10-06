@@ -801,6 +801,28 @@ def test_start_turn_reuses_the_persisted_request_id() -> None:
     run(exercise())
 
 
+def test_a_plain_turn_is_a_message_not_empty_parts() -> None:
+    """The API takes exactly one of `message` or `parts`.
+
+    A live run caught the first version sending `message` together with an
+    empty `parts` list, which the server refuses as an ambiguous input.
+    """
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = build_runtime(host, client=client)
+        await runtime.start()
+        try:
+            await runtime.start_turn("sess_x", "ses_1", "hello", client_message_id="cm_1")
+            assert client.prompts[0]["message"] == "hello"
+            assert client.prompts[0]["parts"] is None
+        finally:
+            await runtime.stop()
+
+    run(exercise())
+
+
 def test_start_turn_rejects_a_reused_client_message_id_with_new_content() -> None:
     async def exercise() -> None:
         host = make_host()
@@ -1526,6 +1548,17 @@ def test_pending_decisions_make_the_session_wait_for_approval() -> None:
     assert state.metadata["pendingQuestions"] == 1
 
 
+def test_a_pending_decision_without_a_receipt_still_waits_for_approval() -> None:
+    """The snapshot lists live decisions; the receipt may lag behind them."""
+
+    state = models.session_state(
+        snapshot_payload(permissions=[permission_payload()]),
+        session_id="sess_x",
+        external_session_id="ses_1",
+    )
+    assert state.status == "waiting_approval"
+
+
 def test_a_failed_run_carries_its_error() -> None:
     state = models.session_state(
         snapshot_payload(
@@ -1749,6 +1782,48 @@ def test_a_terminal_run_event_ends_the_turn() -> None:
         assert host.session_turn_ended.await_args.kwargs["turn_id"] == "run_1"
         state = host.session_state_update.await_args.kwargs
         assert state["status"] == "idle"
+        await relay.close()
+
+    run(exercise())
+
+
+def test_a_turn_that_ended_while_unsubscribed_is_still_reported() -> None:
+    """A run can finish before the Connector ever subscribes to its session.
+
+    The durable receipt decides that the turn ended, and the persisted marker
+    keeps the report to exactly one per run.
+    """
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(
+            sessions=[session_payload("ses_1")],
+            snapshots={"ses_1": snapshot_payload("ses_1", runs=[run_payload("completed")], latest=9)},
+        )
+        _, relay = relay_for(host, client)
+        await relay._resnapshot("ses_1")
+        assert host.session_turn_ended.await_count == 1
+        assert host.session_turn_ended.await_args.kwargs["outcome"] == "completed"
+        assert host.session_turn_ended.await_args.kwargs["turn_id"] == "run_1"
+        assert host.sync_state["openscience/runs/ses_1"]["reportedRunId"] == "run_1"
+
+        await relay._resnapshot("ses_1")
+        assert host.session_turn_ended.await_count == 1
+        await relay.close()
+
+    run(exercise())
+
+
+def test_an_interrupted_run_is_reported_as_interrupted() -> None:
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(
+            sessions=[session_payload("ses_1")],
+            snapshots={"ses_1": snapshot_payload("ses_1", runs=[run_payload("interrupted")], latest=9)},
+        )
+        _, relay = relay_for(host, client)
+        await relay._resnapshot("ses_1")
+        assert host.session_turn_ended.await_args.kwargs["outcome"] == "interrupted"
         await relay.close()
 
     run(exercise())
