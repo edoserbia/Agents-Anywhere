@@ -1,5 +1,61 @@
 import { isApiError } from "../../lib/api/errors.ts"
-import type { ProjectCreateRequest, ProjectView } from "./types"
+import type { DeviceRuntimeView, ProjectCreateRequest, ProjectView } from "./types"
+
+/**
+ * True when a runtime generates project directories itself.
+ *
+ * The flag is the runtime's own promise, published as `createProject` in its
+ * inventory capabilities: a client must not ask the user for a path the runtime
+ * is going to choose anyway.
+ */
+export function runtimeCreatesProject(
+  runtime: Pick<DeviceRuntimeView, "capabilities"> | null | undefined,
+): boolean {
+  return runtime?.capabilities?.createProject === true
+}
+
+/**
+ * The runtime that will create this project's directory, if one will.
+ *
+ * A named runtime decides on its own: a device may host both a runtime that
+ * generates paths and one that needs a path, and the form has to follow the
+ * runtime the session will actually use. With no named runtime the device's
+ * active path-creating runtime answers instead, which is the only honest answer
+ * for a form that has no agent picker — and it must already be active, because
+ * a stopped runtime cannot create anything.
+ */
+export function projectCreatingRuntime(
+  runtimes: DeviceRuntimeView[] | undefined,
+  runtimeId?: string | null,
+): DeviceRuntimeView | null {
+  const candidates = (runtimes ?? []).filter(runtimeCreatesProject)
+  if (runtimeId) {
+    return candidates.find((runtime) => runtime.runtimeId === runtimeId) ?? null
+  }
+  return candidates.find((runtime) => runtime.active) ?? null
+}
+
+/**
+ * Build the create request for whichever side owns the workspace.
+ *
+ * Exactly one source is sent: a runtime id when the runtime generates the path,
+ * otherwise the path the user chose. Sending both is rejected by the server, so
+ * this is the single place that decides.
+ */
+export function projectCreateRequest({
+  name,
+  connectorId,
+  workspacePath,
+  runtimeId,
+}: {
+  name: string
+  connectorId: string
+  workspacePath?: string | null
+  runtimeId?: string | null
+}): ProjectCreateRequest {
+  if (runtimeId) return { name, connectorId, runtimeId }
+  return { name, connectorId, workspacePath: (workspacePath ?? "").trim() }
+}
 
 export function isWindowsWorkspace(path: string, deviceOs?: string | null): boolean {
   return deviceOs === "windows" || /^[a-z]:[\\/]/i.test(path) || path.startsWith("\\\\")

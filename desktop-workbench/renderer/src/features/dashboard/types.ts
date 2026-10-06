@@ -313,7 +313,13 @@ export type ProjectCreateRequest = {
   manuallyCreated?: boolean;
   name: string;
   connectorId: string;
-  workspacePath: string;
+  /**
+   * Omitted when `runtimeId` is set: a runtime that creates projects generates
+   * the directory itself, and the server stores what it answered.
+   */
+  workspacePath?: string;
+  /** The runtime instance asked to create the project's workspace. */
+  runtimeId?: string;
 };
 
 export type ProjectCreateResponse = ProjectResponse & {

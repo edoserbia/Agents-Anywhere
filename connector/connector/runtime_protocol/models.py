@@ -41,6 +41,7 @@ CAPABILITY_CATALOG_MODEL = "catalog.model"
 CAPABILITY_CATALOG_PERMISSION = "catalog.permission"
 CAPABILITY_CATALOG_EFFORT = "catalog.effort"
 CAPABILITY_SESSION_COMMANDS = "session.commands"
+CAPABILITY_PROJECT_CREATE = "project.create"
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +135,23 @@ class RuntimePermissionCatalog:
     revision: int
     permissions: tuple[RuntimePermissionItem, ...]
     runtime_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeProject:
+    """A project a runtime created, including the path the runtime chose.
+
+    The identity and the worktree come from the runtime because only it knows
+    them: a runtime that creates projects generates the directory itself, so the
+    caller stores what came back instead of proposing a path the runtime would
+    have to honour. ``project_id`` is the runtime's own id, not the platform's;
+    the runtime that answered is carried by the call's scope.
+    """
+
+    project_id: str
+    name: str
+    worktree: str
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

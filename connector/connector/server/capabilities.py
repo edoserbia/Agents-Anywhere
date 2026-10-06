@@ -15,6 +15,7 @@ _RUNTIME_CAPABILITY_MAP: tuple[tuple[str, str], ...] = (
     ("modelCatalog", "catalog.model"),
     ("modelCatalog", "catalog.effort"),
     ("permissionCatalog", "catalog.permission"),
+    ("createProject", "project.create"),
     ("startTurn", "session.send_message"),
     ("steerTurn", "session.steer"),
     ("interruptTurn", "session.interrupt"),

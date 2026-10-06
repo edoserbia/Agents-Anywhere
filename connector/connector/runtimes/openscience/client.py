@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import json
 import urllib.parse
-from collections.abc import AsyncIterator, Mapping
+import uuid
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -38,6 +39,11 @@ MAX_EVENT_BYTES = 4 * 1024 * 1024
 # stays silent for three heartbeat periods means the stream is gone; the caller
 # resumes from its persisted cursor.
 STREAM_READ_TIMEOUT_SECONDS = 90.0
+
+# ``POST /global/project`` refuses more than ten source locations, and the
+# server is the authority on that bound: checking it here turns a rejected
+# round trip into an immediate, attributable error.
+MAX_PROJECT_SOURCES = 10
 
 
 class OpenScienceError(RuntimeError):
@@ -352,6 +358,47 @@ class OpenScienceClient:
             "provider catalog",
         )
 
+    async def create_project(
+        self,
+        name: str,
+        *,
+        sources: Sequence[Mapping[str, Any]] | None = None,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create an app-managed project whose directory the server generates.
+
+        The route is ``POST /global/project`` — global, like ``/project`` and
+        ``/config/providers``, because a project is what a selector would point
+        at and it does not exist yet. Nothing here derives a path: the server
+        owns project identity and answers with the ``worktree`` it chose, which
+        is what the caller stores as the project's workspace.
+
+        ``operation_id`` is OpenScience's idempotency key: replaying it with the
+        same name and sources returns the original project (200) instead of
+        creating a second one, while reusing it for a different draft is a 409.
+        A caller that may retry should therefore supply its own id and persist
+        it before the call; one is generated per attempt otherwise, which is
+        enough for a single fire-and-forget creation.
+        """
+
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("a project name is required")
+        body: dict[str, Any] = {"name": name}
+        if sources is not None:
+            body["sources"] = _project_sources(sources)
+        if operation_id is not None:
+            try:
+                uuid.UUID(operation_id)
+            except (AttributeError, TypeError, ValueError) as error:
+                raise ValueError("operation_id must be a UUID") from error
+            body["operation_id"] = operation_id
+        return _object(
+            await self._request(
+                "POST", "/global/project", body=body, directory=UNSCOPED
+            ),
+            "project",
+        )
+
     async def list_sessions(self, *, directory: ProjectScope = None) -> list[dict[str, Any]]:
         """List one project's sessions; the route is not paginated.
 
@@ -627,6 +674,39 @@ def _segment(value: str) -> str:
     if not isinstance(value, str) or not value or value in (".", ".."):
         raise ValueError("resource ids must be nonempty strings")
     return urllib.parse.quote(value, safe="")
+
+
+def _project_sources(sources: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize the source grants a project is created with.
+
+    A source is a path the user explicitly selected plus the access level the
+    server should record for it. ``access`` is passed through verbatim because
+    OpenScience owns that vocabulary; only the shape and the documented limit
+    are checked here, so a bad grant fails before the request rather than as an
+    unattributed 400.
+    """
+
+    if isinstance(sources, str | bytes) or not isinstance(sources, Sequence):
+        raise TypeError("sources must be a sequence of objects")
+    if len(sources) > MAX_PROJECT_SOURCES:
+        raise ValueError(f"at most {MAX_PROJECT_SOURCES} project sources are allowed")
+    normalized: list[dict[str, Any]] = []
+    for source in sources:
+        if not isinstance(source, Mapping):
+            raise TypeError("each project source must be an object")
+        path = source.get("path")
+        if not isinstance(path, str):
+            raise TypeError("each project source path must be a string")
+        if not path.strip():
+            raise ValueError("each project source needs a non-empty path")
+        entry: dict[str, Any] = {"path": path}
+        access = source.get("access")
+        if access is not None:
+            if not isinstance(access, str) or not access:
+                raise ValueError("project source access must be a non-empty string")
+            entry["access"] = access
+        normalized.append(entry)
+    return normalized
 
 
 def _optional_directory(value: Any) -> str | None:

@@ -519,7 +519,10 @@
       "workspaceConflictConfirm": "Continue and rename",
       "workspaceConflictDescription": "The workspace “{path}” already belongs to “{currentName}”. Continuing will rename that project to “{name}” instead of creating a duplicate. Its sessions and settings will be preserved.",
       "workspaceConflictTitle": "This workspace already has a project",
-      "workspaceImmutable": "The workspace is fixed after the project is created."
+      "workspaceImmutable": "The workspace is fixed after the project is created.",
+      "createDescriptionRuntime": "Choose a device and confirm the project name. The runtime decides where the project is stored.",
+      "nameDescriptionRuntime": "The runtime creates the project directory, so the name is the only thing to choose.",
+      "workspaceOwnedByRuntime": "The location is chosen by {runtime}."
     },
     "mobileConnections": {
       "accountUnavailable": "Your account is unavailable. Sign in again and retry.",

@@ -791,11 +791,11 @@ fun AgentsAnywhereApp(
                     }
             }
         },
-        onCreateProject = { name, connectorId, workspacePath ->
+        onCreateProject = { name, connectorId, workspacePath, runtimeId ->
             if (!hasAuthSession) {
                 Result.failure(IllegalStateException("Sign in again to create a project."))
             } else {
-                sessionsController.createProject(name, connectorId, workspacePath)
+                sessionsController.createProject(name, connectorId, workspacePath, runtimeId)
                     .onSuccess { project ->
                         projectsRequestVersion++
                         sessionsState = sessionsState.withPatchedProject(project)

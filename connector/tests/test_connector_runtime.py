@@ -44,6 +44,7 @@ from connector.runtime_protocol import (
     RuntimeOperationResult,
     RuntimePermissionCatalog,
     RuntimePermissionItem,
+    RuntimeProject,
     RuntimeProvider,
     RuntimeTimelineItem,
     RuntimeTimelineSnapshot,
@@ -375,6 +376,25 @@ class FakeAgentRuntime(AgentRuntime):
                     selection_id="sel_permission_readonly",
                 ),
             ),
+        )
+
+    async def create_project(
+        self,
+        name: str,
+        sources: Any = None,
+        operation_id: str | None = None,
+    ) -> RuntimeProject:
+        self.calls.append(
+            (
+                "runtime.createProject",
+                {"name": name, "sources": sources, "operationId": operation_id},
+            )
+        )
+        return RuntimeProject(
+            project_id="prj_test",
+            name=name,
+            worktree="/srv/openscience/generated",
+            metadata={"origin": "openscience"},
         )
 
     async def get_session_snapshot(
@@ -1192,6 +1212,38 @@ def test_connector_projects_inventory_capabilities_to_protocol_ids() -> None:
     assert by_runtime_and_id[("dsh", "runtime.config")]["available"] is True
     assert ("unknown-agent", "catalog.model") not in by_runtime_and_id
     assert payload["revision"] == 42
+
+
+def test_connector_projects_the_create_project_capability() -> None:
+    """A client learns from this flag that the runtime owns the project path."""
+
+    payload = protocol_capabilities_from_runtime_types(
+        {
+            "runtimeTypes": [
+                {
+                    "runtimeType": "openscience",
+                    "available": True,
+                    "capabilities": {"createProject": True},
+                },
+                {
+                    "runtimeType": "codex",
+                    "available": True,
+                    "capabilities": {"createProject": False},
+                },
+            ]
+        },
+        revision=7,
+    )
+
+    by_runtime_and_id = {
+        (item["runtime"], item["capabilityId"]): item
+        for item in payload["capabilities"]
+    }
+
+    assert by_runtime_and_id[("openscience", "project.create")]["supported"] is True
+    assert by_runtime_and_id[("openscience", "project.create")]["available"] is True
+    assert by_runtime_and_id[("codex", "project.create")]["supported"] is False
+    assert by_runtime_and_id[("codex", "project.create")]["available"] is False
 
 
 def test_connector_runtime_host_coalesced_notifications_use_websocket_when_connected() -> (
@@ -2507,6 +2559,39 @@ async def _exercise_runtime() -> None:
         ws.messages[-1]["result"]["catalog"]["permissions"][0]["selectionId"]
         == "sel_permission_readonly"
     )
+
+    await client.handle_message(
+        {
+            "id": "rpc_12",
+            "type": "request",
+            "method": "runtime.createProject",
+            "params": {
+                "runtime": "codex",
+                "runtimeId": "codex",
+                "name": "quarterly review",
+                "sources": [{"path": "/data/inputs", "access": "read"}],
+                "operationId": "6f1e6a4e-0000-4000-8000-000000000000",
+            },
+        }
+    )
+    assert runtime.calls[-1] == (
+        "runtime.createProject",
+        {
+            "name": "quarterly review",
+            "sources": ({"path": "/data/inputs", "access": "read"},),
+            "operationId": "6f1e6a4e-0000-4000-8000-000000000000",
+        },
+    )
+    assert ws.messages[-1]["result"] == {
+        "runtime": "codex",
+        "runtimeId": "codex",
+        "project": {
+            "projectId": "prj_test",
+            "name": "quarterly review",
+            "worktree": "/srv/openscience/generated",
+            "metadata": {"origin": "openscience"},
+        },
+    }
 
 
 async def _exercise_nonblocking_runtime_rpc() -> None:

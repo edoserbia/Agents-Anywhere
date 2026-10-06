@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -393,10 +394,15 @@ async def request_runtime_rpc(
     runtime: str,
     runtime_id: str,
     limit: int | None,
+    extra: Mapping[str, Any] | None = None,
 ) -> Any:
     params: dict[str, Any] = {"runtime": runtime, "runtimeId": runtime_id}
     if limit is not None:
         params["limit"] = limit
+    if extra:
+        # Method-specific fields ride along with the scope, which is the only
+        # part of the params every runtime method shares.
+        params.update(extra)
     try:
         return await manager.request(connector_id, method, params, timeout=30)
     except ConnectorOfflineError as exc:

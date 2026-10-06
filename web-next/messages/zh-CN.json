@@ -519,7 +519,10 @@
       "workspaceConflictConfirm": "继续并重命名",
       "workspaceConflictDescription": "工作目录“{path}”已属于项目“{currentName}”。继续后不会创建新项目，而会把现有项目重命名为“{name}”；项目内的会话和设置都会保留。",
       "workspaceConflictTitle": "该工作目录已有项目",
-      "workspaceImmutable": "项目创建后，工作区不能更换。"
+      "workspaceImmutable": "项目创建后，工作区不能更换。",
+      "createDescriptionRuntime": "先选择设备并确认项目名称，项目存放位置由运行时决定。",
+      "nameDescriptionRuntime": "项目目录由运行时创建，只需填写名称。",
+      "workspaceOwnedByRuntime": "存放位置由 {runtime} 决定。"
     },
     "mobileConnections": {
       "accountUnavailable": "当前账号不可用，请重新登录后再试。",

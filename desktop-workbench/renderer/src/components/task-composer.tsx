@@ -42,6 +42,7 @@ import { WorkspacePicker, type WorkspaceSelection } from "@/components/workspace
 import { useWorkspace } from "@/components/workspace-context"
 import { useAuth } from "@/components/auth/auth-context"
 import { dashboardApi } from "@/features/dashboard/api"
+import { runtimeCreatesProject } from "@/features/dashboard/project-workspaces"
 import { createClientId } from "@/lib/id"
 import { cn } from "@/lib/utils"
 import { useElementWidth } from "@/hooks/use-element-width"
@@ -267,6 +268,10 @@ export function TaskComposer() {
   const [selectedAgent, setSelectedAgent] = React.useState(agentOptions[0]?.id ?? "")
   const selectedRuntime = activeRuntimes(runtimeInventory[selectedConnectorId])
     .find((runtime) => runtime.runtimeId === selectedAgent) ?? null
+  // A runtime that creates project directories must not be offered a raw
+  // filesystem path: the workspace picker offers projects instead, and the
+  // project form hides its path field.
+  const runtimeOwnsProjectPath = runtimeCreatesProject(selectedRuntime)
   const selectedRuntimeScope = selectedRuntime
     ? { runtimeId: selectedRuntime.runtimeId, runtimeType: selectedRuntime.runtimeType }
     : undefined
@@ -1053,7 +1058,7 @@ export function TaskComposer() {
             connectorId={selectedConnectorId}
             value={workspace}
             onChange={setWorkspace}
-            includeProjects={!sidebarShowsSessions}
+            includeProjects={!sidebarShowsSessions || runtimeOwnsProjectPath}
             disabled={creating}
             onCreateProject={() => setProjectEditor({ mode: "create" })}
           />
@@ -1064,6 +1069,7 @@ export function TaskComposer() {
         editor={projectEditor}
         connectors={connectors}
         preferredConnectorId={selectedConnectorId}
+        preferredRuntimeId={selectedRuntime?.runtimeId}
         projects={projects}
         onOpenChange={(open) => {
           if (!open) setProjectEditor(null)

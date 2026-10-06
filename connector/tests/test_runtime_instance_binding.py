@@ -22,6 +22,7 @@ from connector.runtime_protocol import (
     RuntimeModelItem,
     RuntimePermissionCatalog,
     RuntimePermissionItem,
+    RuntimeProject,
     RuntimeSourceKey,
     RuntimeTimelineItem,
     RuntimeTimelineSnapshot,
@@ -37,6 +38,7 @@ from connector.runtimes.session_identity import stable_runtime_session_id
 class CompleteInventoryRuntime(AgentRuntime):
     def __init__(self) -> None:
         self.complete_inventory_calls: list[tuple[int, bool]] = []
+        self.project_requests: list[tuple[str, Any, str | None]] = []
 
     @property
     def identity(self) -> RuntimeIdentity:
@@ -84,6 +86,19 @@ class CompleteInventoryRuntime(AgentRuntime):
                     selection_id="default",
                 ),
             ),
+        )
+
+    async def create_project(
+        self,
+        name: str,
+        sources: Any = None,
+        operation_id: str | None = None,
+    ) -> RuntimeProject:
+        self.project_requests.append((name, sources, operation_id))
+        return RuntimeProject(
+            project_id="prj_native",
+            name=name,
+            worktree="/srv/native/generated",
         )
 
     async def list_complete_session_inventory(
@@ -274,7 +289,8 @@ def test_runtime_instance_explicitly_forwards_complete_inventory() -> None:
 def test_runtime_instance_preserves_type_and_adds_instance_scope() -> None:
     async def run() -> None:
         instance = RuntimeInstanceSpec("rti_dsh_one", "dsh", "DSH One")
-        runtime = RuntimeInstance(instance, CompleteInventoryRuntime())
+        native = CompleteInventoryRuntime()
+        runtime = RuntimeInstance(instance, native)
 
         config = await runtime.get_config()
         capabilities = await runtime.get_runtime_capabilities()
@@ -300,6 +316,34 @@ def test_runtime_instance_preserves_type_and_adds_instance_scope() -> None:
         assert state is not None and state.runtime_id == "rti_dsh_one"
         assert notices[0].runtime_id == "rti_dsh_one"
         assert notices[0].source["runtimeId"] == "rti_dsh_one"
+
+    asyncio.run(run())
+
+
+def test_runtime_instance_forwards_project_creation_unchanged() -> None:
+    """A created project is instance-neutral, so it is not rewritten."""
+
+    async def run() -> None:
+        instance = RuntimeInstanceSpec("rti_openscience_one", "dsh", "OpenScience One")
+        native = CompleteInventoryRuntime()
+        runtime = RuntimeInstance(instance, native)
+
+        project = await runtime.create_project(
+            "quarterly",
+            sources=({"path": "/data/inputs"},),
+            operation_id="6f1e6a4e-0000-4000-8000-000000000000",
+        )
+
+        assert native.project_requests == [
+            (
+                "quarterly",
+                ({"path": "/data/inputs"},),
+                "6f1e6a4e-0000-4000-8000-000000000000",
+            )
+        ]
+        assert project.project_id == "prj_native"
+        assert project.name == "quarterly"
+        assert project.worktree == "/srv/native/generated"
 
     asyncio.run(run())
 

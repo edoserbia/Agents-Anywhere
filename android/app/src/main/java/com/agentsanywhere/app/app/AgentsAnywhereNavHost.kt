@@ -133,7 +133,7 @@ internal fun AgentsAnywhereNavHost(
     onRestoreProject: suspend (String) -> Result<List<AgentSession>>,
     onUpdateProject: suspend (String, String?, Boolean?) -> Result<AgentProject>,
     onArchiveProjectSessions: suspend (String) -> Result<List<AgentSession>>,
-    onCreateProject: suspend (String, String, String) -> Result<AgentProject>,
+    onCreateProject: suspend (String, String, String?, String?) -> Result<AgentProject>,
     onNewSessionInProject: (AgentProject) -> Unit,
     onCreateSession: suspend (NewSessionCreateDraft) -> NewSessionCreateOutcome,
     onPrepareSession: (NewSessionDraft) -> Unit,

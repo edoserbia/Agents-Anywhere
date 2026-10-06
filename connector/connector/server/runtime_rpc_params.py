@@ -178,6 +178,28 @@ def optional_mapping(value: Any) -> dict[str, Any] | None:
     return dict(value)
 
 
+def project_sources(params: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Read the source grants a project is created with.
+
+    The shape is validated here and the contents are passed through: what a
+    source *means* — its access vocabulary and how many are allowed — belongs to
+    the runtime that owns project creation, not to the transport that carries
+    the request.
+    """
+
+    raw = params.get("sources")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list | tuple):
+        raise TypeError("sources must be a list")
+    sources: list[dict[str, Any]] = []
+    for source in raw:
+        if not isinstance(source, dict):
+            raise TypeError("each source must be an object")
+        sources.append(dict(source))
+    return tuple(sources)
+
+
 def int_param(params: dict[str, Any], key: str, default: int) -> int:
     value = params.get(key, default)
     if isinstance(value, bool):
@@ -276,6 +298,28 @@ class RuntimeCommandsParams:
     @classmethod
     def parse(cls, params: dict[str, Any]) -> RuntimeCommandsParams:
         return cls(limit=int_param(params, "limit", 100))
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeProjectCreateParams:
+    """One request to create a project whose path the runtime chooses."""
+
+    name: str
+    sources: tuple[dict[str, Any], ...]
+    operation_id: str | None
+
+    @classmethod
+    def parse(cls, params: dict[str, Any]) -> RuntimeProjectCreateParams:
+        # A name of only whitespace would be rejected by the runtime's own API
+        # anyway, so it is refused here where the failure names the field.
+        name = required_name(params).strip()
+        if not name:
+            raise ValueError("name is required")
+        return cls(
+            name=name,
+            sources=project_sources(params),
+            operation_id=optional_string(params.get("operationId")),
+        )
 
 
 @dataclass(frozen=True, slots=True)

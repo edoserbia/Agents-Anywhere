@@ -92,7 +92,7 @@ fun NewSessionScreen(
     devicesRefreshing: Boolean,
     initialProjectId: String? = null,
     projectOnly: Boolean = false,
-    onCreateProject: suspend (String, String, String) -> Result<AgentProject> = { _, _, _ ->
+    onCreateProject: suspend (String, String, String?, String?) -> Result<AgentProject> = { _, _, _, _ ->
         Result.failure(IllegalStateException("Project creation is not connected."))
     },
 ) {
@@ -296,6 +296,13 @@ fun NewSessionScreen(
         runtimeSelection.connectorId == selectedDevice.id &&
         !runtimeSelection.runtimesLoading && runtimeSelection.runtimesErrorMessage == null &&
         activeNewSessionRuntimes(inventory.results[selectedDevice.id]?.runtimes.orEmpty()).any { it.id == selectedRuntime?.id }
+    // A runtime that creates project directories owns the workspace, so the
+    // project form asks for a name only. The capabilities must belong to the
+    // device that is selected right now, or the form would hide its path field
+    // for a runtime the user has already switched away from.
+    val projectRuntimeId = selectedRuntime
+        ?.takeIf { runtimeSelection.connectorId == selectedDevice?.id && runtimeSelection.runtimeCreatesProject }
+        ?.id
     val setupState = if (creatingProject) null else newSessionSetupState(
         sessions = sessionsState,
         inventory = inventory,
@@ -711,7 +718,12 @@ fun NewSessionScreen(
         val inputPath = selectedWorkspacePath.trim()
         val inputName = projectName.trim()
         val useDirectoryName = !nameEdited
-        if (projectCreating || inputPath.isBlank() || inputName.isBlank()) return
+        // The runtime that owns project workspaces generates the directory, so
+        // there is no path to choose, resolve or compare against an existing
+        // project — only a name to confirm.
+        val owningRuntimeId = projectRuntimeId
+        if (projectCreating || inputName.isBlank()) return
+        if (owningRuntimeId == null && inputPath.isBlank()) return
         focusManager.clearFocus()
         keyboard?.hide()
         projectCreating = true
@@ -720,6 +732,21 @@ fun NewSessionScreen(
             var attemptedName = inputName
             var existingProjectId: String? = null
             try {
+                if (owningRuntimeId != null) {
+                    attemptedName = availableProjectName(inputName, projects)
+                    projectName = attemptedName
+                    val project = onCreateProject(attemptedName, device.id, null, owningRuntimeId).getOrThrow()
+                    localProject = project
+                    selectDevice(project.connectorId, persist = true)
+                    selectedProjectId = project.id
+                    selectedDeviceId = project.connectorId
+                    selectedWorkspacePath = project.workspacePath
+                    currentPath = project.workspacePath
+                    expandedConfiguration = null
+                    if (projectOnly) navigate(AppDestination.Sessions) else creatingProject = false
+                    choosePath = false
+                    return@launch
+                }
                 val path = if (inputPath.startsWith("~")) {
                     onListDirectory(device.id, inputPath, ".").getOrThrow().path.also {
                         require(it.isNotBlank() && !it.startsWith("~")) {
@@ -741,7 +768,7 @@ fun NewSessionScreen(
                     workspaceConflict = existing
                     return@launch
                 }
-                val project = onCreateProject(attemptedName, device.id, path).getOrThrow()
+                val project = onCreateProject(attemptedName, device.id, path, null).getOrThrow()
                 localProject = project
                 selectDevice(project.connectorId, persist = true)
                 selectedProjectId = project.id
@@ -811,11 +838,13 @@ fun NewSessionScreen(
                 projectCreateError = null
             },
             creating = projectCreating,
-            canCreate = projectName.isNotBlank() && directoryReady && directorySelected && !projectCreating,
+            canCreate = projectName.isNotBlank() && selectedDevice != null && !projectCreating &&
+                (projectRuntimeId != null || (directoryReady && directorySelected)),
             error = projectCreateError,
             onBack = ::cancelProjectCreation,
             onCreate = { createProject() },
         ) {
+            if (projectRuntimeId != null) return@NewProjectScreen
             ChoosePathSection(
                 title = stringResource(R.string.new_session_project_directory),
                 currentPath = currentPath,

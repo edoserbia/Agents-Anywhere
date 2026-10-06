@@ -34,7 +34,13 @@ import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "
 import { FileBrowserDialog } from "@/components/workspace-file-browser-dialog"
 import { useAuth } from "@/components/auth/auth-context"
 import { dashboardApi } from "@/features/dashboard/api"
-import { availableProjectName, findWorkspaceProject, workspaceName } from "@/features/dashboard/project-workspaces"
+import {
+  availableProjectName,
+  findWorkspaceProject,
+  projectCreateRequest,
+  projectCreatingRuntime,
+  workspaceName,
+} from "@/features/dashboard/project-workspaces"
 import {
   Select,
   SelectContent,
@@ -45,6 +51,7 @@ import {
 } from "@/components/ui/select"
 import { Spinner } from "@/components/ui/spinner"
 import type {
+  DeviceRuntimeView,
   ProjectCreateRequest,
   ProjectPatchRequest,
   ProjectView,
@@ -62,6 +69,7 @@ export function ProjectEditorDialog({
   connectors,
   projects,
   preferredConnectorId,
+  preferredRuntimeId,
   onOpenChange,
   onCreate,
   onUpdate,
@@ -74,6 +82,11 @@ export function ProjectEditorDialog({
     deviceOs?: string | null
   }>
   preferredConnectorId?: string
+  /**
+   * The runtime the caller already chose, when it has one. The form hides its
+   * path field only when that runtime creates project directories itself.
+   */
+  preferredRuntimeId?: string
   projects: ProjectView[]
   onOpenChange: (open: boolean) => void
   onCreate: (payload: ProjectCreateRequest) => Promise<ProjectView | null>
@@ -86,6 +99,7 @@ export function ProjectEditorDialog({
   const [name, setName] = React.useState("")
   const [connectorId, setConnectorId] = React.useState("")
   const [path, setPath] = React.useState("")
+  const [deviceRuntimes, setDeviceRuntimes] = React.useState<DeviceRuntimeView[]>([])
   const [browserOpen, setBrowserOpen] = React.useState(false)
   const [nameEdited, setNameEdited] = React.useState(false)
   const [nameAdjusted, setNameAdjusted] = React.useState(false)
@@ -120,7 +134,39 @@ export function ProjectEditorDialog({
     setWorkspaceConflict(null)
   }, [editor])
 
-  const existingWorkspace = findWorkspaceProject(projects, connectorId, path, selectedConnector?.deviceOs)
+  // Which runtime, if any, will create this project's directory. It is read
+  // from the device's own runtime records rather than assumed, because the
+  // answer decides whether the form asks for a path at all.
+  React.useEffect(() => {
+    if (!editor || editingProject || !connectorId || !session?.accessToken) {
+      setDeviceRuntimes([])
+      return
+    }
+    let cancelled = false
+    // Cleared first so a device switch never reuses the previous device's
+    // runtimes: until this device answers, the form conservatively asks for a
+    // path instead of hiding the field for the wrong runtime.
+    setDeviceRuntimes([])
+    dashboardApi.getConnectorRuntimes(session.accessToken, connectorId)
+      .then((response) => {
+        if (!cancelled) setDeviceRuntimes(response.runtimes)
+      })
+      .catch(() => {
+        if (!cancelled) setDeviceRuntimes([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [connectorId, editingProject, editor, session?.accessToken])
+
+  const pathRuntime = editingProject
+    ? null
+    : projectCreatingRuntime(deviceRuntimes, preferredRuntimeId)
+  const runtimeOwnsPath = pathRuntime !== null
+
+  const existingWorkspace = runtimeOwnsPath
+    ? undefined
+    : findWorkspaceProject(projects, connectorId, path, selectedConnector?.deviceOs)
   const ignoredProjectId = editingProject?.id ?? existingWorkspace?.id
 
   React.useEffect(() => {
@@ -141,13 +187,16 @@ export function ProjectEditorDialog({
 
   const persistProject = async () => {
     if (!editor || !name.trim() || savingRef.current) return
-    if (!editingProject && (!path.trim() || selectedConnector?.status !== "online")) return
+    if (!editingProject && selectedConnector?.status !== "online") return
+    // A runtime-owned workspace has no path to check; a client-supplied one must
+    // still name a directory.
+    if (!editingProject && !runtimeOwnsPath && !path.trim()) return
     const projectName = normalizeName()
     savingRef.current = true
     setSaving(true)
     try {
       let workspacePath = path.trim()
-      if (!editingProject && workspacePath.startsWith("~")) {
+      if (!editingProject && !runtimeOwnsPath && workspacePath.startsWith("~")) {
         const response = await dashboardApi.connectorFsList(session!.accessToken, connectorId, { root: workspacePath, path: "." })
         if (!response.result.path || response.result.targetType === "file") throw new Error(tWorkspace("directoryRequired"))
         workspacePath = response.result.path
@@ -155,7 +204,12 @@ export function ProjectEditorDialog({
       }
       const result = editingProject
         ? await onUpdate(editingProject.id, { name: projectName })
-        : await onCreate({ name: projectName, connectorId, workspacePath })
+        : await onCreate(projectCreateRequest({
+          name: projectName,
+          connectorId,
+          workspacePath,
+          runtimeId: pathRuntime?.runtimeId,
+        }))
       if (!result) {
         toast.error(t(editingProject ? "updateFailed" : "createFailed"))
         return
@@ -203,7 +257,7 @@ export function ProjectEditorDialog({
             <DialogHeader>
               <DialogTitle>{t(editingProject ? "editTitle" : "createTitle")}</DialogTitle>
               <DialogDescription>
-                {t(editingProject ? "editDescription" : "createDescription")}
+                {t(editingProject ? "editDescription" : runtimeOwnsPath ? "createDescriptionRuntime" : "createDescription")}
               </DialogDescription>
             </DialogHeader>
 
@@ -237,35 +291,44 @@ export function ProjectEditorDialog({
                 )}
                 {!editingProject && onlineConnectors.length === 0 ? <FieldDescription>{t("onlineDeviceRequired")}</FieldDescription> : null}
               </Field>
-              <Field data-disabled={Boolean(editingProject) || !connectorId || saving || undefined}>
-                <FieldLabel htmlFor="project-workspace">{t("workspace")}</FieldLabel>
-                <InputGroup>
-                  <InputGroupInput
-                    id="project-workspace"
-                    value={path}
-                    maxLength={4096}
-                    disabled={Boolean(editingProject) || !connectorId || saving}
-                    readOnly={Boolean(editingProject)}
-                    onChange={(event) => { setPath(event.currentTarget.value); setNameError("") }}
-                    placeholder={tWorkspace("enterPath")}
-                    className="min-w-0 code-mono text-xs"
-                  />
-                  {!editingProject ? (
-                    <InputGroupAddon align="inline-end">
-                      <InputGroupButton
-                        size="icon-xs"
-                        disabled={selectedConnector?.status !== "online" || saving}
-                        aria-label={tWorkspace("browseFilesystem")}
-                        title={tWorkspace("browseFilesystem")}
-                        onClick={() => setBrowserOpen(true)}
-                      >
-                        <FolderOpen />
-                      </InputGroupButton>
-                    </InputGroupAddon>
-                  ) : null}
-                </InputGroup>
-                {editingProject ? <FieldDescription>{t("workspaceImmutable")}</FieldDescription> : null}
-              </Field>
+              {runtimeOwnsPath ? (
+                <Field>
+                  <FieldLabel htmlFor="project-workspace">{t("workspace")}</FieldLabel>
+                  <FieldDescription id="project-workspace-runtime">
+                    {t("workspaceOwnedByRuntime", { runtime: pathRuntime?.displayName ?? pathRuntime?.runtimeId ?? "" })}
+                  </FieldDescription>
+                </Field>
+              ) : (
+                <Field data-disabled={Boolean(editingProject) || !connectorId || saving || undefined}>
+                  <FieldLabel htmlFor="project-workspace">{t("workspace")}</FieldLabel>
+                  <InputGroup>
+                    <InputGroupInput
+                      id="project-workspace"
+                      value={path}
+                      maxLength={4096}
+                      disabled={Boolean(editingProject) || !connectorId || saving}
+                      readOnly={Boolean(editingProject)}
+                      onChange={(event) => { setPath(event.currentTarget.value); setNameError("") }}
+                      placeholder={tWorkspace("enterPath")}
+                      className="min-w-0 code-mono text-xs"
+                    />
+                    {!editingProject ? (
+                      <InputGroupAddon align="inline-end">
+                        <InputGroupButton
+                          size="icon-xs"
+                          disabled={selectedConnector?.status !== "online" || saving}
+                          aria-label={tWorkspace("browseFilesystem")}
+                          title={tWorkspace("browseFilesystem")}
+                          onClick={() => setBrowserOpen(true)}
+                        >
+                          <FolderOpen />
+                        </InputGroupButton>
+                      </InputGroupAddon>
+                    ) : null}
+                  </InputGroup>
+                  {editingProject ? <FieldDescription>{t("workspaceImmutable")}</FieldDescription> : null}
+                </Field>
+              )}
               <Field data-invalid={Boolean(nameError) || undefined}>
                 <FieldLabel htmlFor="project-name">{t("name")}</FieldLabel>
                 <Input
@@ -284,7 +347,7 @@ export function ProjectEditorDialog({
                   onBlur={normalizeName}
                   placeholder={t("namePlaceholder")}
                 />
-                <FieldDescription id="project-name-description">{t(nameAdjusted ? "nameAdjusted" : "nameDescription")}</FieldDescription>
+                <FieldDescription id="project-name-description">{t(nameAdjusted ? "nameAdjusted" : runtimeOwnsPath ? "nameDescriptionRuntime" : "nameDescription")}</FieldDescription>
                 <FieldError id="project-name-error">{nameError}</FieldError>
               </Field>
             </FieldGroup>
@@ -295,7 +358,7 @@ export function ProjectEditorDialog({
               </Button>
               <Button
                 type="submit"
-                disabled={saving || name.trim().length === 0 || (!editingProject && (selectedConnector?.status !== "online" || !path.trim()))}
+                disabled={saving || name.trim().length === 0 || (!editingProject && (selectedConnector?.status !== "online" || (!runtimeOwnsPath && !path.trim())))}
               >
                 {saving ? <Spinner data-icon="inline-start" /> : null}
                 {editingProject ? tCommon("save") : t("create")}

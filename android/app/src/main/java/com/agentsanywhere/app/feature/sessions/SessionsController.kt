@@ -436,16 +436,26 @@ class SessionsController(
         }
     }
 
+    /**
+     * Create a project, from a path the user chose or one a runtime generates.
+     *
+     * [runtimeId] is the runtime that owns the workspace, so the server stores
+     * the directory it answers with and no path is resolved here. Without it the
+     * user's [workspacePath] is required and resolved as before.
+     */
     suspend fun createProject(
         name: String,
         connectorId: String,
-        workspacePath: String,
+        workspacePath: String? = null,
+        runtimeId: String? = null,
     ): Result<AgentProject> {
         val normalizedName = name.trim()
-        val normalizedPath = workspacePath.trim()
+        val normalizedPath = workspacePath?.trim().orEmpty()
         if (normalizedName.isBlank()) return Result.failure(IllegalArgumentException("Project name is required."))
         if (connectorId.isBlank()) return Result.failure(IllegalArgumentException("Connector is required."))
-        if (normalizedPath.isBlank()) return Result.failure(IllegalArgumentException("Project path is required."))
+        if (runtimeId == null && normalizedPath.isBlank()) {
+            return Result.failure(IllegalArgumentException("Project path is required."))
+        }
         val auth = newSessionAuth()
             ?: return Result.failure(IllegalStateException("Sign in again to create a project."))
         return withContext(Dispatchers.IO) {
@@ -455,7 +465,12 @@ class SessionsController(
                     authorizationToken = auth.accessToken,
                     name = normalizedName,
                     connectorId = connectorId,
-                    workspacePath = resolveDirectory(auth.serverUrl, auth.accessToken, connectorId, normalizedPath),
+                    workspacePath = if (runtimeId == null) {
+                        resolveDirectory(auth.serverUrl, auth.accessToken, connectorId, normalizedPath)
+                    } else {
+                        null
+                    },
+                    runtimeId = runtimeId,
                 ).project.toAgentProject()
             }.wrapNewSessionFailure("Could not create this project.")
         }

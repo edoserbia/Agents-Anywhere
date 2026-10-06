@@ -23,7 +23,7 @@ import asyncio
 import base64
 import hashlib
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from time import monotonic
 from typing import Any
@@ -41,6 +41,7 @@ from connector.runtime_protocol import (
     RuntimeInvalidRequestError,
     RuntimeModelCatalog,
     RuntimeOperationResult,
+    RuntimeProject,
     RuntimeTimelineSnapshot,
     RuntimeUnavailableError,
     RuntimeUnsupportedError,
@@ -138,6 +139,10 @@ def runtime_capabilities() -> dict[str, bool]:
     and steering are absent rather than false-by-omission: the platform reads
     these keys to decide which affordances to offer, and advertising one this
     runtime cannot serve is worse than omitting it.
+
+    ``createProject`` says this runtime generates project directories itself, so
+    a client must not ask the user for one — it is the flag the create-project
+    form reads to hide its path field.
     """
 
     return {
@@ -148,6 +153,7 @@ def runtime_capabilities() -> dict[str, bool]:
         "sessionState": True,
         "sessionNotices": True,
         "createAndStartSession": True,
+        "createProject": True,
         "startTurn": True,
         "steerTurn": False,
         "interruptTurn": True,
@@ -298,6 +304,36 @@ class OpenScienceRuntime(AgentRuntime):
             revision=catalog.revision,
             models=selected[: max(0, limit)],
         )
+
+    async def create_project(
+        self,
+        name: str,
+        sources: Sequence[Mapping[str, Any]] | None = None,
+        operation_id: str | None = None,
+    ) -> RuntimeProject:
+        """Create a project and report the directory OpenScience generated.
+
+        The path is never proposed here: OpenScience owns project identity and
+        answers with the worktree it chose, which the caller stores as the
+        project's workspace. A retryable caller passes its own ``operation_id``
+        — the server replays the original project for the same name and sources
+        rather than creating a second one, which matters because OpenScience
+        has no delete-project route.
+        """
+
+        client = await self._ensure_client()
+
+        async def create() -> RuntimeProject:
+            payload = await client.create_project(
+                name,
+                sources=sources,
+                operation_id=operation_id or str(uuid4()),
+            )
+            # The mapping runs inside the call so a server answer that cannot be
+            # read as a project fails the same way a transport failure does.
+            return models.created_project(payload, name=name)
+
+        return await self._call(create, "project.create")
 
     async def list_sessions(
         self,
@@ -1552,6 +1588,7 @@ _CAPABILITY_IDS: tuple[tuple[str, str], ...] = (
     ("modelCatalog", "catalog.model"),
     ("modelCatalog", "catalog.effort"),
     ("permissionCatalog", "catalog.permission"),
+    ("createProject", "project.create"),
     ("startTurn", "session.send_message"),
     ("steerTurn", "session.steer"),
     ("interruptTurn", "session.interrupt"),

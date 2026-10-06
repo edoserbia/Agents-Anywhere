@@ -11,6 +11,12 @@ const val MODEL_CATALOG_CAPABILITY = "catalog.model"
 const val PERMISSION_CATALOG_CAPABILITY = "catalog.permission"
 const val ATTACHMENT_CAPABILITY = "runtime.attachment"
 
+/**
+ * The runtime creates project directories itself, so a project form must not
+ * ask for a path. Published by such a runtime in its own capability set.
+ */
+const val PROJECT_CREATE_CAPABILITY = "project.create"
+
 data class NewSessionRuntimeRequestKey(
     val connectorId: String,
     val runtimeId: String,
@@ -236,6 +242,12 @@ data class NewSessionRuntimeSelectionState(
     val canUseAttachments: Boolean
         get() = selectedRuntime?.let { runtime ->
             capabilities.data?.find(ATTACHMENT_CAPABILITY, runtime.id, runtime.type)?.usable
+        } == true
+
+    /** The selected runtime owns project workspaces; the form must not ask for one. */
+    val runtimeCreatesProject: Boolean
+        get() = selectedRuntime?.let { runtime ->
+            capabilities.data?.find(PROJECT_CREATE_CAPABILITY, runtime.id, runtime.type)?.usable
         } == true
 
     val readyForCreate: Boolean

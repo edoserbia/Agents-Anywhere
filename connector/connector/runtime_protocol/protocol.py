@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from connector.runtime_protocol.errors import RuntimeUnsupportedError
@@ -16,6 +16,7 @@ from connector.runtime_protocol.models import (
     RuntimeModelCatalog,
     RuntimeOperationResult,
     RuntimePermissionCatalog,
+    RuntimeProject,
     RuntimeTimelineSnapshot,
     SessionMeta,
     SessionNotice,
@@ -70,6 +71,23 @@ class AgentRuntime(ABC):
         limit: int = 100,
     ) -> RuntimePermissionCatalog:
         raise RuntimeUnsupportedError("list_permission_catalog")
+
+    async def create_project(
+        self,
+        name: str,
+        sources: Sequence[Mapping[str, Any]] | None = None,
+        operation_id: str | None = None,
+    ) -> RuntimeProject:
+        """Create a project whose location the runtime chooses.
+
+        Only a runtime that generates project directories can answer this, and
+        it advertises ``project.create`` when it does; every other runtime keeps
+        the platform's own project creation, where the client supplies the
+        workspace path. ``sources`` and ``operation_id`` are passed through to
+        the runtime's own project API rather than interpreted here.
+        """
+
+        raise RuntimeUnsupportedError("create_project")
 
     async def list_sessions(
         self,

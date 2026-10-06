@@ -14,6 +14,7 @@ from connector.runtime_protocol import (
     RuntimeModelCatalog,
     RuntimeOperationResult,
     RuntimePermissionCatalog,
+    RuntimeProject,
     RuntimeTypeDescriptor,
     SessionNotice,
     SessionSourceObservation,
@@ -261,6 +262,22 @@ def session_notice_payload(notice: SessionNotice) -> dict[str, Any]:
             "metadata": dict(notice.metadata),
         }
     )
+
+
+def runtime_project_payload(project: RuntimeProject) -> dict[str, Any]:
+    """Publish a runtime-created project, including the path it chose.
+
+    The worktree is the payload's reason to exist: it is what the platform
+    stores as the project's workspace, so it is reported verbatim rather than
+    normalized here.
+    """
+
+    return {
+        "projectId": project.project_id,
+        "name": project.name,
+        "worktree": project.worktree,
+        "metadata": dict(project.metadata),
+    }
 
 
 def model_catalog_payload(catalog: RuntimeModelCatalog) -> dict[str, Any]:

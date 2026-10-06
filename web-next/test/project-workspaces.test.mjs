@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { ApiError } from "../src/lib/api/errors.ts"
-import { availableProjectName, findWorkspaceProject, resolveWorkspaceProject, workspaceName, workspacePathKey } from "../src/features/dashboard/project-workspaces.ts"
+import { availableProjectName, findWorkspaceProject, projectCreateRequest, projectCreatingRuntime, resolveWorkspaceProject, runtimeCreatesProject, workspaceName, workspacePathKey } from "../src/features/dashboard/project-workspaces.ts"
 
 const project = (id, name, connectorId, workspacePath) => ({ id, name, connectorId, workspacePath })
 const conflict = () => new ApiError({ status: 409, kind: "http", code: "project_name_conflict", detail: "Name already used" })
@@ -112,4 +112,54 @@ test("a failed lookup or invalid workspace never creates a project", async () =>
   for (const selection of [{ connectorId: "mac", path: " " }, { connectorId: "", path: "/repo" }]) {
     await assert.rejects(resolveWorkspaceProject({ projects: [], ...selection, list: () => assert.fail("invalid workspace"), create: () => assert.fail("invalid workspace") }))
   }
+})
+
+const runtime = (runtimeId, capabilities, active = true) => ({ runtimeId, capabilities, active })
+
+test("only a runtime that advertises createProject owns the path", () => {
+  assert.equal(runtimeCreatesProject(runtime("openscience", { createProject: true })), true)
+  assert.equal(runtimeCreatesProject(runtime("codex", { modelCatalog: true })), false)
+  assert.equal(runtimeCreatesProject(runtime("codex", { createProject: false })), false)
+  assert.equal(runtimeCreatesProject(runtime("codex", undefined)), false)
+  assert.equal(runtimeCreatesProject(null), false)
+  assert.equal(runtimeCreatesProject(undefined), false)
+})
+
+test("a named runtime decides on its own, without falling back to another", () => {
+  const runtimes = [
+    runtime("openscience", { createProject: true }),
+    runtime("codex", { modelCatalog: true }),
+  ]
+  assert.equal(projectCreatingRuntime(runtimes, "openscience")?.runtimeId, "openscience")
+  // The caller chose Codex, so the form still asks for a path even though the
+  // device also hosts a runtime that could create one.
+  assert.equal(projectCreatingRuntime(runtimes, "codex"), null)
+  assert.equal(projectCreatingRuntime(runtimes, "missing"), null)
+})
+
+test("without a named runtime the device's active path-creating runtime answers", () => {
+  const runtimes = [
+    runtime("openscience", { createProject: true }, false),
+    runtime("openscience-2", { createProject: true }, true),
+    runtime("codex", { modelCatalog: true }),
+  ]
+  assert.equal(projectCreatingRuntime(runtimes)?.runtimeId, "openscience-2")
+  assert.equal(projectCreatingRuntime([runtime("openscience", { createProject: true }, false)]), null)
+  assert.equal(projectCreatingRuntime([]), null)
+  assert.equal(projectCreatingRuntime(undefined), null)
+})
+
+test("the create request names exactly one workspace source", () => {
+  assert.deepEqual(
+    projectCreateRequest({ name: "analysis", connectorId: "mac", runtimeId: "openscience", workspacePath: "/ignored" }),
+    { name: "analysis", connectorId: "mac", runtimeId: "openscience" },
+  )
+  assert.deepEqual(
+    projectCreateRequest({ name: "analysis", connectorId: "mac", workspacePath: " /work/repo " }),
+    { name: "analysis", connectorId: "mac", workspacePath: "/work/repo" },
+  )
+  assert.deepEqual(
+    projectCreateRequest({ name: "analysis", connectorId: "mac" }),
+    { name: "analysis", connectorId: "mac", workspacePath: "" },
+  )
 })

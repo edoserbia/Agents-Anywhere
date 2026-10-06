@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -23,6 +23,7 @@ from connector.runtime_protocol.models import (
     RuntimeModelCatalog,
     RuntimeOperationResult,
     RuntimePermissionCatalog,
+    RuntimeProject,
     RuntimeStatus,
     RuntimeTimelineItem,
     RuntimeTimelineSnapshot,
@@ -499,6 +500,25 @@ class RuntimeInstance(AgentRuntime):
             catalog,
             runtime=self.instance.runtime_type,
             runtime_id=self.instance.runtime_id,
+        )
+
+    async def create_project(
+        self,
+        name: str,
+        sources: Sequence[Mapping[str, Any]] | None = None,
+        operation_id: str | None = None,
+    ) -> RuntimeProject:
+        """Delegate project creation, whose answer is already instance-neutral.
+
+        A created project carries no runtime identity of its own — the instance
+        that created it is the caller's scope — so the result passes through
+        instead of being rewritten the way a catalog is.
+        """
+
+        return await self.native_runtime.create_project(
+            name,
+            sources=sources,
+            operation_id=operation_id,
         )
 
     async def list_sessions(

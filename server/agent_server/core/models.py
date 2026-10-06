@@ -163,12 +163,26 @@ class ProjectCreateRequest(BaseModel):
 
     name: str = Field(min_length=1, max_length=255)
     connectorId: str = Field(min_length=1)
-    workspacePath: str = Field(min_length=1, max_length=4096)
+    # Omitted when the runtime creates the project: a runtime that advertises
+    # `project.create` generates the directory itself, and a path from the
+    # client would be a second, conflicting answer to where the project lives.
+    workspacePath: str | None = Field(default=None, min_length=1, max_length=4096)
+    # The runtime instance to ask for a generated workspace. Its type is read
+    # from the device's own runtime record rather than trusted from the client.
+    runtimeId: str | None = Field(default=None, min_length=1, max_length=255)
     # Automatic workspace selection must not claim or rename an existing project.
     manuallyCreated: bool = True
     # Retained for compatibility with older clients. Project creation never
     # binds existing sessions, even when this legacy flag is true.
     attachMatchingSessions: bool = False
+
+    @model_validator(mode="after")
+    def _require_exactly_one_workspace_source(self) -> ProjectCreateRequest:
+        if self.runtimeId is None and self.workspacePath is None:
+            raise ValueError("workspacePath is required")
+        if self.runtimeId is not None and self.workspacePath is not None:
+            raise ValueError("workspacePath must be omitted when runtimeId is given")
+        return self
 
 
 class ProjectPatchRequest(BaseModel):

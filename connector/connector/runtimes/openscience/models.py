@@ -42,6 +42,7 @@ from connector.runtime_protocol import (
     ReasoningSystemContent,
     RuntimeModelCatalog,
     RuntimeModelItem,
+    RuntimeProject,
     RuntimeReasoningItem,
     RuntimeStatus,
     RuntimeTimelineItem,
@@ -329,6 +330,35 @@ def session_meta(
             "projectID": _optional_string(data.get("projectID")),
             "workspace": _optional_string(data.get("workspace")),
         },
+    )
+
+
+def created_project(payload: Mapping[str, Any], *, name: str) -> RuntimeProject:
+    """Map the project OpenScience created onto the identity the caller stores.
+
+    Both the id and the ``worktree`` are required. They are the whole point of
+    this call — the server generated the directory and is the only party that
+    knows it — so a response missing either is a protocol failure rather than
+    something to fill in from the request.
+    """
+
+    info = _mapping(payload, "project")
+    metadata: dict[str, Any] = {}
+    origin = _optional_string(info.get("origin"))
+    if origin is not None:
+        metadata["origin"] = origin
+    icon = info.get("icon")
+    if isinstance(icon, Mapping):
+        metadata["icon"] = {
+            str(key): value for key, value in icon.items() if isinstance(key, str)
+        }
+    return RuntimeProject(
+        project_id=_required_string(info.get("id"), "project id"),
+        # The server normalizes the name, so its answer wins; the requested name
+        # is only a fallback for a server that echoes nothing.
+        name=_optional_string(info.get("name")) or name,
+        worktree=_required_string(info.get("worktree"), "project worktree"),
+        metadata=metadata,
     )
 
 

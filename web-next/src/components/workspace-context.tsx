@@ -316,7 +316,7 @@ export type WorkspaceState = {
   toggleArchiveSession: (id: string, archived?: boolean) => Promise<SessionView | null>
   renameSession: (id: string, title: string) => Promise<boolean>
   createProject: (payload: ProjectCreateRequest) => Promise<ProjectView | null>
-  resolveProject: (payload: Pick<ProjectCreateRequest, "connectorId" | "workspacePath">) => Promise<ProjectView>
+  resolveProject: (payload: { connectorId: string; workspacePath: string }) => Promise<ProjectView>
   updateProject: (projectId: string, patch: ProjectPatchRequest) => Promise<ProjectView | null>
   deleteProject: (projectId: string) => Promise<boolean>
   archiveProjectSessions: (projectId: string) => Promise<boolean>
@@ -977,7 +977,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     }
   }, [authSession?.accessToken, refreshProjects, upsertProject])
 
-  const resolveProject = React.useCallback(async (payload: Pick<ProjectCreateRequest, "connectorId" | "workspacePath">): Promise<ProjectView> => {
+  const resolveProject = React.useCallback(async (payload: { connectorId: string; workspacePath: string }): Promise<ProjectView> => {
     const token = authSession?.accessToken
     if (!token) throw new Error("Authentication required")
     let path = payload.workspacePath.trim()

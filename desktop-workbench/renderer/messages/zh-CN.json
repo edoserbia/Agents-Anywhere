@@ -802,7 +802,10 @@
       "create": "创建项目",
       "nameDescription": "根据目录自动生成，可自行修改。",
       "nameAdjusted": "已自动调整名称，避免与已有项目重名。",
-      "nameAdjustedRetry": "该名称刚刚被使用，已生成可用名称，请确认后再次提交。"
+      "nameAdjustedRetry": "该名称刚刚被使用，已生成可用名称，请确认后再次提交。",
+      "createDescriptionRuntime": "先选择设备并确认项目名称，项目存放位置由运行时决定。",
+      "nameDescriptionRuntime": "项目目录由运行时创建，只需填写名称。",
+      "workspaceOwnedByRuntime": "存放位置由 {runtime} 决定。"
     },
     "mobileConnections": {
       "accountUnavailable": "当前账号不可用，请重新登录后再试。",

@@ -23,19 +23,27 @@ class SessionsApi(
         )
     }
 
+    /**
+     * Create a project from exactly one workspace source.
+     *
+     * [runtimeId] asks that runtime to generate the directory — the server then
+     * stores whatever it answered — while [workspacePath] is the client's own
+     * choice. Sending both is rejected by the server, so only one is written.
+     */
     fun createProject(
         serverUrl: String,
         authorizationToken: String,
         name: String,
         connectorId: String,
-        workspacePath: String,
+        workspacePath: String? = null,
+        runtimeId: String? = null,
         manuallyCreated: Boolean = true,
     ): RemoteProjectCreateResponse {
         val body = JSONObject()
             .put("name", name)
             .put("connectorId", connectorId)
-            .put("workspacePath", workspacePath)
             .put("manuallyCreated", manuallyCreated)
+        if (runtimeId != null) body.put("runtimeId", runtimeId) else body.put("workspacePath", workspacePath)
         val response = client.postJson(
             serverUrl = serverUrl,
             path = "/projects",

@@ -14,6 +14,7 @@ import asyncio
 import base64
 import copy
 import json
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, Self
@@ -30,6 +31,7 @@ from connector.runtime_protocol import (
     RuntimeOperationResult,
     RuntimeUnavailableError,
     RuntimeUnsupportedError,
+    RuntimeUpstreamError,
 )
 from connector.runtimes.catalog_revisions import runtime_catalog_revision
 from connector.runtimes.openscience import discovery, models, provider_config
@@ -405,6 +407,11 @@ class FakeClient:
         self.gap_sessions: set[str] = set()
         self.expired_sessions: set[str] = set()
         self.closed = False
+        # Every project creation this fake was asked for, and the error to
+        # answer with instead, so a test can assert the name, sources and
+        # idempotency key the runtime sent.
+        self.project_requests: list[dict[str, Any]] = []
+        self.create_project_error: Exception | None = None
 
     def scope_of(self, method: str, session_id: str | None = None) -> Any:
         """The selector of the last matching call, for scope assertions."""
@@ -438,6 +445,31 @@ class FakeClient:
         if self.fail_providers:
             raise OpenScienceConnectionError("provider catalog unavailable")
         return copy.deepcopy(self.providers)
+
+    async def create_project(
+        self,
+        name: str,
+        *,
+        sources: Any = None,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append("create_project")
+        self.project_requests.append(
+            {"name": name, "sources": sources, "operation_id": operation_id}
+        )
+        if self.create_project_error is not None:
+            raise self.create_project_error
+        project = {
+            "id": f"prj_new{len(self.project_requests)}",
+            # The generated directory is the server's decision, which is exactly
+            # what this path must never take from the caller.
+            "worktree": f"/srv/openscience/{name}-{len(self.project_requests)}",
+            "name": name,
+            "origin": "openscience",
+            "icon": {"color": "lime"},
+        }
+        self.projects.append(project)
+        return project
 
     async def list_sessions(self, *, directory: Any = None) -> list[dict[str, Any]]:
         self.calls.append("list_sessions")
@@ -696,6 +728,7 @@ def test_provider_identity_and_descriptor_capabilities() -> None:
         assert descriptor.capabilities["attachments"] is True
         assert descriptor.capabilities["ipc"] is True
         assert descriptor.capabilities["modelCatalog"] is True
+        assert descriptor.capabilities["createProject"] is True
         assert descriptor.capabilities["commands"] is False
         assert descriptor.capabilities["steerTurn"] is False
         assert descriptor.capabilities["permissionCatalog"] is False
@@ -1790,6 +1823,111 @@ def test_client_scopes_each_call_and_defaults_to_the_configured_project() -> Non
     run(exercise())
 
 
+def test_client_creates_a_project_through_the_global_route() -> None:
+    """Creation is global and carries no selector, like the project catalog."""
+
+    seen: list[httpx.Request] = []
+    created = {
+        "id": "prj_c68a67abd3884a99af1365cced363be0",
+        "worktree": "/e/wzj/opensciense_projects/b472bf7e-cbd4-417d-8d6c-5a2f3042ab6d",
+        "name": "industry_fault_20261006",
+        "origin": "openscience",
+        "icon": {"color": "lime"},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(201, json=created)
+
+    async def exercise() -> None:
+        client = http_client(handler, directory="/srv/default")
+        project = await client.create_project(
+            "industry_fault_20261006",
+            sources=[{"path": "/data/inputs", "access": "read"}],
+            operation_id="6f1e6a4e-0000-4000-8000-000000000000",
+        )
+        await client.close()
+        request = seen[0]
+        assert request.method == "POST"
+        assert request.url.path == "/global/project"
+        # A project is what a selector would point at, so there is none.
+        assert "x-openscience-directory" not in request.headers
+        assert json.loads(request.content) == {
+            "name": "industry_fault_20261006",
+            "sources": [{"path": "/data/inputs", "access": "read"}],
+            "operation_id": "6f1e6a4e-0000-4000-8000-000000000000",
+        }
+        assert project == created
+
+    run(exercise())
+
+
+def test_client_omits_empty_project_options() -> None:
+    """A plain named project sends only its name; the server defaults sources."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(201, json={"id": "prj_1", "worktree": "/srv/one"})
+
+    async def exercise() -> None:
+        client = http_client(handler)
+        await client.create_project("quarterly")
+        await client.close()
+        assert json.loads(seen[0].content) == {"name": "quarterly"}
+
+    run(exercise())
+
+
+def test_client_rejects_a_project_request_the_server_would_refuse() -> None:
+    """The local checks exist so a bad request never reaches the server."""
+
+    async def exercise() -> None:
+        client = http_client(lambda request: httpx.Response(201, json={}))
+        with pytest.raises(ValueError):
+            await client.create_project("   ")
+        with pytest.raises(ValueError):
+            await client.create_project("ok", operation_id="not-a-uuid")
+        with pytest.raises(ValueError):
+            await client.create_project("ok", sources=[{"path": " "}])
+        with pytest.raises(TypeError):
+            await client.create_project("ok", sources=[{"path": 7}])
+        with pytest.raises(ValueError):
+            await client.create_project(
+                "ok", sources=[{"path": f"/data/{index}"} for index in range(11)]
+            )
+        await client.close()
+
+    run(exercise())
+
+
+def test_client_reports_a_project_operation_conflict_as_http_409() -> None:
+    """Reusing an operation id for a different draft is a conflict, not a retry."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409,
+            json={
+                "error": "project_operation_conflict",
+                "message": "This project operation is already bound to a different workspace choice.",
+            },
+        )
+
+    async def exercise() -> None:
+        client = http_client(handler)
+        with pytest.raises(OpenScienceHTTPError) as raised:
+            await client.create_project(
+                "industry_fault_20261006",
+                operation_id="6f1e6a4e-0000-4000-8000-000000000000",
+            )
+        await client.close()
+        assert raised.value.status == 409
+        assert raised.value.code == "project_operation_conflict"
+
+    run(exercise())
+
+
 def test_every_per_session_call_carries_its_project() -> None:
     """Every route that addresses one session must name that session's project.
 
@@ -2351,9 +2489,125 @@ def test_declared_capabilities_are_implemented_ones() -> None:
     assert declared["interactions"] is True
     assert declared["ipc"] is True
     assert declared["modelCatalog"] is True
+    assert declared["createProject"] is True
     assert declared["permissionCatalog"] is False
     assert declared["commands"] is False
     assert declared["steerTurn"] is False
+
+
+def test_the_create_project_capability_is_published_for_the_client() -> None:
+    """The client hides its path field on this flag, so it must be published."""
+
+    async def exercise() -> None:
+        host = make_host()
+        runtime = build_runtime(host, client=FakeClient())
+        capabilities = await runtime.get_runtime_capabilities()
+        published = {
+            capability.capability_id: capability
+            for capability in capabilities.capabilities
+        }
+        assert published["project.create"].supported is True
+        assert published["project.create"].available is True
+        assert published["project.create"].scope == "runtime"
+
+    run(exercise())
+
+
+def test_runtime_creates_a_project_and_reports_the_generated_worktree() -> None:
+    """The worktree is the server's answer, never a path the caller proposed."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient()
+        runtime = build_runtime(host, client=client)
+        try:
+            project = await runtime.create_project("industry_fault_20261006")
+        finally:
+            await runtime.stop()
+        assert project.project_id == "prj_new1"
+        assert project.name == "industry_fault_20261006"
+        assert project.worktree == "/srv/openscience/industry_fault_20261006-1"
+        assert project.metadata == {"origin": "openscience", "icon": {"color": "lime"}}
+        request = client.project_requests[0]
+        assert request["name"] == "industry_fault_20261006"
+        assert request["sources"] is None
+        # No id was supplied, so one is generated per attempt — and it is a real
+        # UUID, because the server validates it as one.
+        assert uuid.UUID(request["operation_id"]).version == 4
+        # The catalog route is global; a created project is too.
+        assert client.calls == ["capabilities", "create_project"]
+
+    run(exercise())
+
+
+def test_runtime_replays_a_caller_supplied_operation_id() -> None:
+    """A retryable caller keeps its idempotency key across attempts."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient()
+        runtime = build_runtime(host, client=client)
+        operation_id = "6f1e6a4e-0000-4000-8000-000000000000"
+        try:
+            await runtime.create_project(
+                "quarterly",
+                sources=[{"path": "/data/inputs", "access": "read"}],
+                operation_id=operation_id,
+            )
+        finally:
+            await runtime.stop()
+        assert client.project_requests[0] == {
+            "name": "quarterly",
+            "sources": [{"path": "/data/inputs", "access": "read"}],
+            "operation_id": operation_id,
+        }
+
+    run(exercise())
+
+
+def test_runtime_refuses_a_created_project_without_a_worktree() -> None:
+    """A project whose directory is unknown cannot be stored as a workspace."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient()
+        client.create_project = AsyncMock(  # type: ignore[method-assign]
+            return_value={"id": "prj_1", "name": "half"}
+        )
+        runtime = build_runtime(host, client=client)
+        try:
+            with pytest.raises(RuntimeUpstreamError):
+                await runtime.create_project("half")
+        finally:
+            await runtime.stop()
+
+    run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (OpenScienceHTTPError(400, {"error": "invalid_request"}), RuntimeInvalidRequestError),
+        (OpenScienceHTTPError(409, {"error": "project_operation_conflict"}), RuntimeConflictError),
+        (OpenScienceHTTPError(500, {"error": "boom"}), RuntimeUpstreamError),
+        (OpenScienceConnectionError("gone"), RuntimeUnavailableError),
+    ],
+)
+def test_runtime_maps_project_creation_failures_onto_protocol_errors(
+    error: Exception, expected: type[Exception]
+) -> None:
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient()
+        client.create_project_error = error
+        runtime = build_runtime(host, client=client)
+        try:
+            with pytest.raises(expected):
+                await runtime.create_project("anything")
+        finally:
+            await runtime.stop()
+
+    run(exercise())
 
 
 def test_the_model_catalog_publishes_both_model_and_effort_capabilities() -> None:

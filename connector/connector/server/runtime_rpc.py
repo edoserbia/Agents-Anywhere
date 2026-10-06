@@ -15,6 +15,7 @@ from connector.server.runtime_rpc_params import (
     RuntimeCatalogParams,
     RuntimeConfigParams,
     RuntimeIdParams,
+    RuntimeProjectCreateParams,
     SessionReadParams,
     scoped_runtime,
 )
@@ -24,6 +25,7 @@ from connector.server.runtime_rpc_payloads import (
     permission_catalog_payload,
     runtime_config_payload,
     runtime_config_schema_payload,
+    runtime_project_payload,
     runtime_type_descriptor_payload,
 )
 from connector.server.runtime_session_rpc import (
@@ -66,6 +68,7 @@ class RuntimeRpcHandler:
         "runtime.commands",
         "runtime.modelCatalog",
         "runtime.permissionCatalog",
+        "runtime.createProject",
         "session.discover",
         "session.create",
         "session.sync",
@@ -199,6 +202,18 @@ class RuntimeRpcHandler:
             return self._runtime_result(
                 runtime,
                 {"catalog": permission_catalog_payload(catalog)},
+            )
+        if method == "runtime.createProject":
+            runtime = self._resolve_agent_runtime(params)
+            parsed = RuntimeProjectCreateParams.parse(params)
+            project = await runtime.create_project(
+                parsed.name,
+                sources=parsed.sources or None,
+                operation_id=parsed.operation_id,
+            )
+            return self._runtime_result(
+                runtime,
+                {"project": runtime_project_payload(project)},
             )
         if method == "session.discover":
             runtime = self._resolve_agent_runtime(params)
