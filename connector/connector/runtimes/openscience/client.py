@@ -2,14 +2,18 @@
 
 This client only ever talks to a server somebody else started: OpenScience owns
 the agent loop, the permissions and the event journal, and the Connector is a
-reader of them. Two protocol properties shape the whole module:
+reader of them. Three protocol properties shape the whole module:
 
 * a prompt is admitted by ``requestID``, so a transport failure after a
   submission is ambiguous rather than failed. Nothing here retries a command;
   recovery means re-reading the receipt with the same id;
 * events are sequenced per session and retained in a bounded window, so a
   cursor can expire. That is reported as its own error kind, because the only
-  correct recovery is a fresh snapshot.
+  correct recovery is a fresh snapshot;
+* the server scopes *every* route to one project, selected by
+  ``x-openscience-directory``. A session that lives in another project is a 404
+  on the per-session routes even though its id is real, so the selector is a
+  per-call argument here rather than a fixed client header.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ import json
 import urllib.parse
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import httpx
 
@@ -95,21 +99,36 @@ class OpenScienceEvent:
     properties: Mapping[str, Any]
 
 
+class _Unscoped:
+    """Type of :data:`UNSCOPED`; a distinct type keeps the scope seam honest."""
+
+
+# ``None`` selects the client's configured default project. This marker instead
+# suppresses the selector, which is how the server's own working-directory
+# project — the one its sessions live in when it was never given a directory —
+# and the global project catalog are reached even when a default is configured.
+UNSCOPED: Final[_Unscoped] = _Unscoped()
+
+# One call's project selector: an explicit directory, the configured default
+# (``None``), or no selector at all (:data:`UNSCOPED`).
+ProjectScope = str | None | _Unscoped
+
+
 def _headers(values: Mapping[str, Any]) -> dict[str, str]:
-    """Mirror the discovery probe's credentials and project selector.
+    """Mirror the discovery probe's credentials, minus the project selector.
 
     The server resolves the project from ``x-openscience-directory`` exactly as
-    it does from the ``directory`` query parameter, and every request in this
-    module goes through here so a session never silently changes project.
+    it does from the ``directory`` query parameter, but a client-wide header
+    would pin every call to one project — including the per-session calls of a
+    session that lives elsewhere. The selector is therefore attached per
+    request by :meth:`OpenScienceClient._scope_headers`, and only the
+    credentials that never vary stay on the pool.
     """
 
     headers = {"accept": "application/json"}
     token = values.get("authToken")
     if isinstance(token, str) and token:
         headers["authorization"] = f"Bearer {token}"
-    directory = values.get("directory")
-    if isinstance(directory, str) and directory:
-        headers["x-openscience-directory"] = directory
     return headers
 
 
@@ -235,9 +254,24 @@ class OpenScienceClient:
         self.request_timeout = (
             request_timeout if request_timeout is not None else _timeout_seconds(values)
         )
+        self.default_directory = _optional_directory(values.get("directory"))
         self._headers = _headers(values)
         self._transport = transport
         self._http: httpx.AsyncClient | None = None
+
+    def _scope_headers(self, directory: ProjectScope) -> dict[str, str]:
+        """Resolve one call's project selector.
+
+        ``None`` falls back to the configured ``directory`` so a runtime pinned
+        to one project keeps behaving exactly as before, while
+        :data:`UNSCOPED` sends nothing and lets the server use its own working
+        directory's project.
+        """
+
+        if isinstance(directory, _Unscoped):
+            return {}
+        resolved = self.default_directory if directory is None else directory
+        return {"x-openscience-directory": resolved} if resolved else {}
 
     def _client(self) -> httpx.AsyncClient:
         if self._http is None:
@@ -263,10 +297,15 @@ class OpenScienceClient:
         *,
         params: Mapping[str, Any] | None = None,
         body: Mapping[str, Any] | None = None,
+        directory: ProjectScope = None,
     ) -> Any:
         try:
             response = await self._client().request(
-                method, f"{self.base_url}{path}", params=params, json=body
+                method,
+                f"{self.base_url}{path}",
+                params=params,
+                json=body,
+                headers=self._scope_headers(directory),
             )
         except (httpx.HTTPError, OSError) as error:
             raise OpenScienceConnectionError(
@@ -286,8 +325,28 @@ class OpenScienceClient:
             raise OpenScienceProtocolError("runtime capabilities must be an object")
         return body
 
-    async def list_sessions(self) -> list[dict[str, Any]]:
-        return _object_array(await self._request("GET", "/session"), "sessions")
+    async def list_projects(self) -> list[dict[str, Any]]:
+        """List the app-created projects this server owns.
+
+        The route is global: the server accepts the legacy ``directory`` query
+        and never resolves it, so the catalog is read with no selector at all
+        and stays complete even when this client has a default project.
+        """
+
+        return _object_array(
+            await self._request("GET", "/project", directory=UNSCOPED), "projects"
+        )
+
+    async def list_sessions(self, *, directory: ProjectScope = None) -> list[dict[str, Any]]:
+        """List one project's sessions; the route is not paginated.
+
+        The server answers for exactly one project, so the inventory has to ask
+        once per project directory rather than trusting the default.
+        """
+
+        return _object_array(
+            await self._request("GET", "/session", directory=directory), "sessions"
+        )
 
     async def create_session(
         self,
@@ -295,6 +354,13 @@ class OpenScienceClient:
         title: str | None = None,
         workspace: str | None = None,
     ) -> dict[str, Any]:
+        """Create a session in the client's default project.
+
+        The receipt names the project the server actually chose, and the
+        runtime remembers it from there, so every later call for this session
+        is scoped by its own directory rather than by this request.
+        """
+
         body: dict[str, Any] = {}
         if title:
             body["title"] = title
@@ -302,23 +368,46 @@ class OpenScienceClient:
             body["workspace"] = workspace
         return _object(await self._request("POST", "/session", body=body), "session")
 
-    async def messages(self, session_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+    async def messages(
+        self,
+        session_id: str,
+        *,
+        limit: int | None = None,
+        directory: ProjectScope = None,
+    ) -> list[dict[str, Any]]:
         params = {"limit": limit} if limit is not None else None
         return _object_array(
-            await self._request("GET", f"/session/{_segment(session_id)}/message", params=params),
+            await self._request(
+                "GET",
+                f"/session/{_segment(session_id)}/message",
+                params=params,
+                directory=directory,
+            ),
             "messages",
         )
 
-    async def snapshot(self, session_id: str) -> dict[str, Any]:
+    async def snapshot(
+        self, session_id: str, *, directory: ProjectScope = None
+    ) -> dict[str, Any]:
         return _object(
-            await self._request("GET", "/runtime/snapshot", params={"sessionID": session_id}),
+            await self._request(
+                "GET",
+                "/runtime/snapshot",
+                params={"sessionID": session_id},
+                directory=directory,
+            ),
             "snapshot",
         )
 
-    async def get_run(self, session_id: str, run_id: str) -> dict[str, Any]:
+    async def get_run(
+        self, session_id: str, run_id: str, *, directory: ProjectScope = None
+    ) -> dict[str, Any]:
         return _object(
             await self._request(
-                "GET", "/runtime/run", params={"sessionID": session_id, "runID": run_id}
+                "GET",
+                "/runtime/run",
+                params={"sessionID": session_id, "runID": run_id},
+                directory=directory,
             ),
             "run",
         )
@@ -332,6 +421,7 @@ class OpenScienceClient:
         parts: list[dict[str, Any]] | None = None,
         effort: str = "normal",
         message_id: str | None = None,
+        directory: ProjectScope = None,
     ) -> dict[str, Any]:
         if not request_id or not request_id.strip():
             raise ValueError("a persisted requestID is required before submitting work")
@@ -350,18 +440,33 @@ class OpenScienceClient:
             body["parts"] = parts
         if message_id is not None:
             body["messageID"] = message_id
-        return _object(await self._request("POST", "/runtime/prompt", body=body), "receipt")
-
-    async def cancel_run(self, session_id: str, run_id: str) -> dict[str, Any]:
         return _object(
             await self._request(
-                "POST", "/runtime/cancel", body={"sessionID": session_id, "runID": run_id}
+                "POST", "/runtime/prompt", body=body, directory=directory
+            ),
+            "receipt",
+        )
+
+    async def cancel_run(
+        self, session_id: str, run_id: str, *, directory: ProjectScope = None
+    ) -> dict[str, Any]:
+        return _object(
+            await self._request(
+                "POST",
+                "/runtime/cancel",
+                body={"sessionID": session_id, "runID": run_id},
+                directory=directory,
             ),
             "run",
         )
 
     async def reply_permission(
-        self, session_id: str, request_id: str, reply: str
+        self,
+        session_id: str,
+        request_id: str,
+        reply: str,
+        *,
+        directory: ProjectScope = None,
     ) -> dict[str, Any]:
         if reply not in ("once", "session", "project", "always", "reject"):
             raise ValueError("invalid permission reply")
@@ -375,12 +480,18 @@ class OpenScienceClient:
                     "requestID": request_id,
                     "reply": reply,
                 },
+                directory=directory,
             ),
             "decision",
         )
 
     async def reply_question(
-        self, session_id: str, request_id: str, answers: list[list[str]]
+        self,
+        session_id: str,
+        request_id: str,
+        answers: list[list[str]],
+        *,
+        directory: ProjectScope = None,
     ) -> dict[str, Any]:
         return _object(
             await self._request(
@@ -392,11 +503,14 @@ class OpenScienceClient:
                     "requestID": request_id,
                     "answers": answers,
                 },
+                directory=directory,
             ),
             "decision",
         )
 
-    async def reject_question(self, session_id: str, request_id: str) -> dict[str, Any]:
+    async def reject_question(
+        self, session_id: str, request_id: str, *, directory: ProjectScope = None
+    ) -> dict[str, Any]:
         return _object(
             await self._request(
                 "POST",
@@ -406,12 +520,17 @@ class OpenScienceClient:
                     "sessionID": session_id,
                     "requestID": request_id,
                 },
+                directory=directory,
             ),
             "decision",
         )
 
     async def events(
-        self, session_id: str, *, after_sequence: int | None = None
+        self,
+        session_id: str,
+        *,
+        after_sequence: int | None = None,
+        directory: ProjectScope = None,
     ) -> AsyncIterator[OpenScienceEvent]:
         """Stream one session's journal, resuming strictly after a cursor.
 
@@ -425,7 +544,7 @@ class OpenScienceClient:
         ):
             raise ValueError("after_sequence must be a nonnegative integer")
         cursor = after_sequence
-        headers = {"accept": "text/event-stream"}
+        headers = {"accept": "text/event-stream", **self._scope_headers(directory)}
         params: dict[str, Any] = {"sessionID": session_id}
         if cursor is not None:
             headers["Last-Event-ID"] = str(cursor)
@@ -467,6 +586,12 @@ def _segment(value: str) -> str:
     if not isinstance(value, str) or not value or value in (".", ".."):
         raise ValueError("resource ids must be nonempty strings")
     return urllib.parse.quote(value, safe="")
+
+
+def _optional_directory(value: Any) -> str | None:
+    """Normalize a configured project directory; blank means unconfigured."""
+
+    return value if isinstance(value, str) and value else None
 
 
 def _object(value: Any, label: str) -> dict[str, Any]:

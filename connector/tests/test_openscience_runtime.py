@@ -32,6 +32,7 @@ from connector.runtime_protocol import (
 )
 from connector.runtimes.openscience import discovery, models, provider_config
 from connector.runtimes.openscience.client import (
+    UNSCOPED,
     OpenScienceClient,
     OpenScienceConnectionError,
     OpenScienceCursorError,
@@ -243,19 +244,30 @@ def make_host(**overrides: Any) -> SimpleNamespace:
 
 
 class FakeClient:
-    """A scripted OpenScience server, shaped like the real client."""
+    """A scripted OpenScience server, shaped like the real client.
+
+    ``sessions`` is the whole server; ``list_sessions`` scopes it the way the
+    real route does — by the session's own ``directory`` — so a session in a
+    project that was never asked for is invisible, exactly as it is live.
+    ``current_directory`` is the project the server itself runs in, which an
+    unscoped listing answers for.
+    """
 
     def __init__(
         self,
         *,
         sessions: list[dict[str, Any]] | None = None,
+        projects: list[dict[str, Any]] | None = None,
         messages: dict[str, list[dict[str, Any]]] | None = None,
         snapshots: dict[str, dict[str, Any]] | None = None,
         events: dict[str, list[OpenScienceEvent]] | None = None,
         protocol: str = "1.0",
         server_version: str = "2.0.147",
+        current_directory: str | None = None,
     ) -> None:
         self.sessions = list(sessions or [])
+        self.projects = list(projects or [])
+        self.current_directory = current_directory
         self.messages_by_session = dict(messages or {})
         self.snapshots = dict(snapshots or {})
         self.event_scripts = dict(events or {})
@@ -267,11 +279,24 @@ class FakeClient:
         self.decisions: list[dict[str, Any]] = []
         self.created: list[dict[str, Any]] = []
         self.calls: list[str] = []
+        # (method, session id, project selector) for every call, so a test can
+        # assert the scope a per-session route was addressed with.
+        self.scopes: list[tuple[str, str | None, Any]] = []
         self.fail_snapshot: set[str] = set()
         self.fail_messages: set[str] = set()
+        self.fail_projects = False
+        self.fail_list: set[str] = set()
         self.gap_sessions: set[str] = set()
         self.expired_sessions: set[str] = set()
         self.closed = False
+
+    def scope_of(self, method: str, session_id: str | None = None) -> Any:
+        """The selector of the last matching call, for scope assertions."""
+
+        for called, called_session, directory in reversed(self.scopes):
+            if called == method and (session_id is None or called_session == session_id):
+                return directory
+        raise AssertionError(f"no {method} call recorded")
 
     async def capabilities(self) -> dict[str, Any]:
         self.calls.append("capabilities")
@@ -286,9 +311,31 @@ class FakeClient:
             "decisionScope": "connected_runtime",
         }
 
-    async def list_sessions(self) -> list[dict[str, Any]]:
+    async def list_projects(self) -> list[dict[str, Any]]:
+        self.calls.append("list_projects")
+        if self.fail_projects:
+            raise OpenScienceConnectionError("project catalog unavailable")
+        return [dict(item) for item in self.projects]
+
+    async def list_sessions(self, *, directory: Any = None) -> list[dict[str, Any]]:
         self.calls.append("list_sessions")
-        return [dict(item) for item in self.sessions]
+        self.scopes.append(("list_sessions", None, directory))
+        if isinstance(directory, str):
+            if directory in self.fail_list:
+                raise OpenScienceConnectionError("project unavailable")
+            return [dict(item) for item in self.sessions if item.get("directory") == directory]
+        # No selector: the server's own project. A fake that models no such
+        # project answers with everything, which is how it behaved before the
+        # inventory learned about projects at all.
+        if self.current_directory is None:
+            return [dict(item) for item in self.sessions]
+        if self.current_directory in self.fail_list:
+            raise OpenScienceConnectionError("project unavailable")
+        return [
+            dict(item)
+            for item in self.sessions
+            if item.get("directory") == self.current_directory
+        ]
 
     async def create_session(self, *, title: str | None = None, workspace: str | None = None) -> dict[str, Any]:
         self.calls.append("create_session")
@@ -298,17 +345,32 @@ class FakeClient:
         self.snapshots[payload["id"]] = snapshot_payload(payload["id"])
         return payload
 
-    async def messages(self, session_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+    async def messages(
+        self,
+        session_id: str,
+        *,
+        limit: int | None = None,
+        directory: Any = None,
+    ) -> list[dict[str, Any]]:
         self.calls.append(f"messages:{session_id}")
+        self.scopes.append(("messages", session_id, directory))
         if session_id in self.fail_messages:
             raise OpenScienceConnectionError("messages unavailable")
         return [dict(item) for item in self.messages_by_session.get(session_id, [])]
 
-    async def snapshot(self, session_id: str) -> dict[str, Any]:
+    async def snapshot(self, session_id: str, *, directory: Any = None) -> dict[str, Any]:
         self.calls.append(f"snapshot:{session_id}")
+        self.scopes.append(("snapshot", session_id, directory))
         if session_id in self.fail_snapshot:
             raise OpenScienceConnectionError("snapshot unavailable")
         return dict(self.snapshots.get(session_id, snapshot_payload(session_id)))
+
+    async def get_run(
+        self, session_id: str, run_id: str, *, directory: Any = None
+    ) -> dict[str, Any]:
+        self.calls.append(f"get_run:{session_id}")
+        self.scopes.append(("get_run", session_id, directory))
+        return {"runID": run_id, "sessionID": session_id, "state": "running"}
 
     async def prompt(
         self,
@@ -319,8 +381,10 @@ class FakeClient:
         parts: list[dict[str, Any]] | None = None,
         effort: str = "normal",
         message_id: str | None = None,
+        directory: Any = None,
     ) -> dict[str, Any]:
         self.calls.append(f"prompt:{session_id}")
+        self.scopes.append(("prompt", session_id, directory))
         self.prompts.append(
             {
                 "sessionID": session_id,
@@ -338,32 +402,50 @@ class FakeClient:
             self.receipts[request_id] = receipt
         return dict(receipt)
 
-    async def cancel_run(self, session_id: str, run_id: str) -> dict[str, Any]:
+    async def cancel_run(
+        self, session_id: str, run_id: str, *, directory: Any = None
+    ) -> dict[str, Any]:
         self.cancels.append((session_id, run_id))
+        self.scopes.append(("cancel_run", session_id, directory))
         return {"runID": run_id, "state": "cancelled"}
 
-    async def reply_permission(self, session_id: str, request_id: str, reply: str) -> dict[str, Any]:
+    async def reply_permission(
+        self, session_id: str, request_id: str, reply: str, *, directory: Any = None
+    ) -> dict[str, Any]:
+        self.scopes.append(("reply_permission", session_id, directory))
         self.decisions.append(
             {"kind": "permission", "sessionID": session_id, "requestID": request_id, "reply": reply}
         )
         return {"status": "resolved"}
 
     async def reply_question(
-        self, session_id: str, request_id: str, answers: list[list[str]]
+        self,
+        session_id: str,
+        request_id: str,
+        answers: list[list[str]],
+        *,
+        directory: Any = None,
     ) -> dict[str, Any]:
+        self.scopes.append(("reply_question", session_id, directory))
         self.decisions.append(
             {"kind": "question", "sessionID": session_id, "requestID": request_id, "answers": answers}
         )
         return {"status": "resolved"}
 
-    async def reject_question(self, session_id: str, request_id: str) -> dict[str, Any]:
+    async def reject_question(
+        self, session_id: str, request_id: str, *, directory: Any = None
+    ) -> dict[str, Any]:
+        self.scopes.append(("reject_question", session_id, directory))
         self.decisions.append(
             {"kind": "question_reject", "sessionID": session_id, "requestID": request_id}
         )
         return {"status": "resolved"}
 
-    async def events(self, session_id: str, *, after_sequence: int | None = None):
+    async def events(
+        self, session_id: str, *, after_sequence: int | None = None, directory: Any = None
+    ):
         self.calls.append(f"events:{session_id}")
+        self.scopes.append(("events", session_id, directory))
         if session_id in self.expired_sessions:
             raise OpenScienceCursorError(
                 409, {"error": "cursor_expired", "oldestSequence": 5, "latestSequence": 9}
@@ -1203,6 +1285,100 @@ def test_client_omits_credentials_when_unconfigured() -> None:
     run(exercise())
 
 
+def test_client_scopes_each_call_and_defaults_to_the_configured_project() -> None:
+    """The selector is per call: a fixed default, an explicit project, or none."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/project":
+            return httpx.Response(200, json=[{"id": "prj_a", "worktree": "/srv/alpha"}])
+        return httpx.Response(200, json=[])
+
+    async def exercise() -> None:
+        client = http_client(handler, directory="/srv/default")
+        projects = await client.list_projects()
+        await client.list_sessions()
+        await client.list_sessions(directory="/srv/alpha")
+        await client.list_sessions(directory=UNSCOPED)
+        await client.close()
+        assert projects == [{"id": "prj_a", "worktree": "/srv/alpha"}]
+        # The catalog is global: it is never pinned to the default project.
+        assert "x-openscience-directory" not in seen[0].headers
+        assert seen[1].headers["x-openscience-directory"] == "/srv/default"
+        assert seen[2].headers["x-openscience-directory"] == "/srv/alpha"
+        assert "x-openscience-directory" not in seen[3].headers
+
+    run(exercise())
+
+
+def test_every_per_session_call_carries_its_project() -> None:
+    """Every route that addresses one session must name that session's project.
+
+    The server answers 404 for a real session addressed from another project,
+    so a missing selector is a silent data loss rather than a slow path.
+    """
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path = request.url.path
+        if path.endswith("/message"):
+            return httpx.Response(200, json=[])
+        if path == "/runtime/prompt":
+            return httpx.Response(202, json={"runID": "run_1", "acceptedAt": 1})
+        if path == "/runtime/cancel":
+            return httpx.Response(200, json={"runID": "run_1", "state": "cancelled"})
+        if path == "/runtime/decision":
+            return httpx.Response(200, json={"status": "resolved"})
+        if path == "/runtime/run":
+            return httpx.Response(200, json={"runID": "run_1", "state": "running"})
+        return httpx.Response(200, json={"sessionID": "ses_1", "runs": []})
+
+    async def exercise() -> None:
+        client = http_client(handler, directory="/srv/default")
+        await client.messages("ses_1", directory="/srv/alpha")
+        await client.snapshot("ses_1", directory="/srv/alpha")
+        await client.get_run("ses_1", "run_1", directory="/srv/alpha")
+        await client.prompt(
+            "ses_1", request_id="req_1", message="hi", directory="/srv/alpha"
+        )
+        await client.cancel_run("ses_1", "run_1", directory="/srv/alpha")
+        await client.reply_permission("ses_1", "per_1", "once", directory="/srv/alpha")
+        await client.reply_question("ses_1", "que_1", [["yes"]], directory="/srv/alpha")
+        await client.reject_question("ses_1", "que_1", directory="/srv/alpha")
+        await client.close()
+        assert len(seen) == 8
+        assert {request.headers["x-openscience-directory"] for request in seen} == {
+            "/srv/alpha"
+        }
+
+    run(exercise())
+
+
+def test_event_stream_carries_the_project_selector() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=sse_body(event_frame(1)),
+        )
+
+    async def exercise() -> None:
+        client = http_client(handler, directory="/srv/default")
+        events = [item async for item in client.events("ses_1", directory="/srv/alpha")]
+        await client.close()
+        assert [item.sequence for item in events] == [1]
+        assert seen[0].headers["x-openscience-directory"] == "/srv/alpha"
+
+    run(exercise())
+
+
 def test_prompt_is_addressed_by_request_id() -> None:
     seen: list[dict[str, Any]] = []
 
@@ -2002,3 +2178,257 @@ def test_unsupported_operations_are_not_advertised() -> None:
 def test_result_helpers_are_plain_dataclasses() -> None:
     result = RuntimeOperationResult(ok=True, result={"runID": "run_1"})
     assert result.result["runID"] == "run_1"
+
+
+# --- multi-project inventory -------------------------------------------------
+
+# The server's own working-directory project is not in `/project`: it was never
+# created through the app, so only an unscoped listing reaches it.
+CURRENT_PROJECT = "/srv/openscience-source"
+PROJECT_ALPHA = "/srv/projects/alpha"
+PROJECT_BETA = "/srv/projects/beta"
+
+
+def project_payload(project_id: str, worktree: str, name: str) -> dict[str, Any]:
+    """A `GET /project` entry, shaped like the server's own `Project.Info`."""
+
+    return {
+        "id": project_id,
+        "worktree": worktree,
+        "sandboxes": [],
+        "name": name,
+        "origin": "openscience",
+        "time": {"created": 1, "updated": 2, "activity": 3},
+    }
+
+
+def multi_project_client(
+    *,
+    client_class: type[FakeClient] = FakeClient,
+    **overrides: Any,
+) -> FakeClient:
+    """The server's own project plus two app-created ones, each with sessions."""
+
+    return client_class(
+        sessions=[
+            session_payload("ses_cur", directory=CURRENT_PROJECT),
+            session_payload("ses_a1", directory=PROJECT_ALPHA),
+            session_payload("ses_a2", directory=PROJECT_ALPHA),
+            session_payload("ses_b1", directory=PROJECT_BETA),
+        ],
+        projects=[
+            project_payload("prj_a", PROJECT_ALPHA, "alpha"),
+            project_payload("prj_b", PROJECT_BETA, "beta"),
+        ],
+        current_directory=CURRENT_PROJECT,
+        **overrides,
+    )
+
+
+def connected(host: SimpleNamespace, client: FakeClient) -> OpenScienceRuntime:
+    """A runtime already attached to the fake server, without a relay task."""
+
+    runtime = build_runtime(host, client=client)
+    runtime._client = client
+    return runtime
+
+
+def connected_relay(
+    host: SimpleNamespace,
+    client: FakeClient,
+    *,
+    max_streams: int = 0,
+) -> tuple[OpenScienceRuntime, OpenScienceRelay]:
+    runtime = connected(host, client)
+    return runtime, OpenScienceRelay(
+        client=client, host=host, runtime=runtime, max_streams=max_streams
+    )
+
+
+def test_the_inventory_covers_every_project_and_keeps_each_cwd() -> None:
+    async def exercise() -> None:
+        host = make_host()
+        client = multi_project_client()
+        runtime = connected(host, client)
+        inventory = await runtime.list_complete_session_inventory()
+        assert {meta.external_session_id: meta.cwd for meta in inventory} == {
+            "ses_cur": CURRENT_PROJECT,
+            "ses_a1": PROJECT_ALPHA,
+            "ses_a2": PROJECT_ALPHA,
+            "ses_b1": PROJECT_BETA,
+        }
+        assert {
+            scope for method, _, scope in client.scopes if method == "list_sessions"
+        } == {UNSCOPED, PROJECT_ALPHA, PROJECT_BETA}
+
+    run(exercise())
+
+
+def test_the_relay_publishes_every_project_with_its_directory() -> None:
+    """`cwd` is what groups sessions into projects on the platform."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = multi_project_client()
+        _, relay = connected_relay(host, client)
+        assert await relay._inventory() is True
+        published = {
+            call.kwargs["external_session_id"]: call.kwargs["cwd"]
+            for call in host.session_meta_upsert.await_args_list
+        }
+        assert published == {
+            "ses_cur": CURRENT_PROJECT,
+            "ses_a1": PROJECT_ALPHA,
+            "ses_a2": PROJECT_ALPHA,
+            "ses_b1": PROJECT_BETA,
+        }
+        await relay.close()
+
+    run(exercise())
+
+
+def test_per_session_calls_are_scoped_to_the_sessions_project() -> None:
+    async def exercise() -> None:
+        host = make_host()
+        client = multi_project_client(
+            messages={
+                "ses_a1": [
+                    message_payload("msg_1", "user", [text_part("prt_1", "hi", "msg_1")])
+                ]
+            },
+            snapshots={
+                "ses_a1": snapshot_payload(
+                    "ses_a1",
+                    runs=[run_payload("running", session_id="ses_a1")],
+                    permissions=[permission_payload()],
+                )
+            },
+        )
+        runtime, relay = connected_relay(host, client)
+        await relay._inventory()
+        platform = runtime._platform_ids["ses_a1"]
+        await runtime.get_session_snapshot(platform, "ses_a1")
+        await runtime.get_session_state(platform, "ses_a1")
+        await runtime.start_turn(platform, "ses_a1", "hello", client_message_id="cm_a")
+        await runtime.interrupt_session(platform)
+        await runtime.respond_interaction(
+            platform, "notice_openscience_permission_per_1", "session"
+        )
+        await relay._consume("ses_a1")
+        await relay._refresh_timeline(platform, "ses_a1")
+        await relay.close()
+        for method in (
+            "messages",
+            "snapshot",
+            "prompt",
+            "cancel_run",
+            "reply_permission",
+            "events",
+        ):
+            assert client.scope_of(method, "ses_a1") == PROJECT_ALPHA, method
+
+    run(exercise())
+
+
+def test_a_created_session_is_addressed_in_its_own_project() -> None:
+    """The create receipt names the project, so the first prompt is scoped too."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = multi_project_client()
+        runtime = connected(host, client)
+        await runtime.create_and_start_session(
+            "sess_new", "hello", client_message_id="cm_new"
+        )
+        assert client.scope_of("prompt", "ses_new1") == "/private/tmp/osproj"
+
+    run(exercise())
+
+
+def test_a_project_that_fails_to_list_does_not_stop_the_others() -> None:
+    async def exercise() -> None:
+        host = make_host()
+        client = multi_project_client()
+        runtime, relay = connected_relay(host, client, max_streams=24)
+        assert await relay._inventory() is True
+        assert set(relay._streams) == {"ses_cur", "ses_a1", "ses_a2", "ses_b1"}
+        stream = relay._streams["ses_b1"]
+        client.fail_list.add(PROJECT_BETA)
+        assert await relay._inventory() is True
+        published = {
+            call.kwargs["external_session_id"]
+            for call in host.session_meta_upsert.await_args_list
+        }
+        assert published == {"ses_cur", "ses_a1", "ses_a2", "ses_b1"}
+        # The unreadable project's sessions are pruned rather than frozen, and
+        # the failure is not mistaken for the server itself going away.
+        assert set(relay._streams) == {"ses_cur", "ses_a1", "ses_a2"}
+        assert relay._inventory_failures == 0
+        assert host.runtime_error.await_count == 0
+        assert runtime._client is client
+        await asyncio.sleep(0.05)
+        assert stream.done()
+        await relay.close()
+
+    run(exercise())
+
+
+def test_a_project_catalog_failure_still_lists_the_current_project() -> None:
+    async def exercise() -> None:
+        host = make_host()
+        client = multi_project_client()
+        client.fail_projects = True
+        runtime = connected(host, client)
+        inventory = await runtime.list_complete_session_inventory()
+        assert [meta.external_session_id for meta in inventory] == ["ses_cur"]
+        assert inventory[0].cwd == CURRENT_PROJECT
+
+    run(exercise())
+
+
+def test_the_inventory_reports_a_lost_server_when_no_project_answers() -> None:
+    async def exercise() -> None:
+        host = make_host()
+        client = multi_project_client()
+        client.fail_list.update({CURRENT_PROJECT, PROJECT_ALPHA, PROJECT_BETA})
+        runtime, relay = connected_relay(host, client)
+        assert await relay._inventory() is True
+        assert relay._inventory_failures == 1
+        with pytest.raises(RuntimeUnavailableError):
+            await runtime.list_complete_session_inventory()
+        await relay.close()
+
+    run(exercise())
+
+
+class DuplicatingClient(FakeClient):
+    """A server whose two projects both report the same session id."""
+
+    async def list_sessions(self, *, directory: Any = None) -> list[dict[str, Any]]:
+        listed = await super().list_sessions(directory=directory)
+        if directory == PROJECT_BETA:
+            listed.append(session_payload("ses_a1", directory=PROJECT_ALPHA))
+        return listed
+
+
+def test_a_session_reported_by_two_projects_is_published_once() -> None:
+    async def exercise() -> None:
+        host = make_host()
+        client = multi_project_client(client_class=DuplicatingClient)
+        runtime, relay = connected_relay(host, client, max_streams=24)
+        assert await relay._inventory() is True
+        inventory = await runtime.list_complete_session_inventory()
+        ids = [meta.external_session_id for meta in inventory]
+        assert ids == ["ses_cur", "ses_a1", "ses_a2", "ses_b1"]
+        assert len(ids) == len(set(ids))
+        published = [
+            call.kwargs["external_session_id"]
+            for call in host.session_meta_upsert.await_args_list
+        ]
+        assert published.count("ses_a1") == 1
+        # The directory it was first discovered in is the one kept, so its
+        # per-session calls keep going to the project that really owns it.
+        assert runtime._directory_for("ses_a1") == PROJECT_ALPHA
+        await relay.close()
+
+    run(exercise())

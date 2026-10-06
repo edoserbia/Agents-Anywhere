@@ -52,6 +52,7 @@ from connector.runtime_protocol import (
 from connector.runtime_protocol.host import RuntimeHostClient
 from connector.runtimes.openscience import discovery, models, provider_config
 from connector.runtimes.openscience.client import (
+    UNSCOPED,
     OpenScienceClient,
     OpenScienceConnectionError,
     OpenScienceCursorError,
@@ -59,6 +60,7 @@ from connector.runtimes.openscience.client import (
     OpenScienceEventGapError,
     OpenScienceHTTPError,
     OpenScienceProtocolError,
+    ProjectScope,
 )
 from connector.runtimes.session_identity import stable_runtime_session_id
 
@@ -170,6 +172,11 @@ class OpenScienceRuntime(AgentRuntime):
         # under two identities.
         self._sessions: dict[str, str] = {}
         self._platform_ids: dict[str, str] = {}
+        # Native session id -> the project directory it lives in. Every
+        # per-session route is scoped by that directory, and the server answers
+        # 404 for a real session addressed from the wrong project, so it is
+        # remembered from the inventory entry that discovered the session.
+        self._directories: dict[str, str] = {}
         self._record_cache: dict[str, dict[str, Any]] = {}
 
     @property
@@ -241,11 +248,13 @@ class OpenScienceRuntime(AgentRuntime):
         cursor: str | None = None,
         force: bool = False,
     ) -> tuple[SessionMeta, ...]:
-        """List the server's sessions. The route is not paginated."""
+        """List every project's sessions. The route is not paginated."""
 
         _ = cursor, force
         client = await self._ensure_client()
-        sessions = await self._call(client.list_sessions, "session.list")
+        sessions = await self._call(
+            lambda: self._list_all_sessions(client), "session.list"
+        )
         return self._session_metas(sessions)[: max(0, limit)]
 
     async def list_complete_session_inventory(
@@ -255,8 +264,70 @@ class OpenScienceRuntime(AgentRuntime):
     ) -> tuple[SessionMeta, ...]:
         _ = page_size, force
         client = await self._ensure_client()
-        sessions = await self._call(client.list_sessions, "session.list")
+        sessions = await self._call(
+            lambda: self._list_all_sessions(client), "session.list"
+        )
         return self._session_metas(sessions)
+
+    async def _project_scopes(self, client: OpenScienceClient) -> list[ProjectScope]:
+        """Every project the inventory has to read, the unscoped one first.
+
+        The server scopes ``/session`` to one project, and its own
+        working-directory project is absent from ``/project`` because it was
+        never created through the app — so the inventory is the union of an
+        unscoped listing and one listing per managed project. A catalog that
+        cannot be read degrades to the unscoped listing instead of losing the
+        whole inventory.
+        """
+
+        scopes: list[ProjectScope] = [UNSCOPED]
+        try:
+            projects = await client.list_projects()
+        except Exception as error:  # noqa: BLE001 - the catalog is best effort
+            logger.warning(
+                "OpenScience project catalog failed error_type={}", type(error).__name__
+            )
+            return scopes
+        for project in projects:
+            worktree = project.get("worktree")
+            if isinstance(worktree, str) and worktree and worktree not in scopes:
+                scopes.append(worktree)
+        return scopes
+
+    async def _list_all_sessions(self, client: OpenScienceClient) -> list[dict[str, Any]]:
+        """Read every project's sessions, isolating a project that fails.
+
+        One unreadable project — removed mid-scan, or a directory the server no
+        longer resolves — must not hide the others, exactly like one unreadable
+        session in the relay. Only when no scope answers at all is the server
+        itself considered gone, because then nothing can be trusted.
+        """
+
+        listed: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        answered = False
+        for scope in await self._project_scopes(client):
+            try:
+                payloads = await client.list_sessions(directory=scope)
+            except Exception as error:  # noqa: BLE001 - isolate one unreadable project
+                logger.warning(
+                    "OpenScience project listing failed directory={} error_type={}",
+                    scope if isinstance(scope, str) else "<server default>",
+                    type(error).__name__,
+                )
+                continue
+            answered = True
+            for payload in payloads:
+                external = payload.get("id")
+                if not isinstance(external, str) or not external or external in seen:
+                    continue
+                seen.add(external)
+                listed.append(payload)
+        if not answered:
+            raise OpenScienceConnectionError(
+                "OpenScience session inventory is unreachable"
+            )
+        return listed
 
     async def get_session_snapshot(
         self,
@@ -267,7 +338,10 @@ class OpenScienceRuntime(AgentRuntime):
         external = self._external_session(session_id, external_session_id)
         client = await self._ensure_client()
         messages = await self._call(
-            lambda: client.messages(external, limit=limit), "session.messages"
+            lambda: client.messages(
+                external, limit=limit, directory=self._directory_for(external)
+            ),
+            "session.messages",
         )
         return models.timeline_snapshot(
             messages, session_id=session_id, external_session_id=external
@@ -388,7 +462,10 @@ class OpenScienceRuntime(AgentRuntime):
             )
         client = await self._ensure_client()
         cancelled = await self._call(
-            lambda: client.cancel_run(external, run_id), "runtime.cancel"
+            lambda: client.cancel_run(
+                external, run_id, directory=self._directory_for(external)
+            ),
+            "runtime.cancel",
         )
         return RuntimeOperationResult(
             result={
@@ -430,10 +507,13 @@ class OpenScienceRuntime(AgentRuntime):
                 message="该请求已结束或不再等待回复，请刷新会话。",
             )
         client = await self._ensure_client()
+        directory = self._directory_for(external)
         if kind == "permission":
             reply = models.permission_reply(action_id)
             await self._call(
-                lambda: client.reply_permission(external, request_id, reply),
+                lambda: client.reply_permission(
+                    external, request_id, reply, directory=directory
+                ),
                 "runtime.decision",
             )
             return RuntimeOperationResult(
@@ -441,7 +521,10 @@ class OpenScienceRuntime(AgentRuntime):
             )
         if action_id == "cancel":
             await self._call(
-                lambda: client.reject_question(external, request_id), "runtime.decision"
+                lambda: client.reject_question(
+                    external, request_id, directory=directory
+                ),
+                "runtime.decision",
             )
             return RuntimeOperationResult(result={"requestId": request_id, "kind": kind})
         try:
@@ -449,7 +532,10 @@ class OpenScienceRuntime(AgentRuntime):
         except ValueError as error:
             raise RuntimeInvalidRequestError(str(error)) from error
         await self._call(
-            lambda: client.reply_question(external, request_id, answers), "runtime.decision"
+            lambda: client.reply_question(
+                external, request_id, answers, directory=directory
+            ),
+            "runtime.decision",
         )
         return RuntimeOperationResult(
             result={"requestId": request_id, "kind": kind, "answers": answers}
@@ -494,7 +580,9 @@ class OpenScienceRuntime(AgentRuntime):
         output: list[SessionMeta] = []
         for payload in sessions:
             external = _required_string(payload.get("id"), "session id")
-            platform = self._register_session(external)
+            platform = self._register_session(
+                external, directory=_session_directory(payload)
+            )
             output.append(models.session_meta(payload, session_id=platform))
         return tuple(output)
 
@@ -512,14 +600,37 @@ class OpenScienceRuntime(AgentRuntime):
             return "project"
         return "isolated"
 
-    def _register_session(self, external_session_id: str, session_id: str | None = None) -> str:
+    def _register_session(
+        self,
+        external_session_id: str,
+        session_id: str | None = None,
+        directory: str | None = None,
+    ) -> str:
+        """Bind a native session id to its platform id and project directory.
+
+        The directory is only ever added, never cleared: an inventory entry
+        that does not name one must not forget where an already known session
+        lives, or its next per-session call would be sent to the wrong project.
+        """
+
         known = self._platform_ids.get(external_session_id)
         platform = session_id or known or stable_runtime_session_id(
             self.host.connector_id, RUNTIME, external_session_id
         )
         self._sessions[platform] = external_session_id
         self._platform_ids[external_session_id] = platform
+        if directory:
+            self._directories[external_session_id] = directory
         return platform
+
+    def _directory_for(self, external_session_id: str) -> str | None:
+        """The project selector for one session, if the inventory saw one.
+
+        ``None`` keeps the client's configured default, which is the behaviour
+        a session addressed before it was ever listed has always had.
+        """
+
+        return self._directories.get(external_session_id)
 
     def _external_session(self, session_id: str, external_session_id: str | None) -> str:
         if external_session_id:
@@ -532,13 +643,18 @@ class OpenScienceRuntime(AgentRuntime):
     async def _snapshot(self, external_session_id: str) -> dict[str, Any]:
         client = await self._ensure_client()
         return await self._call(
-            lambda: client.snapshot(external_session_id), "runtime.snapshot"
+            lambda: client.snapshot(
+                external_session_id, directory=self._directory_for(external_session_id)
+            ),
+            "runtime.snapshot",
         )
 
     async def _publish_meta(self, external_session_id: str, payload: Mapping[str, Any]) -> None:
         """Publish one session's identity, and where it came from."""
 
-        platform = self._register_session(external_session_id)
+        platform = self._register_session(
+            external_session_id, directory=_session_directory(payload)
+        )
         meta = models.session_meta(payload, session_id=platform)
         await self.host.session_meta_upsert(
             session_id=platform,
@@ -622,6 +738,7 @@ class OpenScienceRuntime(AgentRuntime):
                 message=message,
                 parts=parts,
                 effort=effort,
+                directory=self._directory_for(external_session_id),
             ),
             "runtime.prompt",
         )
@@ -938,7 +1055,7 @@ class OpenScienceRelay:
 
     async def _inventory(self) -> bool:
         try:
-            sessions = await self.client.list_sessions()
+            sessions = await self.runtime._list_all_sessions(self.client)
         except Exception as error:  # noqa: BLE001 - a lost server is an expected state
             self._inventory_failures += 1
             logger.warning(
@@ -974,7 +1091,12 @@ class OpenScienceRelay:
 
     async def _sync_session(self, payload: Mapping[str, Any]) -> None:
         external = _required_string(payload.get("id"), "session id")
-        platform = self.runtime._register_session(external)
+        # Register the project before anything addresses the session: the poll
+        # path below is already a per-session call, and it must carry the
+        # directory the session was discovered in.
+        platform = self.runtime._register_session(
+            external, directory=_session_directory(payload)
+        )
         marker = _updated_at(payload)
         if self._meta_markers.get(external) != marker:
             self._meta_markers[external] = marker
@@ -987,7 +1109,9 @@ class OpenScienceRelay:
             return
         # Beyond the stream budget a session is polled instead: the same
         # snapshot and transcript, just at the inventory cadence.
-        snapshot = await self.client.snapshot(external)
+        snapshot = await self.client.snapshot(
+            external, directory=self.runtime._directory_for(external)
+        )
         await self._publish_state(platform, external, snapshot)
         if _sequence(snapshot.get("latestSequence")) != self._cursors.get(external):
             await self._refresh_timeline(platform, external)
@@ -1021,7 +1145,11 @@ class OpenScienceRelay:
             await self._resnapshot(external)
             cursor = self._cursors.get(external)
         try:
-            async for event in self.client.events(external, after_sequence=cursor):
+            async for event in self.client.events(
+                external,
+                after_sequence=cursor,
+                directory=self.runtime._directory_for(external),
+            ):
                 await self._apply(external, event)
         except (OpenScienceCursorError, OpenScienceEventGapError) as error:
             # The retained window moved past the cursor, or a frame skipped
@@ -1039,7 +1167,9 @@ class OpenScienceRelay:
         self._cursors[external] = event.sequence
         self._cursor_dirty.add(external)
         if event.type in _RUN_EVENTS or event.type in _DECISION_EVENTS:
-            snapshot = await self.client.snapshot(external)
+            snapshot = await self.client.snapshot(
+                external, directory=self.runtime._directory_for(external)
+            )
             await self._publish_state(
                 self.runtime._register_session(external), external, snapshot
             )
@@ -1116,14 +1246,18 @@ class OpenScienceRelay:
 
     async def _resnapshot(self, external: str) -> None:
         platform = self.runtime._register_session(external)
-        snapshot = await self.client.snapshot(external)
+        snapshot = await self.client.snapshot(
+            external, directory=self.runtime._directory_for(external)
+        )
         await self._publish_state(platform, external, snapshot)
         await self._refresh_timeline(platform, external)
         self._cursors[external] = _sequence(snapshot.get("latestSequence"))
         self._cursor_dirty.add(external)
 
     async def _refresh_timeline(self, platform: str, external: str) -> None:
-        messages = await self.client.messages(external)
+        messages = await self.client.messages(
+            external, directory=self.runtime._directory_for(external)
+        )
         snapshot = models.timeline_snapshot(
             messages, session_id=platform, external_session_id=external
         )
@@ -1269,6 +1403,17 @@ def _updated_at(payload: Mapping[str, Any]) -> int:
     time = payload.get("time")
     updated = time.get("updated") if isinstance(time, Mapping) else None
     return updated if type(updated) is int else 0
+
+
+def _session_directory(payload: Mapping[str, Any]) -> str | None:
+    """The project a session belongs to, as the server reports it.
+
+    The same value is the session's ``cwd`` on the platform — that is how
+    Agents Anywhere groups sessions into projects — and the selector every
+    per-session route needs, so it is read once here and reused for both.
+    """
+
+    return _optional_string(payload.get("directory"))
 
 
 def _required_string(value: Any, label: str) -> str:
