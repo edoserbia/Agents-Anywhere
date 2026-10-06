@@ -70,6 +70,15 @@ internal class HomeProjectPreferences(private val storage: HomePreferenceStore, 
         private set
     var pinnedExpanded by mutableStateOf(storage.getBoolean("$key:pinned", true))
         private set
+    /**
+     * The flat session list folds its own pinned and recent sections. They are
+     * separate keys from the project list's pinned section: the two views show
+     * different rows under the same label.
+     */
+    var sessionListPinnedExpanded by mutableStateOf(storage.getBoolean("$key:sessions-pinned", true))
+        private set
+    var sessionListRecentExpanded by mutableStateOf(storage.getBoolean("$key:sessions-recent", true))
+        private set
     var sessionStatus by mutableStateOf(
         ProjectSessionStatusFilter.entries.firstOrNull { it.name == storage.getString("$key:status") }
             ?: ProjectSessionStatusFilter.Active,
@@ -94,6 +103,16 @@ internal class HomeProjectPreferences(private val storage: HomePreferenceStore, 
     fun togglePinnedSection() {
         pinnedExpanded = !pinnedExpanded
         storage.putBoolean("$key:pinned", pinnedExpanded)
+    }
+
+    fun toggleSessionListPinned() {
+        sessionListPinnedExpanded = !sessionListPinnedExpanded
+        storage.putBoolean("$key:sessions-pinned", sessionListPinnedExpanded)
+    }
+
+    fun toggleSessionListRecent() {
+        sessionListRecentExpanded = !sessionListRecentExpanded
+        storage.putBoolean("$key:sessions-recent", sessionListRecentExpanded)
     }
 
     fun toggleSection() {

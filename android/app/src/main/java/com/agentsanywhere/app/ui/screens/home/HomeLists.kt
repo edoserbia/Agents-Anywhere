@@ -85,6 +85,7 @@ internal fun HomeList(
     state: SessionsState,
     tab: HomeTab,
     darkMode: Boolean,
+    projectPreferences: HomeProjectPreferences,
     onSessionLongPress: (AgentSession, Rect) -> Unit,
     onOpenSession: (AgentSession) -> Unit,
     onOpenDevice: (AgentDevice) -> Unit,
@@ -133,6 +134,7 @@ internal fun HomeList(
         )
         else -> SessionList(
             sessions = sessions,
+            projectPreferences = projectPreferences,
             hasMore = if (tab == HomeTab.Active) state.activeHasMore else state.archivedHasMore,
             isLoadingMore = if (tab == HomeTab.Active) state.isLoadingMoreActive else state.isLoadingMoreArchived,
             onLoadMore = { onLoadMore(tab) },
@@ -236,14 +238,17 @@ private fun SkeletonLine(
 @Composable
 private fun SessionList(
     sessions: List<AgentSession>,
+    projectPreferences: HomeProjectPreferences,
     hasMore: Boolean,
     isLoadingMore: Boolean,
     onLoadMore: () -> Unit,
     onSessionLongPress: (AgentSession, Rect) -> Unit,
     onOpenSession: (AgentSession) -> Unit,
 ) {
-    var pinnedExpanded by remember { mutableStateOf(true) }
-    var recentExpanded by remember { mutableStateOf(true) }
+    // Folded through the preferences: this list is disposed whenever a session
+    // is opened, so a local `remember` would re-expand both sections on return.
+    val pinnedExpanded = projectPreferences.sessionListPinnedExpanded
+    val recentExpanded = projectPreferences.sessionListRecentExpanded
     val pinned = remember(sessions) { SessionsState(sessions = sessions).pinnedSessions }
     val recent = remember(sessions) { SessionsState(sessions = sessions).recentSessions }
     val listState = rememberLazyListState()
@@ -270,7 +275,7 @@ private fun SessionList(
             HomeListSectionHeader(
                 label = stringResource(R.string.home_pinned),
                 expanded = pinnedExpanded,
-                onClick = { pinnedExpanded = !pinnedExpanded },
+                onClick = projectPreferences::toggleSessionListPinned,
             )
         }
         if (pinnedExpanded) {
@@ -291,7 +296,7 @@ private fun SessionList(
             HomeListSectionHeader(
                 label = stringResource(R.string.home_recents),
                 expanded = recentExpanded,
-                onClick = { recentExpanded = !recentExpanded },
+                onClick = projectPreferences::toggleSessionListRecent,
             )
         }
         if (recentExpanded) {

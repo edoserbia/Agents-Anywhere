@@ -87,6 +87,19 @@ class HomeProjectPreferencesTest {
     }
 
     @Test
+    fun `the session list folds its sections independently of the project list`() {
+        val store = FakeStore()
+        reopened(store).toggleSessionListPinned()
+        reopened(store).toggleSessionListRecent()
+
+        val preferences = reopened(store)
+        assertFalse(preferences.sessionListPinnedExpanded)
+        assertFalse(preferences.sessionListRecentExpanded)
+        // The project list's pinned section is a different set of rows.
+        assertTrue(preferences.pinnedExpanded)
+    }
+
+    @Test
     fun `each server and account keeps its own folds`() {
         val store = FakeStore()
         reopened(store).setDeviceCollapsed("conn_1", true)

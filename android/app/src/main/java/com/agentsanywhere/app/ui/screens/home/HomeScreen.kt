@@ -532,6 +532,7 @@ private fun HomeContent(
                     state = state,
                     tab = HomeTab.Active,
                     darkMode = darkMode,
+                    projectPreferences = projectPreferences,
                     onSessionLongPress = onSessionLongPress,
                     onOpenSession = onOpenSession,
                     onOpenDevice = onOpenDevice,
