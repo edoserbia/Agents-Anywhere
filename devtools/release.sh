@@ -2,7 +2,7 @@
 #
 # Cut a client release end to end.
 #
-# A release touches five version locations, two installers and a download page
+# A release touches six version locations, two installers and a download page
 # on the server. Doing that by hand is how the page ends up advertising the
 # previous build, so the whole sequence lives here:
 #
@@ -75,6 +75,12 @@ edits = [
      r'^version = "[0-9.]+"', f'version = "{version}"'),
     ("desktop-workbench/package.json",
      r'"version": "[0-9.]+"', f'"version": "{version}"'),
+    # The Connector ships as its own installable package, so its version is what
+    # `uv tool list` and the desktop app's bundled copy report. Leaving it out
+    # made two very different Connectors both claim 0.1.7.2, which is how a
+    # machine without the OpenScience runtime looked up to date.
+    ("connector/pyproject.toml",
+     r'^version = "[0-9.]+"', f'version = "{version}"'),
     ("android/app/build.gradle.kts",
      r'versionCode = [0-9]+', f'versionCode = {next_code}'),
     ("android/app/build.gradle.kts",
