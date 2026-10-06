@@ -2,7 +2,7 @@
   "name": "agents-anywhere-desktop-workbench",
   "productName": "Agents Anywhere",
   "private": true,
-  "version": "2.0.21",
+  "version": "2.0.22",
   "description": "Electron shell for the Agents Anywhere web workbench",
   "homepage": "https://closex.cc",
   "author": {
