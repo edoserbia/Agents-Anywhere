@@ -122,8 +122,9 @@ _DECISION_EVENTS = {
     "question.rejected",
 }
 # Selection scopes this runtime understands. `model` carries the provider,
-# model and effort the platform's picker produced; `effort` is accepted on its
-# own so a caller that knows only the reasoning strength can still set it.
+# model and reasoning variant the platform's picker produced; `effort` is
+# accepted on its own so a caller that knows only the research effort can still
+# set it, independently of any model.
 _SELECTION_SCOPES = frozenset({"model", "effort"})
 
 ClientFactory = Callable[[str, Mapping[str, Any]], OpenScienceClient]
@@ -134,7 +135,7 @@ def runtime_capabilities() -> dict[str, bool]:
     """Capabilities this adapter actually implements.
 
     The model catalog is served from OpenScience's own ``/config/providers``,
-    and the reasoning-effort picker is that catalog's reasoning items, so
+    and each model's reasoning levels are that catalog's reasoning items, so
     ``modelCatalog`` also publishes ``catalog.effort``. Permissions, commands
     and steering are absent rather than false-by-omission: the platform reads
     these keys to decide which affordances to offer, and advertising one this
@@ -201,9 +202,9 @@ class OpenScienceRuntime(AgentRuntime):
         # remembered from the inventory entry that discovered the session.
         self._directories: dict[str, str] = {}
         self._record_cache: dict[str, dict[str, Any]] = {}
-        # Platform session id -> the model/effort selection the platform made.
-        # The platform sends a selection once (`session.selections.update`) and
-        # not with every message, so the runtime is what keeps it applied; it
+        # Platform session id -> the model/variant/effort selection the platform
+        # made. The platform sends a selection once (`session.selections.update`)
+        # and not with every message, so the runtime is what keeps it applied; it
         # is republished with every state update so a refresh cannot drop it.
         self._selections: dict[str, dict[str, str | None]] = {}
         # (monotonic read time, catalog) for the server-owned model catalog.
@@ -546,13 +547,13 @@ class OpenScienceRuntime(AgentRuntime):
         external_session_id: str | None,
         selections: Mapping[str, str | None],
     ) -> RuntimeOperationResult:
-        """Validate and remember the model and effort this session will use.
+        """Validate and remember the model, reasoning variant and effort.
 
         A selection is only accepted once it resolves against the catalog the
-        server itself publishes, so the platform can never pin a model
-        OpenScience does not have. The choice is kept here because the platform
-        sends it once and not with every message, and it is republished with
-        every state update so a refresh cannot drop it.
+        server itself publishes, so the platform can never pin a model — or a
+        reasoning level — OpenScience does not have. The choice is kept here
+        because the platform sends it once and not with every message, and it
+        is republished with every state update so a refresh cannot drop it.
         """
 
         if not selections:
@@ -926,7 +927,7 @@ class OpenScienceRuntime(AgentRuntime):
 
         A selection the cached catalog does not know is checked once more
         against a fresh read before it is refused: the user may have picked a
-        model that appeared since the cache was filled.
+        model, or a reasoning level, that appeared since the cache was filled.
         """
 
         selection_id = _optional_string(selections.get("model"))
@@ -990,16 +991,16 @@ class OpenScienceRuntime(AgentRuntime):
             if route is not None
             else None
         )
+        # The reasoning level the picker resolved, when the selection named one.
+        # It indexes that model's own `variants` on the server and is a
+        # different axis from `effort` below, so it is never derived from it.
+        variant = route.variant if route is not None else None
         # OpenScience requires an effort on every prompt and its own default is
         # "normal" (`resolveResearchEffort`), so an unselected turn keeps
         # sending that default: omitting the field is rejected as invalid input
         # rather than treated as "use your default".
-        effort = (
-            (route.effort if route is not None else None)
-            or models.effort_value(effective.get("effort"))
-            or models.DEFAULT_EFFORT
-        )
-        fingerprint = _prompt_fingerprint(message, parts, model, effort)
+        effort = models.effort_value(effective.get("effort")) or models.DEFAULT_EFFORT
+        fingerprint = _prompt_fingerprint(message, parts, model, variant, effort)
         key = _turn_key(external_session_id, client_message_id)
         record = await self._read_record(key)
         if record is not None and record.get("fingerprint") != fingerprint:
@@ -1026,6 +1027,7 @@ class OpenScienceRuntime(AgentRuntime):
                 message=message,
                 parts=parts,
                 model=model,
+                variant=variant,
                 effort=effort,
                 directory=self._directory_for(external_session_id),
             ),
@@ -1520,8 +1522,9 @@ class OpenScienceRelay:
             status_reason=state.status_reason,
             error=state.error,
             # The platform replaces the stored selection with whatever a state
-            # update carries, so the session's chosen model and effort are
-            # republished here; omitting them would erase the user's choice.
+            # update carries, so the session's chosen model, reasoning level and
+            # effort are republished here; omitting them would erase the user's
+            # choice.
             selections=self.runtime._selections.get(platform, {}),
             metadata=state.metadata,
         )
@@ -1624,8 +1627,9 @@ class OpenScienceRelay:
 
 
 # Inventory capability key -> protocol capability id. `modelCatalog` publishes
-# two ids because the effort picker is the model catalog's reasoning items, the
-# same pairing `connector/server/capabilities.py` applies to this runtime.
+# two ids because the reasoning-level picker is the model catalog's reasoning
+# items, the same pairing `connector/server/capabilities.py` applies to this
+# runtime.
 _CAPABILITY_IDS: tuple[tuple[str, str], ...] = (
     ("modelCatalog", "catalog.model"),
     ("modelCatalog", "catalog.effort"),
@@ -1649,21 +1653,24 @@ def _prompt_fingerprint(
     message: str | None,
     parts: list[dict[str, Any]] | None,
     model: Mapping[str, str] | None,
+    variant: str | None,
     effort: str,
 ) -> str:
     """Bind a requestID to the exact input it was admitted with.
 
-    The model and effort are part of that input: the server answers 409 when a
-    requestID is reused with different input, so the same comparison is made
-    locally — including the selection — to explain the conflict instead of
-    surfacing a bare transport error, and to stop a retry from silently running
-    a different model under an id the server already admitted.
+    The model, its reasoning variant and the effort are part of that input: the
+    server answers 409 when a requestID is reused with different input, so the
+    same comparison is made locally — including the selection — to explain the
+    conflict instead of surfacing a bare transport error, and to stop a retry
+    from silently running a different model, or the same model at a different
+    reasoning level, under an id the server already admitted.
     """
 
     payload = {
         "message": message,
         "parts": parts,
         "model": tuple(sorted(model.items())) if model is not None else None,
+        "variant": variant,
         "effort": effort,
     }
     encoded = repr(sorted(payload.items(), key=lambda item: item[0]))

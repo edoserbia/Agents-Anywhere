@@ -50,9 +50,11 @@ from connector.runtimes.openscience.runtime import (
     OPENSCIENCE_MODEL_CATALOG_STATIC_REVISION,
     OpenScienceRelay,
     OpenScienceRuntime,
+    _prompt_fingerprint,
     runtime_capabilities,
 )
 from connector.runtimes.providers import default_runtime_providers
+from connector.server.protocol import protocol_selection_id
 
 # --- fixtures --------------------------------------------------------------
 
@@ -221,9 +223,15 @@ def model_payload(
     provider_id: str,
     reasoning: bool = True,
     status: str = "active",
+    variants: tuple[str, ...] | None = None,
     **overrides: Any,
 ) -> dict[str, Any]:
-    """One `Provider.Info.models` entry, shaped like the server's own model."""
+    """One `Provider.Info.models` entry, shaped like the server's own model.
+
+    ``variants`` is the server's own derivation (`ProviderTransform.variants`)
+    keyed by level, so a model either carries the exact levels it supports or
+    carries no ``variants`` key at all — the two live cases.
+    """
 
     return {
         "id": model_id,
@@ -242,6 +250,11 @@ def model_payload(
         },
         "cost": {"input": 0, "output": 0, "cache": {"read": 0, "write": 0}},
         "limit": {"context": 200_000, "output": 200_000},
+        **(
+            {"variants": {level: {} for level in variants}}
+            if variants is not None
+            else {}
+        ),
         **overrides,
     }
 
@@ -250,9 +263,10 @@ def provider_catalog() -> dict[str, Any]:
     """A realistic `GET /config/providers` payload.
 
     It carries what the live server actually exercises: two providers whose
-    default model is not the first key in `models`, a model that does not
-    reason, a model the server no longer considers active, and one model name
-    served by both providers.
+    default model is not the first key in `models`, models whose variant sets
+    differ in size (five levels, three levels, none at all, and an empty
+    object), a model that does not reason, a model the server no longer
+    considers active, and one model name served by both providers.
     """
 
     return {
@@ -269,13 +283,17 @@ def provider_catalog() -> dict[str, Any]:
                         "MiniMaxAI/MiniMax-M2.5", "MiniMax M2.5", provider_id="cc-proxy"
                     ),
                     "gpt-5.6-terra": model_payload(
-                        "gpt-5.6-terra", "GPT-5.6 Terra", provider_id="cc-proxy"
+                        "gpt-5.6-terra",
+                        "GPT-5.6 Terra",
+                        provider_id="cc-proxy",
+                        variants=("low", "medium", "high", "xhigh", "max"),
                     ),
                     "gpt-5.6-sol": model_payload(
                         "gpt-5.6-sol",
                         "GPT-5.6 Sol",
                         provider_id="cc-proxy",
                         status="deprecated",
+                        variants=("low", "high", "max"),
                     ),
                 },
             },
@@ -291,9 +309,16 @@ def provider_catalog() -> dict[str, Any]:
                         "Lab Small",
                         provider_id="local-lab",
                         reasoning=False,
+                        # An empty object is the other "no dial" shape.
+                        variants=(),
                     ),
                     "lab-terra": model_payload(
-                        "lab-terra", "GPT-5.6 Terra", provider_id="local-lab"
+                        "lab-terra",
+                        "GPT-5.6 Terra",
+                        provider_id="local-lab",
+                        # A live ladder that is not alphabetical: `minimal`
+                        # leads, which is exactly why the order is preserved.
+                        variants=("minimal", "low", "medium", "high", "xhigh"),
                     ),
                 },
             },
@@ -305,9 +330,9 @@ def selection_id_for(
     catalog: Any,
     provider_id: str,
     model_id: str,
-    effort: str | None = None,
+    variant: str | None = None,
 ) -> str:
-    """The platform selection id a picker would send for one model/effort."""
+    """The platform selection id a picker would send for one model/variant."""
 
     for model in catalog.models:
         if (
@@ -315,11 +340,11 @@ def selection_id_for(
             or model.metadata["modelID"] != model_id
         ):
             continue
-        if effort is None:
+        if variant is None:
             assert model.selection_id is not None
             return model.selection_id
         for reasoning in model.reasoning_items:
-            if reasoning.id == effort:
+            if reasoning.id == variant:
                 return reasoning.selection_id
     raise AssertionError(f"{provider_id}/{model_id} is not in the catalog")
 
@@ -540,6 +565,7 @@ class FakeClient:
         message: str | None = None,
         parts: list[dict[str, Any]] | None = None,
         model: dict[str, str] | None = None,
+        variant: str | None = None,
         effort: str | None = None,
         message_id: str | None = None,
         directory: Any = None,
@@ -553,6 +579,7 @@ class FakeClient:
                 "message": message,
                 "parts": parts,
                 "model": dict(model) if model is not None else None,
+                "variant": variant,
                 "effort": effort,
             }
         )
@@ -1125,7 +1152,7 @@ def test_start_turn_requires_a_stable_client_message_id() -> None:
 # --- model catalog and selections -------------------------------------------
 
 
-def test_model_catalog_maps_the_servers_providers_and_efforts() -> None:
+def test_model_catalog_publishes_each_models_own_reasoning_levels() -> None:
     """The catalog is OpenScience's, translated and not re-invented."""
 
     catalog = models.model_catalog(provider_catalog(), revision=7)
@@ -1146,10 +1173,43 @@ def test_model_catalog_maps_the_servers_providers_and_efforts() -> None:
     assert terra.metadata["default"] is True
     assert terra.metadata["providerName"] == "Command Code Proxy"
     assert terra.enabled is True
-    assert [item.id for item in terra.reasoning_items] == ["normal", "ultra"]
-    assert [item.title for item in terra.reasoning_items] == ["Normal", "Ultra"]
-    assert terra.reasoning_items[0].metadata["default"] is True
-    # A model that does not reason carries a plain selection and no efforts.
+    # A model with five levels publishes exactly those five, under the labels
+    # OpenScience's own picker uses (`xhigh` is "Extra high" there too).
+    assert [item.id for item in terra.reasoning_items] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+    assert [item.title for item in terra.reasoning_items] == [
+        "Low",
+        "Medium",
+        "High",
+        "Extra high",
+        "Max",
+    ]
+    assert terra.metadata["variants"] == ["low", "medium", "high", "xhigh", "max"]
+    # A model with levels is selectable only through one of them: the level is
+    # the choice, so the model itself carries no plain selection.
+    assert terra.selection_id is None
+    # The payload's own order is kept even when it is not sorted, because it is
+    # the server's ladder and not a display accident.
+    lab = by_id["local-lab/lab-terra"]
+    assert [item.id for item in lab.reasoning_items] == [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
+    # A model with no `variants` key has no effort dial at all: no reasoning
+    # items, and a plain model selection — the live majority of 133 models.
+    minimax = by_id["cc-proxy/MiniMaxAI/MiniMax-M2.5"]
+    assert minimax.reasoning_items == ()
+    assert minimax.selection_id is not None
+    assert minimax.metadata["variants"] == []
+    # An empty variants object is the same answer as a missing key.
     small = by_id["local-lab/lab-small"]
     assert small.title == "Lab Small"
     assert small.reasoning_items == ()
@@ -1159,14 +1219,19 @@ def test_model_catalog_maps_the_servers_providers_and_efforts() -> None:
     assert retired.enabled is False
     assert retired.disabled_reason == "OpenScience reports this model as deprecated"
     # Every selection id resolves back to the exact route that produced it.
-    assert models.model_route(catalog, terra.reasoning_items[1].selection_id) == (
+    assert models.model_route(catalog, terra.reasoning_items[3].selection_id) == (
         models.ModelRoute(
-            provider_id="cc-proxy", model_id="gpt-5.6-terra", effort="ultra"
+            provider_id="cc-proxy", model_id="gpt-5.6-terra", variant="xhigh"
         )
     )
-    assert models.model_route(catalog, small.selection_id) == models.ModelRoute(
-        provider_id="local-lab", model_id="lab-small"
+    assert models.model_route(catalog, minimax.selection_id) == models.ModelRoute(
+        provider_id="cc-proxy", model_id="MiniMaxAI/MiniMax-M2.5"
     )
+    # Two levels of one model are two different routes, not one model id.
+    assert models.model_route(
+        catalog, terra.reasoning_items[0].selection_id
+    ) != models.model_route(catalog, terra.reasoning_items[-1].selection_id)
+    # A selection id that resolves to nothing is refused, never defaulted.
     assert models.model_route(catalog, "sel_model_unknown") is None
 
 
@@ -1205,7 +1270,7 @@ def test_the_runtime_publishes_the_servers_model_catalog() -> None:
     run(exercise())
 
 
-def test_a_selected_model_and_effort_reach_the_prompt() -> None:
+def test_a_selected_model_and_reasoning_level_reach_the_prompt() -> None:
     """The platform patches a selection once; every later turn keeps using it."""
 
     async def exercise() -> None:
@@ -1213,7 +1278,7 @@ def test_a_selected_model_and_effort_reach_the_prompt() -> None:
         client = FakeClient(sessions=[session_payload("ses_1")])
         runtime = connected(host, client)
         catalog = await runtime.list_model_catalog()
-        selection = selection_id_for(catalog, "cc-proxy", "gpt-5.6-terra", "ultra")
+        selection = selection_id_for(catalog, "cc-proxy", "gpt-5.6-terra", "xhigh")
 
         result = await runtime.update_session_selections(
             "sess_x", "ses_1", {"model": selection}
@@ -1226,7 +1291,10 @@ def test_a_selected_model_and_effort_reach_the_prompt() -> None:
             "providerID": "cc-proxy",
             "modelID": "gpt-5.6-terra",
         }
-        assert client.prompts[0]["effort"] == "ultra"
+        # The level the picker resolved is what reaches the server's `variant`
+        # field; the research effort stays its own default.
+        assert client.prompts[0]["variant"] == "xhigh"
+        assert client.prompts[0]["effort"] == "normal"
 
     run(exercise())
 
@@ -1237,7 +1305,7 @@ def test_a_turn_can_carry_its_own_selection() -> None:
         client = FakeClient(sessions=[session_payload("ses_1")])
         runtime = connected(host, client)
         catalog = await runtime.list_model_catalog()
-        selection = selection_id_for(catalog, "local-lab", "lab-terra", "normal")
+        selection = selection_id_for(catalog, "local-lab", "lab-terra", "high")
 
         await runtime.start_turn(
             "sess_x",
@@ -1250,6 +1318,7 @@ def test_a_turn_can_carry_its_own_selection() -> None:
             "providerID": "local-lab",
             "modelID": "lab-terra",
         }
+        assert client.prompts[0]["variant"] == "high"
         assert client.prompts[0]["effort"] == "normal"
         # The turn's selection is also the session's, so the next message that
         # carries none still uses it.
@@ -1258,6 +1327,7 @@ def test_a_turn_can_carry_its_own_selection() -> None:
             "providerID": "local-lab",
             "modelID": "lab-terra",
         }
+        assert client.prompts[1]["variant"] == "high"
 
     run(exercise())
 
@@ -1265,9 +1335,10 @@ def test_a_turn_can_carry_its_own_selection() -> None:
 def test_a_prompt_without_a_selection_sends_no_model_and_the_servers_default() -> None:
     """Nothing is selected, so OpenScience runs its own default model.
 
-    The effort is still sent because the server's prompt schema requires one
-    and resolves an unselected turn to `normal`; that is what the runtime has
-    always sent and what the server itself would default to.
+    No model and no variant are invented, and the effort is still sent because
+    the server's prompt schema requires one and resolves an unselected turn to
+    `normal`; that is what the runtime has always sent and what the server
+    itself would default to.
     """
 
     async def exercise() -> None:
@@ -1276,6 +1347,7 @@ def test_a_prompt_without_a_selection_sends_no_model_and_the_servers_default() -
         runtime = connected(host, client)
         await runtime.start_turn("sess_x", "ses_1", "hello", client_message_id="cm_1")
         assert client.prompts[0]["model"] is None
+        assert client.prompts[0]["variant"] is None
         assert client.prompts[0]["effort"] == "normal"
         # No selection means no catalog read: a plain turn stays one request.
         assert "list_providers" not in client.calls
@@ -1284,6 +1356,8 @@ def test_a_prompt_without_a_selection_sends_no_model_and_the_servers_default() -
 
 
 def test_an_effort_scope_alone_is_passed_through() -> None:
+    """The research effort is its own axis: no model, no variant, still sent."""
+
     async def exercise() -> None:
         host = make_host()
         client = FakeClient(sessions=[session_payload("ses_1")])
@@ -1291,17 +1365,20 @@ def test_an_effort_scope_alone_is_passed_through() -> None:
         await runtime.update_session_selections("sess_x", "ses_1", {"effort": "ultra"})
         await runtime.start_turn("sess_x", "ses_1", "hello", client_message_id="cm_1")
         assert client.prompts[0]["model"] is None
+        assert client.prompts[0]["variant"] is None
         assert client.prompts[0]["effort"] == "ultra"
 
     run(exercise())
 
 
-def test_a_model_that_cannot_reason_offers_no_effort_choice() -> None:
-    """`capabilities.reasoning` decides the picker's effort options.
+def test_a_model_that_cannot_reason_offers_no_reasoning_items() -> None:
+    """A model's `variants` decide the picker's reasoning items.
 
-    A model without it gets a plain model selection and no reasoning items, so
-    the platform never shows an effort choice it cannot honour. The prompt still
-    carries the server's default effort, because the endpoint requires one.
+    A model without them — here one that cannot reason at all, and the live
+    majority that simply has no effort dial — gets a plain model selection and
+    no reasoning items, so the platform never shows a level the server cannot
+    apply. The prompt still carries the server's default effort, because the
+    endpoint requires one.
     """
 
     async def exercise() -> None:
@@ -1312,6 +1389,7 @@ def test_a_model_that_cannot_reason_offers_no_effort_choice() -> None:
         small = next(m for m in catalog.models if m.id == "local-lab/lab-small")
         assert small.reasoning_items == ()
         assert small.metadata["reasoning"] is False
+        assert small.metadata["variants"] == []
 
         await runtime.start_turn(
             "sess_x",
@@ -1324,6 +1402,7 @@ def test_a_model_that_cannot_reason_offers_no_effort_choice() -> None:
             "providerID": "local-lab",
             "modelID": "lab-small",
         }
+        assert client.prompts[0]["variant"] is None
         assert client.prompts[0]["effort"] == "normal"
 
     run(exercise())
@@ -1355,9 +1434,73 @@ def test_an_unknown_or_unsupported_selection_is_refused() -> None:
         # A refused selection never reaches a prompt.
         await runtime.start_turn("sess_x", "ses_1", "hello", client_message_id="cm_1")
         assert client.prompts[0]["model"] is None
+        assert client.prompts[0]["variant"] is None
         assert client.prompts[0]["effort"] == "normal"
 
     run(exercise())
+
+
+def test_a_reasoning_level_the_model_does_not_offer_is_refused() -> None:
+    """A stale or foreign level must not resolve to the model or another level.
+
+    A selection id persisted before this change named a level out of the old
+    research-effort vocabulary, which no model's own `variants` contains; the
+    id has to fail rather than round to the model's default.
+    """
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = connected(host, client)
+        await runtime.list_model_catalog()
+        stale = protocol_selection_id(
+            "openscience",
+            "model",
+            {"provider_id": "cc-proxy", "model_id": "gpt-5.6-terra", "effort": "ultra"},
+        )
+
+        result = await runtime.update_session_selections(
+            "sess_x", "ses_1", {"model": stale}
+        )
+        assert result.ok is False
+        assert result.code == "openscience_invalid_selection"
+        # A level one model does not offer is not borrowed from another model
+        # that does: `local-lab/lab-terra` has no `max`, so its id is unknown.
+        catalog = await runtime.list_model_catalog()
+        foreign = selection_id_for(catalog, "cc-proxy", "gpt-5.6-terra", "max")
+        borrowed = protocol_selection_id(
+            "openscience",
+            "model",
+            {
+                "provider_id": "local-lab",
+                "model_id": "lab-terra",
+                "variant": "max",
+            },
+        )
+        assert models.model_route(catalog, foreign) is not None
+        assert models.model_route(catalog, borrowed) is None
+
+        await runtime.start_turn("sess_x", "ses_1", "hello", client_message_id="cm_1")
+        assert client.prompts[0]["model"] is None
+        assert client.prompts[0]["variant"] is None
+
+    run(exercise())
+
+
+def test_the_reasoning_level_is_part_of_the_prompt_fingerprint() -> None:
+    """A retry cannot silently run the same model at a different level."""
+
+    model = {"providerID": "cc-proxy", "modelID": "gpt-5.6-terra"}
+    low = _prompt_fingerprint("hello", None, model, "low", "normal")
+    assert low != _prompt_fingerprint("hello", None, model, "high", "normal")
+    # The effort is a separate axis: changing only it changes the input too.
+    assert low != _prompt_fingerprint("hello", None, model, "low", "ultra")
+    # An unchanged input keeps its fingerprint, which is what a retry needs.
+    assert low == _prompt_fingerprint("hello", None, model, "low", "normal")
+    # No selection at all is a value of its own, not an empty variant.
+    assert _prompt_fingerprint("hello", None, None, None, "normal") != (
+        _prompt_fingerprint("hello", None, model, None, "normal")
+    )
 
 
 def test_a_retry_with_a_different_selection_is_refused_locally() -> None:
@@ -1368,22 +1511,24 @@ def test_a_retry_with_a_different_selection_is_refused_locally() -> None:
         client = FakeClient(sessions=[session_payload("ses_1")])
         runtime = connected(host, client)
         catalog = await runtime.list_model_catalog()
-        terra = selection_id_for(catalog, "cc-proxy", "gpt-5.6-terra", "normal")
-        ultra = selection_id_for(catalog, "cc-proxy", "gpt-5.6-terra", "ultra")
+        low = selection_id_for(catalog, "cc-proxy", "gpt-5.6-terra", "low")
+        max_level = selection_id_for(catalog, "cc-proxy", "gpt-5.6-terra", "max")
 
         await runtime.start_turn(
             "sess_x",
             "ses_1",
             "hello",
-            selections={"model": terra},
+            selections={"model": low},
             client_message_id="cm_1",
         )
+        # Same model, same message, same requestID — only the reasoning level
+        # changed, and that is still a different input.
         with pytest.raises(RuntimeInvalidRequestError):
             await runtime.start_turn(
                 "sess_x",
                 "ses_1",
                 "hello",
-                selections={"model": ultra},
+                selections={"model": max_level},
                 client_message_id="cm_1",
             )
         assert len(client.prompts) == 1
@@ -1392,7 +1537,7 @@ def test_a_retry_with_a_different_selection_is_refused_locally() -> None:
             "sess_x",
             "ses_1",
             "hello",
-            selections={"model": terra},
+            selections={"model": low},
             client_message_id="cm_1",
         )
         assert again.result["runID"] == "run_1"
@@ -1409,7 +1554,7 @@ def test_state_updates_republish_the_session_selection() -> None:
         client = FakeClient(sessions=[session_payload("ses_1")])
         runtime, relay = connected_relay(host, client)
         catalog = await runtime.list_model_catalog()
-        selection = selection_id_for(catalog, "cc-proxy", "gpt-5.6-terra", "ultra")
+        selection = selection_id_for(catalog, "cc-proxy", "gpt-5.6-terra", "xhigh")
         await runtime.update_session_selections("sess_x", "ses_1", {"model": selection})
         runtime._register_session("ses_1", session_id="sess_x")
 
@@ -1431,10 +1576,13 @@ def test_a_selection_missing_from_the_cache_is_re_read_before_it_is_refused() ->
         assert client.calls.count("list_providers") == 1
         # A model the cached catalog has never seen, published on the next read.
         client.providers["providers"][0]["models"]["gpt-6-new"] = model_payload(
-            "gpt-6-new", "GPT-6 New", provider_id="cc-proxy"
+            "gpt-6-new",
+            "GPT-6 New",
+            provider_id="cc-proxy",
+            variants=("low", "high", "max"),
         )
         fresh = models.model_catalog(client.providers, revision=1)
-        selection = selection_id_for(fresh, "cc-proxy", "gpt-6-new", "ultra")
+        selection = selection_id_for(fresh, "cc-proxy", "gpt-6-new", "high")
 
         result = await runtime.update_session_selections(
             "sess_x", "ses_1", {"model": selection}
@@ -1447,7 +1595,8 @@ def test_a_selection_missing_from_the_cache_is_re_read_before_it_is_refused() ->
             "providerID": "cc-proxy",
             "modelID": "gpt-6-new",
         }
-        assert client.prompts[0]["effort"] == "ultra"
+        assert client.prompts[0]["variant"] == "high"
+        assert client.prompts[0]["effort"] == "normal"
 
     run(exercise())
 
@@ -2031,6 +2180,7 @@ def test_prompt_is_addressed_by_request_id() -> None:
             request_id="req_1",
             message="hello",
             model={"providerID": "cc-proxy", "modelID": "gpt-5.6-terra"},
+            variant="xhigh",
             effort="ultra",
         )
         await client.close()
@@ -2039,6 +2189,7 @@ def test_prompt_is_addressed_by_request_id() -> None:
             "sessionID": "ses_1",
             "requestID": "req_1",
             "model": {"providerID": "cc-proxy", "modelID": "gpt-5.6-terra"},
+            "variant": "xhigh",
             "effort": "ultra",
             "message": "hello",
         }
@@ -2047,7 +2198,7 @@ def test_prompt_is_addressed_by_request_id() -> None:
 
 
 def test_prompt_omits_the_selection_it_was_not_given() -> None:
-    """Neither field is invented: an absent selection stays absent."""
+    """No field is invented: an absent selection stays absent."""
 
     seen: list[dict[str, Any]] = []
 
@@ -2059,6 +2210,13 @@ def test_prompt_omits_the_selection_it_was_not_given() -> None:
         client = http_client(handler)
         await client.prompt("ses_1", request_id="req_1", message="hello")
         await client.prompt("ses_1", request_id="req_2", message="hello", effort="normal")
+        await client.prompt(
+            "ses_1",
+            request_id="req_3",
+            message="hello",
+            model={"providerID": "cc-proxy", "modelID": "gpt-5.6-terra"},
+            variant="high",
+        )
         await client.close()
         assert seen[0] == {
             "sessionID": "ses_1",
@@ -2069,6 +2227,14 @@ def test_prompt_omits_the_selection_it_was_not_given() -> None:
             "sessionID": "ses_1",
             "requestID": "req_2",
             "effort": "normal",
+            "message": "hello",
+        }
+        # The variant travels with the model it belongs to, and only then.
+        assert seen[2] == {
+            "sessionID": "ses_1",
+            "requestID": "req_3",
+            "model": {"providerID": "cc-proxy", "modelID": "gpt-5.6-terra"},
+            "variant": "high",
             "message": "hello",
         }
 
@@ -2108,6 +2274,10 @@ def test_prompt_requires_a_request_id_and_exactly_one_input() -> None:
             await client.prompt("ses_1", request_id="req_1", message="a", parts=[{"type": "text"}])
         with pytest.raises(ValueError):
             await client.prompt("ses_1", request_id="req_1", message="a", effort="turbo")
+        with pytest.raises(ValueError):
+            await client.prompt("ses_1", request_id="req_1", message="a", variant="  ")
+        with pytest.raises(ValueError):
+            await client.prompt("ses_1", request_id="req_1", message="a", variant=7)
         with pytest.raises(ValueError):
             await client.prompt(
                 "ses_1",

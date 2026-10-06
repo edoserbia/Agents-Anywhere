@@ -12,7 +12,13 @@ mapping rules can be tested without a server. Three shapes recur:
   carries the native request id that a decision is addressed to;
 * a **model** comes from the server's own ``/config/providers`` catalog, and a
   platform selection is only an opaque id until it is resolved back to the
-  provider, model and effort the server would run.
+  provider, model and reasoning variant the server would run.
+
+Two axes that look alike are deliberately kept apart. A model's **reasoning
+variants** are the effort levels OpenScience derived for that one model, and
+they are what the picker's reasoning items are built from. The prompt's
+**effort** is OpenScience's research effort, a separate enum that every prompt
+carries regardless of which variant was chosen.
 """
 
 from __future__ import annotations
@@ -63,16 +69,23 @@ from connector.server.protocol import protocol_selection_id
 
 RUNTIME = "openscience"
 
-# The reasoning-effort vocabulary is OpenScience's own (`ResearchEffort`), and
-# it is a closed two-value enum on the server. The catalog republishes exactly
-# these ids and the prompt passes the chosen one through untouched: a third
-# value, or a translation into another runtime's labels, would name an effort
-# the server does not have.
+# The prompt's `effort` is OpenScience's *research effort* (`ResearchEffort`),
+# a closed two-value enum on the server. It is a different axis from how hard
+# the chosen model thinks — that is the model's own `variants`, published as
+# reasoning items below — so the two are never derived from each other: every
+# prompt keeps sending this effort, selected or not.
 OPENSCIENCE_EFFORTS: tuple[str, str] = ("normal", "ultra")
 # `resolveResearchEffort` falls back to "normal", so that is the server's own
 # default and the value an unselected turn keeps sending.
 DEFAULT_EFFORT = "normal"
-_EFFORT_TITLES = {"normal": "Normal", "ultra": "Ultra"}
+
+# OpenScience names two of its reasoning levels specially in its own picker
+# (`frontend/workspace/src/components/model-presentation.ts`); every other
+# level is its id with separators opened up and the first letter capitalized.
+# Mirroring those words keeps Agents Anywhere showing what the server's own UI
+# shows, and the raw id is the fallback for a level this connector has never
+# seen.
+_VARIANT_TITLES = {"none": "Off", "xhigh": "Extra high"}
 
 PERMISSION_NOTICE_PREFIX = "notice_openscience_permission_"
 QUESTION_NOTICE_PREFIX = "notice_openscience_question_"
@@ -95,12 +108,14 @@ class ModelRoute:
 
     The platform only ever hands back the opaque ``selectionId`` it was shown,
     so the provider/model pair — which is what ``POST /runtime/prompt`` needs —
-    has to be recovered from the catalog that produced the id.
+    and the model's own reasoning ``variant`` have to be recovered from the
+    catalog that produced the id. ``variant`` is ``None`` for a model with no
+    effort dial, which is also the only way such a model can be selected.
     """
 
     provider_id: str
     model_id: str
-    effort: str | None = None
+    variant: str | None = None
 
 
 def model_catalog(payload: Mapping[str, Any], *, revision: int) -> RuntimeModelCatalog:
@@ -110,10 +125,17 @@ def model_catalog(payload: Mapping[str, Any], *, revision: int) -> RuntimeModelC
     a policy: one item per provider/model pair, named exactly as the server
     names it, with the provider's ``default`` model first in its group because
     the Connector's catalog has no default marker of its own and the platform
-    falls back to the first enabled item. A model's ``capabilities.reasoning``
-    decides whether the two OpenScience effort values are offered as reasoning
-    items — the picker's effort options *are* those items, which is why the
-    effort capability is published alongside the model catalog.
+    falls back to the first enabled item.
+
+    A model's reasoning items *are* its own ``variants`` — the effort levels
+    OpenScience derived for that model — in the order the payload lists them.
+    The picker therefore offers exactly the dials the server would honour, and
+    nothing is re-sorted or invented. A model without variants (or with an
+    empty object) has no effort dial at all, so it gets no reasoning items and
+    a plain model selection instead: 79 of the 133 models the live server
+    publishes are in that position, and offering them a level the server cannot
+    apply would be a lie. The prompt's ``effort`` is a separate axis and is
+    always sent (see :data:`DEFAULT_EFFORT`).
 
     Two models may legitimately share a name (the live catalog has twenty such
     names across providers), so the title is qualified only when it is actually
@@ -206,7 +228,7 @@ def model_route(
         for reasoning in model.reasoning_items:
             if reasoning.selection_id == selection_id:
                 return ModelRoute(
-                    provider_id=provider_id, model_id=model_id, effort=reasoning.id
+                    provider_id=provider_id, model_id=model_id, variant=reasoning.id
                 )
     return None
 
@@ -229,7 +251,7 @@ def _model_item(
     name_is_repeated: bool,
 ) -> RuntimeModelItem:
     status = _optional_string(model.get("status")) or "active"
-    reasoning = _reasoning_supported(model)
+    variants = _model_variants(model)
     title = model_name
     if name_is_shared:
         title = f"{title} · {provider_name}"
@@ -242,29 +264,24 @@ def _model_item(
         title=title,
         selection_id=(
             None
-            if reasoning
+            if variants
             else protocol_selection_id(
                 RUNTIME, "model", _selection_identity(provider_id, model_id, None)
             )
         ),
-        reasoning_items=(
-            tuple(
-                RuntimeReasoningItem(
-                    id=effort,
-                    title=_EFFORT_TITLES[effort],
-                    selection_id=protocol_selection_id(
-                        RUNTIME, "model", _selection_identity(provider_id, model_id, effort)
-                    ),
-                    metadata={
-                        "source": _CATALOG_SOURCE,
-                        "effort": effort,
-                        "default": effort == DEFAULT_EFFORT,
-                    },
-                )
-                for effort in OPENSCIENCE_EFFORTS
+        reasoning_items=tuple(
+            RuntimeReasoningItem(
+                id=variant,
+                title=_variant_title(variant),
+                selection_id=protocol_selection_id(
+                    RUNTIME, "model", _selection_identity(provider_id, model_id, variant)
+                ),
+                metadata={
+                    "source": _CATALOG_SOURCE,
+                    "variant": variant,
+                },
             )
-            if reasoning
-            else ()
+            for variant in variants
         ),
         enabled=status == "active",
         disabled_reason=(
@@ -276,19 +293,50 @@ def _model_item(
             "providerName": provider_name,
             "modelID": model_id,
             "modelName": model_name,
-            "reasoning": reasoning,
+            "reasoning": _reasoning_supported(model),
+            "variants": list(variants),
             "status": status,
             "default": is_default,
         },
     )
 
 
-def _selection_identity(
-    provider_id: str, model_id: str, effort: str | None
-) -> dict[str, Any]:
-    """The routing a selection id commits to, hashed by the protocol helper."""
+def _model_variants(model: Mapping[str, Any]) -> tuple[str, ...]:
+    """The reasoning levels one model offers, in the payload's own order.
 
-    return {"provider_id": provider_id, "model_id": model_id, "effort": effort}
+    ``ProviderTransform.variants()`` derives these from the model's own
+    reasoning options, so the object's key order is the server's own ladder
+    (``none`` before ``low`` before ``max``) and is preserved rather than
+    re-sorted. An absent or empty object means the model has no effort dial.
+    """
+
+    variants = model.get("variants")
+    if not isinstance(variants, Mapping):
+        return ()
+    return tuple(level for level in variants if isinstance(level, str) and level)
+
+
+def _variant_title(level: str) -> str:
+    """The label OpenScience's own picker would show for one reasoning level."""
+
+    named = _VARIANT_TITLES.get(level)
+    if named is not None:
+        return named
+    opened = level.replace("-", " ").replace("_", " ")
+    return opened[:1].upper() + opened[1:]
+
+
+def _selection_identity(
+    provider_id: str, model_id: str, variant: str | None
+) -> dict[str, Any]:
+    """The routing a selection id commits to, hashed by the protocol helper.
+
+    The reasoning variant belongs in the identity: two selections of the same
+    model at different levels are different routes, and the id has to resolve
+    back to the exact level the user picked rather than to the model alone.
+    """
+
+    return {"provider_id": provider_id, "model_id": model_id, "variant": variant}
 
 
 def _reasoning_supported(model: Mapping[str, Any]) -> bool:

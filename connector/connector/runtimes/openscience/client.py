@@ -486,24 +486,32 @@ class OpenScienceClient:
         message: str | None = None,
         parts: list[dict[str, Any]] | None = None,
         model: Mapping[str, str] | None = None,
+        variant: str | None = None,
         effort: str | None = None,
         message_id: str | None = None,
         directory: ProjectScope = None,
     ) -> dict[str, Any]:
-        """Admit one run, optionally pinning the model and reasoning effort.
+        """Admit one run, optionally pinning the model, its reasoning level and effort.
 
-        ``model`` and ``effort`` are omitted when not supplied so the server
-        applies its own configuration; the caller decides that, because only it
-        knows whether the user actually chose something. When they are supplied
-        they are passed through verbatim — OpenScience owns the catalog and the
-        effort vocabulary, and translating either here would send the user a
-        different model than the one they picked.
+        ``model``, ``variant`` and ``effort`` are omitted when not supplied so
+        the server applies its own configuration; the caller decides that,
+        because only it knows whether the user actually chose something. When
+        they are supplied they are passed through verbatim — OpenScience owns
+        the catalog, the per-model variant vocabulary and the research-effort
+        enum, and translating any of them here would run the user's turn at a
+        level they did not pick.
+
+        ``variant`` names one of the chosen model's own ``variants`` and
+        ``effort`` is OpenScience's research effort: two independent axes, so
+        neither is ever derived from the other.
         """
 
         if not request_id or not request_id.strip():
             raise ValueError("a persisted requestID is required before submitting work")
         if (message is None) == (parts is None):
             raise ValueError("supply exactly one of message or parts")
+        if variant is not None and (not isinstance(variant, str) or not variant.strip()):
+            raise ValueError("variant must be a non-empty string")
         if effort is not None and effort not in models.OPENSCIENCE_EFFORTS:
             raise ValueError(
                 "effort must be one of " + ", ".join(models.OPENSCIENCE_EFFORTS)
@@ -524,6 +532,8 @@ class OpenScienceClient:
                 "providerID": model["providerID"],
                 "modelID": model["modelID"],
             }
+        if variant is not None:
+            body["variant"] = variant
         if effort is not None:
             body["effort"] = effort
         if message is not None:
