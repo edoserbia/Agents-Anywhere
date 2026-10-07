@@ -47,6 +47,7 @@ from connector.runtimes.openscience.client import (
 )
 from connector.runtimes.openscience.provider import OpenScienceProvider
 from connector.runtimes.openscience.runtime import (
+    _SESSION_CAPABILITY_IDS,
     OPENSCIENCE_MODEL_CATALOG_STATIC_REVISION,
     OpenScienceRelay,
     OpenScienceRuntime,
@@ -364,6 +365,7 @@ def make_host(**overrides: Any) -> SimpleNamespace:
         connector_id="conn-test",
         runtime_health_update=AsyncMock(),
         runtime_capabilities_update=AsyncMock(),
+        session_capabilities_update=AsyncMock(),
         runtime_error=AsyncMock(),
         session_meta_upsert=AsyncMock(),
         session_state_update=AsyncMock(),
@@ -681,6 +683,7 @@ def build_runtime(
                 port=41999,
                 source="configured",
                 version="2.0.147",
+                run_id="run_os_1",
             ),
             discovery.OpenScienceCapabilities(
                 protocol_version=protocol,
@@ -976,6 +979,275 @@ def test_start_attaches_and_publishes_capabilities() -> None:
             assert host.runtime_health_update.await_args.args[0] == "running"
         finally:
             await runtime.stop()
+
+    run(exercise())
+
+
+# --- session capabilities --------------------------------------------------
+
+
+def attached_relay_for(
+    host: SimpleNamespace,
+    client: FakeClient,
+) -> tuple[OpenScienceRuntime, OpenScienceRelay]:
+    """A relay whose runtime is attached, without starting the polling loop.
+
+    Capability availability depends on the runtime really being connected, so
+    the client is bound the way ``_connect`` binds it. The relay loop stays
+    unstarted so every publication in a test is the one the test asked for.
+    """
+
+    runtime, relay = relay_for(host, client)
+    runtime._client = client
+    return runtime, relay
+
+
+def capability_by_id(capabilities: Any) -> dict[str, Any]:
+    return {item.capability_id: item for item in capabilities.capabilities}
+
+
+def test_session_capabilities_report_the_abilities_the_runtime_can_serve() -> None:
+    """`session.send_message` is what makes takeover a usable remedy.
+
+    The platform reads this set to decide whether an action is possible at all;
+    an empty set is what left every OpenScience session read-only.
+    """
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = build_runtime(host, client=client)
+        await runtime.start()
+        try:
+            platform = await platform_session(runtime)
+            capabilities = await runtime.get_session_capabilities(platform)
+
+            assert capabilities.runtime == "openscience"
+            assert capabilities.session_id == platform
+            assert capabilities.connector_id == "conn-test"
+            assert capabilities.runtime_id == runtime.identity.runtime_id == "run_os_1"
+            assert capabilities.revision == runtime.config.revision
+            assert capabilities.metadata["source"] == "openscience.session.capabilities"
+            assert capabilities.metadata["externalSessionId"] == "ses_1"
+
+            published = capability_by_id(capabilities)
+            assert all(item.scope == "session" for item in capabilities.capabilities)
+            assert all(item.session_id == platform for item in capabilities.capabilities)
+            assert published["session.send_message"].supported is True
+            assert published["session.send_message"].available is True
+            assert published["session.send_message"].unavailable_reason is None
+            assert published["session.interrupt"].supported is True
+            assert published["session.interrupt"].available is False
+            assert published["session.interrupt"].unavailable_reason == "no_active_run"
+            assert published["session.interaction.approval"].supported is True
+            assert published["session.interaction.approval"].available is False
+            assert (
+                published["session.interaction.approval"].unavailable_reason
+                == "no_pending_interaction"
+            )
+            assert published["runtime.attachment"].supported is True
+            assert published["runtime.attachment"].available is True
+            assert published["catalog.model"].supported is True
+            assert published["catalog.effort"].supported is True
+        finally:
+            await runtime.stop()
+
+    run(exercise())
+
+
+def test_session_capabilities_decline_what_the_runtime_cannot_serve() -> None:
+    """A declined ability is named unsupported, never advertised as usable."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = build_runtime(host, client=client)
+        await runtime.start()
+        try:
+            platform = await platform_session(runtime)
+            published = capability_by_id(
+                await runtime.get_session_capabilities(platform)
+            )
+            for capability_id in (
+                "session.steer",
+                "session.commands",
+                "catalog.permission",
+            ):
+                declined = published[capability_id]
+                assert declined.supported is False
+                assert declined.available is False
+                assert declined.allowed is False
+                assert declined.unavailable_reason == "unsupported"
+            # `project.create` is answered before a session exists, so it is
+            # published at runtime scope only.
+            assert "project.create" not in published
+        finally:
+            await runtime.stop()
+
+    run(exercise())
+
+
+def test_session_capabilities_agree_with_the_runtime_inventory() -> None:
+    """Both sets are sliced from one inventory, so they cannot disagree."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime = build_runtime(host, client=client)
+        await runtime.start()
+        try:
+            platform = await platform_session(runtime)
+            declared = runtime_capabilities()
+            runtime_set = capability_by_id(await runtime.get_runtime_capabilities())
+            session_set = capability_by_id(
+                await runtime.get_session_capabilities(platform)
+            )
+
+            expected = {
+                inventory_key
+                for inventory_key, _ in _SESSION_CAPABILITY_IDS
+                if inventory_key in declared
+            }
+            assert {
+                item.metadata["inventoryKey"] for item in session_set.values()
+            } == expected
+            assert "createProject" not in expected
+            for capability_id, item in session_set.items():
+                inventory_key = item.metadata["inventoryKey"]
+                assert item.supported is declared[inventory_key]
+                if capability_id in runtime_set:
+                    assert runtime_set[capability_id].supported is item.supported
+        finally:
+            await runtime.stop()
+
+    run(exercise())
+
+
+def test_session_capability_availability_follows_the_observed_state() -> None:
+    """A live run flips prompt and interrupt; a decision flips approval."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(
+            sessions=[session_payload("ses_1")],
+            snapshots={"ses_1": snapshot_payload("ses_1")},
+        )
+        runtime, relay = attached_relay_for(host, client)
+        await relay._resnapshot("ses_1")
+        platform = runtime._platform_ids["ses_1"]
+
+        idle = capability_by_id(await runtime.get_session_capabilities(platform))
+        assert idle["session.send_message"].available is True
+        assert idle["session.interrupt"].available is False
+        assert idle["session.interrupt"].unavailable_reason == "no_active_run"
+
+        client.snapshots["ses_1"] = snapshot_payload(
+            "ses_1", runs=[run_payload("running")], latest=4
+        )
+        await relay._resnapshot("ses_1")
+        running = capability_by_id(await runtime.get_session_capabilities(platform))
+        assert running["session.send_message"].available is False
+        assert running["session.send_message"].unavailable_reason == "session_running"
+        assert running["session.interrupt"].available is True
+        assert running["session.interrupt"].unavailable_reason is None
+
+        client.snapshots["ses_1"] = snapshot_payload(
+            "ses_1",
+            runs=[run_payload("running")],
+            permissions=[permission_payload()],
+            latest=5,
+        )
+        await relay._resnapshot("ses_1")
+        waiting = capability_by_id(await runtime.get_session_capabilities(platform))
+        assert waiting["session.interaction.approval"].available is True
+        assert waiting["session.interaction.approval"].unavailable_reason is None
+        assert waiting["session.interrupt"].available is True
+
+        # A detached runtime cannot serve anything, and says so rather than
+        # silently dropping the ability.
+        runtime._client = None
+        detached = capability_by_id(await runtime.get_session_capabilities(platform))
+        assert detached["session.send_message"].supported is True
+        assert detached["session.send_message"].available is False
+        assert (
+            detached["session.send_message"].unavailable_reason
+            == "openscience_unavailable"
+        )
+
+    run(exercise())
+
+
+def test_session_capabilities_are_published_once_per_change() -> None:
+    """Every tick republishes state; capabilities only when they moved."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(
+            sessions=[session_payload("ses_1")],
+            snapshots={"ses_1": snapshot_payload("ses_1")},
+        )
+        runtime, relay = attached_relay_for(host, client)
+
+        await relay._resnapshot("ses_1")
+        assert host.session_capabilities_update.await_count == 1
+        published = host.session_capabilities_update.await_args.args[0]
+        platform = runtime._platform_ids["ses_1"]
+        assert published.session_id == platform
+        assert capability_by_id(published)["session.send_message"].supported is True
+
+        # The same state again changes nothing, so nothing is republished.
+        await relay._resnapshot("ses_1")
+        assert host.session_state_update.await_count == 2
+        assert host.session_capabilities_update.await_count == 1
+
+        # A fact behind the set moved, so the set is republished.
+        client.snapshots["ses_1"] = snapshot_payload(
+            "ses_1", runs=[run_payload("running")], latest=4
+        )
+        await relay._resnapshot("ses_1")
+        assert host.session_capabilities_update.await_count == 2
+        assert (
+            capability_by_id(host.session_capabilities_update.await_args.args[0])[
+                "session.send_message"
+            ].available
+            is False
+        )
+
+        # A read is a publication path too, and it is silent while the set it
+        # computes matches the one already published.
+        await runtime.get_session_capabilities(platform)
+        assert host.session_capabilities_update.await_count == 2
+
+        # A state read is a fact as well: the run finished, so the next
+        # capabilities read republishes.
+        client.snapshots["ses_1"] = snapshot_payload("ses_1", latest=9)
+        await runtime.get_session_state(platform)
+        await runtime.get_session_capabilities(platform)
+        assert host.session_capabilities_update.await_count == 3
+        assert (
+            capability_by_id(host.session_capabilities_update.await_args.args[0])[
+                "session.send_message"
+            ].available
+            is True
+        )
+
+    run(exercise())
+
+
+def test_reading_session_capabilities_publishes_them() -> None:
+    """The read path publishes, deduplicated by the facts it carries."""
+
+    async def exercise() -> None:
+        host = make_host()
+        client = FakeClient(sessions=[session_payload("ses_1")])
+        runtime, _relay = attached_relay_for(host, client)
+        sessions = await runtime.list_sessions()
+        platform = sessions[0].session_id
+
+        await runtime.get_session_capabilities(platform)
+        assert host.session_capabilities_update.await_count == 1
+        await runtime.get_session_capabilities(platform)
+        assert host.session_capabilities_update.await_count == 1
 
     run(exercise())
 

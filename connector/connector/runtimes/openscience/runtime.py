@@ -42,6 +42,7 @@ from connector.runtime_protocol import (
     RuntimeModelCatalog,
     RuntimeOperationResult,
     RuntimeProject,
+    RuntimeStatus,
     RuntimeTimelineSnapshot,
     RuntimeUnavailableError,
     RuntimeUnsupportedError,
@@ -209,6 +210,16 @@ class OpenScienceRuntime(AgentRuntime):
         self._selections: dict[str, dict[str, str | None]] = {}
         # (monotonic read time, catalog) for the server-owned model catalog.
         self._model_catalog_cache: tuple[float, RuntimeModelCatalog] | None = None
+        # Platform session id -> the newest state this process observed, from the
+        # relay or an explicit state read. Session capability availability is
+        # derived from it, so a capabilities read stays local: the platform asks
+        # on every action admission, and a snapshot per ask would both slow that
+        # path down and fail whenever the server hiccups.
+        self._session_states: dict[str, SessionState] = {}
+        # Platform session id -> the signature of the last set actually published.
+        # State is republished on every tick, and most ticks change nothing; the
+        # platform must not receive a capability notification per tick.
+        self._published_session_capabilities: dict[str, tuple[Any, ...]] = {}
 
     @property
     def identity(self) -> RuntimeIdentity:
@@ -272,6 +283,52 @@ class OpenScienceRuntime(AgentRuntime):
 
     async def get_runtime_capabilities(self) -> RuntimeCapabilitySet:
         return self._capability_set()
+
+    async def get_session_capabilities(
+        self,
+        session_id: str,
+        external_session_id: str | None = None,
+    ) -> RuntimeCapabilitySet:
+        """Report what this runtime can serve for one session, and publish it.
+
+        The set is derived from the same inventory ``runtime_capabilities()``
+        declares, so a session can never advertise an ability this adapter does
+        not implement. The platform reads ``session.send_message`` here to decide
+        whether takeover could make a session writable at all: with an empty set
+        it concludes the runtime cannot send messages, and the user is never
+        offered the takeover that is the actual remedy.
+
+        Availability is built from facts already held in this process — whether
+        the server is attached, whether the session is bound to a native id, and
+        the last state the relay observed — rather than from a fresh snapshot,
+        because the platform asks on every action admission.
+
+        Side effects:
+        - publishes the session-scoped set through the host when it changed
+        """
+
+        capabilities = self._session_capability_set(session_id, external_session_id)
+        await self._publish_session_capabilities(capabilities)
+        return capabilities
+
+    async def publish_session_capabilities_for_state(
+        self,
+        state: SessionState,
+    ) -> None:
+        """Remember one session state and publish the capabilities it implies.
+
+        This is the relay's hook: every state it publishes passes through here,
+        so a capability that became usable or unusable is republished, while an
+        unchanged tick stays silent.
+
+        Side effects:
+        - sends a session capability update through the host client
+        """
+
+        self._session_states[state.session_id] = state
+        await self._publish_session_capabilities(
+            self._session_capability_set(state.session_id, state.external_session_id)
+        )
 
     async def list_model_catalog(
         self,
@@ -448,9 +505,13 @@ class OpenScienceRuntime(AgentRuntime):
     ) -> SessionState:
         external = self._external_session(session_id, external_session_id)
         snapshot = await self._snapshot(external)
-        return models.session_state(
+        state = models.session_state(
             snapshot, session_id=session_id, external_session_id=external
         )
+        # An explicit read is as good a fact as a relay tick, so capability
+        # availability uses it until the relay observes something newer.
+        self._session_states[session_id] = state
+        return state
 
     async def get_session_notices(
         self,
@@ -737,6 +798,58 @@ class OpenScienceRuntime(AgentRuntime):
             ),
             metadata={"source": "openscience.runtime.capabilities", **declared},
         )
+
+    def _session_capability_set(
+        self,
+        session_id: str,
+        external_session_id: str | None,
+    ) -> RuntimeCapabilitySet:
+        """Build one session's set from the facts this process already holds."""
+
+        external = external_session_id or self._sessions.get(session_id)
+        state = self._session_states.get(session_id)
+        if state is None and external is not None:
+            # A caller may address the session by its native id before this
+            # runtime has seen that platform id, so the reverse binding is used
+            # to find the state the relay cached under the platform id.
+            known = self._platform_ids.get(external)
+            state = self._session_states.get(known) if known is not None else None
+        return session_capability_set(
+            connector_id=self.host.connector_id,
+            runtime_id=self._identity.runtime_id,
+            revision=self.config.revision,
+            session_id=session_id,
+            external_session_id=external,
+            attached=self._client is not None,
+            state=state,
+        )
+
+    async def _publish_session_capabilities(
+        self,
+        capabilities: RuntimeCapabilitySet,
+    ) -> None:
+        """Publish one session's set, and only when it actually changed.
+
+        The relay republishes a session's state on every inventory tick, but a
+        capability notification is only worth sending when a fact behind it
+        moved. The signature covers everything the platform reads, so an
+        identical set is dropped; a failed publication is not remembered, so the
+        next read or tick tries again.
+        """
+
+        session_id = capabilities.session_id or ""
+        signature = _capability_signature(capabilities)
+        if self._published_session_capabilities.get(session_id) == signature:
+            return
+        try:
+            await self.host.session_capabilities_update(capabilities)
+        except Exception as error:  # noqa: BLE001 - a capability fact is not an action
+            logger.warning(
+                "OpenScience session capability publish failed error_type={}",
+                type(error).__name__,
+            )
+            return
+        self._published_session_capabilities[session_id] = signature
 
     def _session_metas(self, sessions: list[dict[str, Any]]) -> tuple[SessionMeta, ...]:
         output: list[SessionMeta] = []
@@ -1528,6 +1641,9 @@ class OpenScienceRelay:
             selections=self.runtime._selections.get(platform, {}),
             metadata=state.metadata,
         )
+        # Session capability availability is a projection of this state, so it is
+        # republished right behind it — and only when the projection changed.
+        await self.runtime.publish_session_capabilities_for_state(state)
         for notice in models.notices(
             snapshot, session_id=platform, external_session_id=external
         ):
@@ -1642,6 +1758,195 @@ _CAPABILITY_IDS: tuple[tuple[str, str], ...] = (
     ("interactions", "session.interaction.approval"),
     ("attachments", "runtime.attachment"),
 )
+
+# Inventory keys that describe the runtime as a whole rather than one session.
+# `createProject` is answered before a session exists, so it is published at
+# runtime scope only; every other entry above is also published per session.
+_RUNTIME_SCOPE_ONLY_INVENTORY_KEYS = frozenset({"createProject"})
+
+# Session-scoped protocol ids, sliced out of the same inventory map the
+# runtime-scoped set uses. Deriving both from `_CAPABILITY_IDS` is what stops
+# the two sets from ever disagreeing about an ability, and it is what makes the
+# inventory keys the single list of what this adapter implements.
+_SESSION_CAPABILITY_IDS: tuple[tuple[str, str], ...] = tuple(
+    (inventory_key, protocol_id)
+    for inventory_key, protocol_id in _CAPABILITY_IDS
+    if inventory_key not in _RUNTIME_SCOPE_ONLY_INVENTORY_KEYS
+)
+
+# Session states in which a prompt can start a turn: no run receipt is live.
+# `error` is startable because a failed receipt is terminal — the next prompt
+# starts a new run rather than resuming the failed one.
+_STARTABLE_SESSION_STATUSES: frozenset[str] = frozenset({"idle", "error"})
+# Session states that project a run the server still owns, so an interrupt can
+# end it: the receipt is accepted or running, possibly blocked on a decision.
+_ACTIVE_SESSION_STATUSES: frozenset[str] = frozenset(
+    {"pending", "running", "waiting_approval"}
+)
+# The run states `models.session_state` reads from the newest receipt.
+_ACTIVE_RUN_STATES: frozenset[str] = frozenset({"accepted", "running"})
+
+
+def session_capability_set(
+    *,
+    connector_id: str,
+    runtime_id: str | None,
+    revision: int,
+    session_id: str,
+    external_session_id: str | None,
+    attached: bool,
+    state: SessionState | None,
+) -> RuntimeCapabilitySet:
+    """Map the runtime's inventory onto the session-scoped protocol ids.
+
+    Every entry comes from ``runtime_capabilities()`` through
+    ``_CAPABILITY_IDS``, so ``supported`` is the runtime's own declaration and
+    cannot drift from the runtime-scoped set. ``available`` is the live fact: an
+    ability this adapter implements but cannot serve for this session right now
+    stays in the set with an ``unavailable_reason``, because the platform shows
+    that reason to the user — and because an omitted capability is
+    indistinguishable from one the runtime never had, which is exactly the
+    read-only report this set exists to prevent.
+    """
+
+    declared = runtime_capabilities()
+    loaded = external_session_id is not None
+    status = state.status if state is not None else "idle"
+    run_active = _session_run_is_active(state)
+    capabilities: list[RuntimeCapability] = []
+    for inventory_key, protocol_id in _SESSION_CAPABILITY_IDS:
+        if inventory_key not in declared:
+            continue
+        supported = declared[inventory_key]
+        if supported:
+            available, unavailable_reason = _session_availability(
+                inventory_key,
+                attached=attached,
+                loaded=loaded,
+                status=status,
+                run_active=run_active,
+            )
+        else:
+            available, unavailable_reason = False, "unsupported"
+        capabilities.append(
+            RuntimeCapability(
+                capability_id=protocol_id,
+                scope="session",
+                runtime=RUNTIME,
+                runtime_id=runtime_id,
+                session_id=session_id,
+                connector_id=connector_id,
+                supported=supported,
+                available=available,
+                allowed=available,
+                unavailable_reason=unavailable_reason,
+                metadata={"inventoryKey": inventory_key},
+            )
+        )
+    return RuntimeCapabilitySet(
+        runtime=RUNTIME,
+        revision=revision,
+        capabilities=tuple(capabilities),
+        session_id=session_id,
+        connector_id=connector_id,
+        runtime_id=runtime_id,
+        metadata={
+            "source": "openscience.session.capabilities",
+            "runActive": run_active,
+            "status": status,
+            **(
+                {"externalSessionId": external_session_id}
+                if external_session_id is not None
+                else {}
+            ),
+        },
+    )
+
+
+def _session_availability(
+    inventory_key: str,
+    *,
+    attached: bool,
+    loaded: bool,
+    status: RuntimeStatus,
+    run_active: bool,
+) -> tuple[bool, str | None]:
+    """Whether one declared ability can be served for this session right now.
+
+    Two facts gate everything: a capability cannot be used while this connector
+    is not attached to the server, and it cannot be used for a session that has
+    no native id yet. Past those, availability is per ability, because a single
+    session status does not answer all of them — a live run makes a prompt
+    impossible and an interrupt possible, and a pending decision is what makes
+    an approval answerable.
+    """
+
+    if not attached:
+        return False, "openscience_unavailable"
+    if not loaded:
+        return False, "session_unloaded"
+    if inventory_key == "startTurn":
+        # OpenScience admits one run at a time and this adapter has no queue, so
+        # a prompt is startable only when the newest receipt is not a live run.
+        if status in _STARTABLE_SESSION_STATUSES:
+            return True, None
+        return False, f"session_{status}"
+    if inventory_key == "interruptTurn":
+        if run_active:
+            return True, None
+        return False, "no_active_run"
+    if inventory_key == "interactions":
+        # `decisionScope` is `connected_runtime`: only a decision this server
+        # still holds can be answered, and the snapshot reports that as
+        # `waiting_approval`.
+        if status == "waiting_approval":
+            return True, None
+        return False, "no_pending_interaction"
+    # The model catalog and attachments are served by this connector from the
+    # attached server and carry no per-session precondition.
+    return True, None
+
+
+def _session_run_is_active(state: SessionState | None) -> bool:
+    """Whether the session's newest receipt is a run the server still owns.
+
+    The receipt's own state is the fact and the status is its projection, so a
+    cached state that carries the receipt answers from it while one that does
+    not still answers through the status. Anything else — a completed, cancelled
+    or interrupted run, or no run at all — leaves nothing to interrupt.
+    """
+
+    if state is None:
+        return False
+    run_state = state.metadata.get("runState")
+    if isinstance(run_state, str) and run_state:
+        return run_state in _ACTIVE_RUN_STATES
+    return state.status in _ACTIVE_SESSION_STATUSES
+
+
+def _capability_signature(capabilities: RuntimeCapabilitySet) -> tuple[Any, ...]:
+    """Everything that would make a published set stale if it changed."""
+
+    return (
+        capabilities.revision,
+        capabilities.runtime_id,
+        capabilities.session_id,
+        capabilities.connector_id,
+        # The set-level metadata carries the facts availability was derived
+        # from, so a change there is a change to the published payload even when
+        # every capability entry happens to look the same.
+        tuple(sorted(capabilities.metadata.items(), key=lambda item: item[0])),
+        tuple(
+            (
+                capability.capability_id,
+                capability.supported,
+                capability.available,
+                capability.allowed,
+                capability.unavailable_reason,
+            )
+            for capability in capabilities.capabilities
+        ),
+    )
 
 
 def _require_protocol(version: str) -> None:
