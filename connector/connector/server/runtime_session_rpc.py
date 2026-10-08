@@ -129,16 +129,29 @@ async def read_session_state(
     )
     if state is None:
         return {"state": None}
-    await host.session_state_update(
-        session_id=state.session_id,
-        runtime=state.runtime,
-        external_session_id=state.external_session_id,
-        status=state.status,
-        selections=state.selections,
-        status_reason=state.status_reason,
-        error=state.error,
-        metadata=state.metadata,
-    )
+    try:
+        await host.session_state_update(
+            session_id=state.session_id,
+            runtime=state.runtime,
+            external_session_id=state.external_session_id,
+            status=state.status,
+            selections=state.selections,
+            status_reason=state.status_reason,
+            error=state.error,
+            metadata=state.metadata,
+        )
+    except Exception as error:  # noqa: BLE001 - a read must not fail on a publish
+        # This read is on the Server's message-send path: it asks for the state
+        # before it will accept a message. The answer is already in hand, and
+        # the Server persists it from this response, so a notification that
+        # cannot be published must not turn a successful read into a failed
+        # one — that is how a backed-up ingest queue used to make sending
+        # impossible while the runtime itself was perfectly healthy.
+        logger.warning(
+            "session state notification failed session_id={} error_type={}",
+            state.session_id,
+            type(error).__name__,
+        )
     return {"state": session_state_payload(state)}
 
 

@@ -19,6 +19,26 @@ from connector.server.urls import api_v2_url
 FLUSH_WINDOW_SECONDS = 0.02
 FLUSH_MAX = 64
 
+# How long a producer may wait for room in the queue before the notification is
+# dropped. The queue is drained by HTTP uploads that share the link with
+# everything else, so a large history upload can leave it full for minutes. A
+# producer that waits that long is not "backpressure", it is a stall: the
+# callers below include Runtime RPC handlers, and one of them is `session.state`
+# — the read the Server performs before it will accept a message. Blocking there
+# is what surfaced to users as "runtime did not report its state in time".
+DEFAULT_ENQUEUE_TIMEOUT_SECONDS = 2.0
+
+TIMELINE_SYNC = "timeline.sync"
+
+# Notifications that describe a session's *current* value rather than an event:
+# the newest one supersedes every older one, so only the newest is worth
+# carrying. They are held aside from the bounded queue entirely, which is what
+# keeps a busy runtime's event storm from filling the queue with values nobody
+# will ever read — and, before this, from stalling the RPC path behind them.
+COALESCE_LATEST_METHODS = frozenset(
+    {"session.state.updated", "session.source.updated"}
+)
+
 AccessTokenProvider = Callable[[bool], Awaitable[str]]
 HttpClientGetter = Callable[[], httpx.AsyncClient | None]
 HttpClientFactory = Callable[[httpx.Timeout | float], httpx.AsyncClient]
@@ -47,22 +67,71 @@ class ConnectorIngestClient:
         self._post_lock = asyncio.Lock()
         self._available = asyncio.Event()
         self._posting = False
+        self._dropped = 0
+        self._latest: dict[str, dict[str, Any]] = {}
+
+    @property
+    def dropped(self) -> int:
+        """Notifications discarded because the queue stayed full.
+
+        Exposed so a deployment can tell "the Server is behind" from "the
+        Connector is silent" without reading logs.
+        """
+
+        return self._dropped
 
     @property
     def has_pending(self) -> bool:
-        return self._posting or bool(self._inflight) or not self._notify_queue.empty()
+        return (
+            self._posting
+            or bool(self._inflight)
+            or bool(self._latest)
+            or not self._notify_queue.empty()
+        )
 
     def close(self, error: Exception | None = None) -> None:
         self._closed = error or RuntimeError("connector ingest is closed")
+        self._latest.clear()
         # Wake blocked producers. They check _closed again after admission.
         while not self._notify_queue.empty():
             self._notify_queue.get_nowait()
 
 
     async def enqueue(self, method: str, params: dict[str, Any]) -> None:
+        """Admit one notification, never blocking the caller indefinitely.
+
+        A notification that only restates a session's current value is kept in
+        the latest-wins hold instead of the queue: it replaces the previous one
+        for that session and cannot be lost to a full queue. Everything else is
+        queued, and once the queue is full the *newest* one is dropped rather
+        than stalling the caller — the caller can be an RPC whose response the
+        Server is waiting on, and a dropped timeline item is restored by the
+        next snapshot sync.
+        """
+
         if self._closed is not None:
             raise self._closed
-        await self._notify_queue.put({"method": method, "params": params})
+        key = _coalesce_key(method, params)
+        if key is not None:
+            self._latest[key] = {"method": method, "params": params}
+            self._available.set()
+            return
+        entry = {"method": method, "params": params}
+        try:
+            await asyncio.wait_for(
+                self._notify_queue.put(entry),
+                timeout=self._enqueue_timeout_seconds(),
+            )
+        except TimeoutError:
+            self._dropped += 1
+            if self._dropped == 1 or self._dropped % 50 == 0:
+                logger.warning(
+                    "connector ingest queue is full; dropped notification method={} dropped_total={} pending={}",
+                    method,
+                    self._dropped,
+                    self._notify_queue.qsize(),
+                )
+            return
         self._available.set()
         if self._closed is not None:
             self.close(self._closed)
@@ -112,11 +181,25 @@ class ConnectorIngestClient:
             self._inflight = []
             attempt = 0
 
-    def _collect_pending(self) -> None:
+    def _collect_pending(self) -> int:
+        """Move pending notifications into the in-flight batch.
+
+        Returns how many entries were taken from either source, so a caller
+        draining a known backlog can still terminate when most of what it pulled
+        collapsed into the latest-wins hold.
+        """
+
         if self._inflight:
-            return
+            return 0
+        taken = 0
+        while self._latest and len(self._inflight) < FLUSH_MAX:
+            _, entry = self._latest.popitem()
+            self._inflight.append(entry)
+            taken += 1
         while len(self._inflight) < FLUSH_MAX and not self._notify_queue.empty():
             self._inflight.append(self._notify_queue.get_nowait())
+            taken += 1
+        return taken
 
     async def post_batch(self, notifications: list[dict[str, Any]]) -> None:
         async with self._post_lock:
@@ -125,11 +208,18 @@ class ConnectorIngestClient:
                 # Direct scanner snapshots cannot overtake an older failed batch.
                 # Drain only work already queued at admission so a live stream
                 # cannot starve this synchronous snapshot indefinitely.
-                remaining = len(self._inflight) + self._notify_queue.qsize()
+                remaining = (
+                    len(self._inflight)
+                    + len(self._latest)
+                    + self._notify_queue.qsize()
+                )
                 while remaining:
-                    self._collect_pending()
-                    await self._post_batch(self._inflight)
-                    remaining = max(0, remaining - len(self._inflight))
+                    taken = self._collect_pending()
+                    if self._inflight:
+                        await self._post_batch(self._inflight)
+                    remaining = max(
+                        0, remaining - max(taken, len(self._inflight))
+                    )
                     self._inflight = []
                 await self._post_batch(notifications)
             finally:
@@ -140,7 +230,9 @@ class ConnectorIngestClient:
     async def _post_batch(self, notifications: list[dict[str, Any]]) -> None:
         if not notifications:
             return
-        notifications = coalesce_timeline_item_upserts(notifications)
+        notifications = coalesce_timeline_item_upserts(
+            [_wire_notification(entry) for entry in notifications]
+        )
         if not notifications:
             return
         access_token = await self._access_token_provider(False)
@@ -218,6 +310,53 @@ class ConnectorIngestClient:
             except ValueError:
                 pass
         return 900.0
+
+    def _enqueue_timeout_seconds(self) -> float:
+        """How long one producer may wait for room before its notification drops."""
+
+        import os
+
+        configured = os.environ.get("AA_CONNECTOR_INGEST_ENQUEUE_TIMEOUT_SECONDS")
+        if configured:
+            try:
+                return max(0.0, float(configured))
+            except ValueError:
+                pass
+        return DEFAULT_ENQUEUE_TIMEOUT_SECONDS
+
+
+def _wire_notification(entry: dict[str, Any]) -> dict[str, Any]:
+    """Reduce one queue entry to the notification the Server expects.
+
+    Queue entries carry Connector-local bookkeeping (whether the entry was
+    superseded, and which session it coalesces on) that must never reach the
+    wire.
+    """
+
+    return {"method": entry["method"], "params": entry["params"]}
+
+
+def _coalesce_key(method: str, params: dict[str, Any]) -> str | None:
+    """The latest-wins slot a notification belongs to, or ``None``.
+
+    ``timeline.sync`` is coalesced only when it is *complete*: a complete
+    snapshot replaces the session's whole timeline, so the newest one says
+    everything the older ones did. An incomplete snapshot upserts, so a newer
+    one does not necessarily carry what an older one held, and dropping it would
+    lose items. A busy session republishes its entire transcript every second or
+    so — megabytes per snapshot against an uplink that carries tens of kilobytes
+    per second — which is exactly why carrying only the newest matters.
+    """
+
+    if method == TIMELINE_SYNC:
+        if params.get("complete") is not True:
+            return None
+    elif method not in COALESCE_LATEST_METHODS:
+        return None
+    session_id = params.get("sessionId")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    return f"{method}:{session_id}"
 
 
 def _raise_for_rejected_notifications(response: httpx.Response) -> None:

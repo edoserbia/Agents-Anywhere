@@ -4,9 +4,13 @@ import asyncio
 
 import httpx
 import pytest
+
+from connector.runtime_protocol import SessionState
 from connector.server.auth import ConnectorAuthenticationError
 from connector.server.ingest import ConnectorIngestClient
 from connector.server.rpc import ConnectorRpcChannel
+from connector.server.runtime_host import ConnectorRuntimeHost
+from connector.server.runtime_session_rpc import read_session_state
 
 
 def test_network_failure_and_server_503_keep_fifo_for_recovery():
@@ -156,5 +160,208 @@ def test_failed_websocket_sender_stops_admission_instead_of_hanging_next_send():
                 channel.send_notification("connector.heartbeat", {}), 1
             )
         await channel.close_connection()
+
+
+def _saturate(ingest: ConnectorIngestClient) -> None:
+    """Fill the outbound queue the way a stalled upload does."""
+
+    while not ingest._notify_queue.full():
+        ingest._notify_queue.put_nowait(
+            {"method": "timeline.itemUpsert", "params": {"item": {}}}
+        )
+
+
+def test_a_full_ingest_queue_drops_instead_of_blocking_the_producer():
+    async def run():
+        async def token(force):
+            return "token"
+
+        ingest = ConnectorIngestClient(
+            "https://server.test", token, lambda: None, lambda timeout: None
+        )
+        ingest._enqueue_timeout_seconds = lambda: 0.01
+        _saturate(ingest)
+        await asyncio.wait_for(ingest.enqueue("session.state.updated", {}), 1)
+        assert ingest.dropped == 1
+
+    asyncio.run(run())
+
+
+def test_session_state_read_answers_while_the_ingest_queue_is_saturated():
+    """The Server reads session state before it will accept a message.
+
+    Publishing the read's own state notification used to be what blocked, so a
+    full ingest queue made sending impossible — reported to the user as
+    "runtime did not report its state in time" — while the runtime itself was
+    perfectly healthy. The read must answer regardless of the notification.
+    """
+
+    async def run():
+        async def token(force):
+            return "token"
+
+        ingest = ConnectorIngestClient(
+            "https://server.test", token, lambda: None, lambda timeout: None
+        )
+        ingest._enqueue_timeout_seconds = lambda: 0.01
+        _saturate(ingest)
+
+        host = ConnectorRuntimeHost(
+            connector_id="conn_test",
+            notifier=ingest.enqueue,
+            attachment_downloader=_unused_download,
+        )
+
+        class Runtime:
+            async def get_session_state(self, session_id, external_session_id=None):
+                return SessionState(
+                    session_id=session_id,
+                    external_session_id=external_session_id,
+                    runtime="openscience",
+                    status="idle",
+                )
+
+        result = await asyncio.wait_for(
+            read_session_state(
+                Runtime(),
+                host,
+                {"sessionId": "sess_1", "externalSessionId": "ses_1"},
+            ),
+            2,
+        )
+        assert result["state"]["status"] == "idle"
+        # The notification is held for the next upload instead of being dropped
+        # behind a saturated queue, so the Server still learns the state.
+        assert [entry["params"]["status"] for entry in ingest._latest.values()] == [
+            "idle"
+        ]
+
+    asyncio.run(run())
+
+
+async def _unused_download(session_id: str, file_id: str):
+    raise AssertionError("attachments are not read by this test")
+
+
+def test_a_stale_complete_timeline_snapshot_never_reaches_the_wire():
+    """A superseded full snapshot must not hold up the queue.
+
+    A busy session republishes its whole transcript every second, and one
+    snapshot is megabytes. Queueing them all is what filled the queue, delayed
+    every other session's history, and — through the blocked state read — made
+    sending a message impossible. Only the newest complete snapshot per session
+    is worth uploading; an incomplete one still upserts, so it is kept.
+    """
+
+    async def run():
+        delivered = asyncio.Event()
+        batches: list[list[dict]] = []
+
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            import json
+
+            batches.append(json.loads(request.content)["notifications"])
+            delivered.set()
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            for size in (1, 2, 3):
+                await ingest.enqueue(
+                    "timeline.sync",
+                    {"sessionId": "s1", "complete": True, "items": list(range(size))},
+                )
+            await ingest.enqueue(
+                "timeline.sync",
+                {"sessionId": "s1", "complete": False, "items": ["partial"]},
+            )
+            task = asyncio.create_task(ingest.flush_loop())
+            await asyncio.wait_for(delivered.wait(), 2)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert [row["params"]["items"] for row in batches[0]] == [
+            [0, 1, 2],
+            ["partial"],
+        ]
+        # Connector-local bookkeeping must never reach the Server.
+        assert all(set(row) == {"method", "params"} for row in batches[0])
+
+    asyncio.run(run())
+
+
+def test_latest_wins_notifications_never_queue_behind_a_full_backlog():
+    """A state update is a value, not an event: it must not wait in line."""
+
+    async def run():
+        delivered = asyncio.Event()
+        batches: list[list[dict]] = []
+
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            import json
+
+            batches.append(json.loads(request.content)["notifications"])
+            delivered.set()
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            ingest._enqueue_timeout_seconds = lambda: 0.01
+            _saturate(ingest)
+            for status in ("running", "idle"):
+                await ingest.enqueue(
+                    "session.state.updated", {"sessionId": "s1", "status": status}
+                )
+            assert ingest.dropped == 0
+            assert [entry["params"]["status"] for entry in ingest._latest.values()] == [
+                "idle"
+            ]
+            task = asyncio.create_task(ingest.flush_loop())
+            await asyncio.wait_for(delivered.wait(), 2)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        delivered_rows = [
+            row for batch in batches for row in batch if row["method"] == "session.state.updated"
+        ]
+        assert [row["params"]["status"] for row in delivered_rows] == ["idle"]
+
+    asyncio.run(run())
+
+
+def test_draining_a_backlog_of_stale_snapshots_terminates():
+    """The synchronous drain must not spin when everything it pulled was stale."""
+
+    async def run():
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            for size in range(1, 40):
+                await ingest.enqueue(
+                    "timeline.sync",
+                    {"sessionId": "s1", "complete": True, "items": list(range(size))},
+                )
+            await asyncio.wait_for(ingest.post_batch([]), 2)
+            assert not ingest.has_pending
+
+    asyncio.run(run())
+
 
     asyncio.run(run())

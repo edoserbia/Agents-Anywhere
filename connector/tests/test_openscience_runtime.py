@@ -2912,12 +2912,14 @@ def test_timeline_keeps_user_and_assistant_turns_distinct() -> None:
     assert snapshot.items[0].content["text"] == "hello"
 
 
-def test_a_streaming_assistant_message_is_in_progress() -> None:
+def test_a_streaming_assistant_message_is_running() -> None:
+    """The platform enum has no ``inProgress``; a raw value fails the whole sync."""
+
     messages = [
         message_payload("msg_2", "assistant", [text_part("prt_2", "partial", "msg_2")], completed=False)
     ]
     items = models.timeline_items(messages, session_id="sess_x", external_session_id="ses_1")
-    assert items[0].status == "inProgress"
+    assert items[0].status == "running"
     assert items[0].role == "assistant"
 
 

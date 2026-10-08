@@ -1011,10 +1011,20 @@ def _turn_id(info: Mapping[str, Any], role: str, message_id: str) -> str:
 
 
 def _part_status(part: Mapping[str, Any], streaming: bool) -> str:
+    """Map one part onto the platform's timeline status vocabulary.
+
+    OpenScience calls a part that is still streaming ``inProgress``; the
+    platform's own enum has no such member, and a batch that carries it is
+    rejected whole by the Server. Every other projection here already
+    translates (``_tool_item`` maps ``completed``/``error``), so this one has to
+    as well: an untranslated value does not degrade one item, it fails the
+    entire ``timeline.sync`` upload and the session's history stops syncing.
+    """
+
     time = part.get("time")
     if isinstance(time, Mapping) and type(time.get("end")) is int:
         return "done"
-    return "inProgress" if streaming else "done"
+    return "running" if streaming else "done"
 
 
 def _is_completed(info: Mapping[str, Any]) -> bool:
