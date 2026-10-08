@@ -3241,6 +3241,54 @@ def test_timeline_sync_preserves_distinct_runtime_item_ids(tmp_path):
         assert [item["id"] for item in messages] == ["tl_legacy", "tl_canonical"]
 
 
+def test_timeline_sync_accepts_a_runtime_status_alias(tmp_path):
+    """A runtime's own status word must not fail the whole sync batch.
+
+    OpenScience calls a part that is still streaming `inProgress`, which is not
+    a member of the platform enum. One untranslated item does not degrade that
+    item alone: the Server rejects the notification, the Connector drops the
+    batch, and the session's history silently stops syncing.
+    """
+
+    client = make_client(tmp_path)
+    _, access_token, session_id, headers = create_connector_and_session(client)
+
+    with client.websocket_connect(
+        "/connector/ws",
+        headers={"Authorization": f"Bearer {access_token}"},
+    ) as ws:
+        ws.send_json(
+            {
+                "type": "notification",
+                "method": "timeline.sync",
+                "params": {
+                    "sessionId": session_id,
+                    "items": [
+                        {
+                            "id": "tl_streaming",
+                            "sessionId": session_id,
+                            "type": "message",
+                            "status": "inProgress",
+                            "role": "assistant",
+                            "content": {"text": "partial", "format": "markdown"},
+                            "source": {
+                                "runtime": "openscience",
+                                "sessionId": "ses_1",
+                                "itemType": "text",
+                            },
+                            "orderSeq": 1,
+                            "revision": 1,
+                            "contentHash": "sha256:streaming",
+                        }
+                    ],
+                },
+            }
+        )
+
+        state = wait_for_item_update(client, session_id, headers, 0)
+        assert [item["status"] for item in state["items"]] == ["running"]
+
+
 def test_timeline_sync_preserves_distinct_reasoning_item_ids(tmp_path):
     client = make_client(tmp_path)
     _, access_token, session_id, headers = create_connector_and_session(client)

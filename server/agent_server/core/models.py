@@ -956,6 +956,23 @@ class TimelineSource(BaseModel):
     clientMessageId: str | None = None
 
 
+# Statuses a runtime may report that are the same fact under another name. A
+# runtime's own vocabulary is not the platform's, and the Connector is supposed
+# to translate — but translation that lands in one adapter is easy to miss, and
+# the cost of missing it is not one bad item: the whole ingest batch carrying it
+# is rejected, so the session's history silently stops syncing. Accepting the
+# alias keeps an older Connector working while the adapter is fixed.
+TIMELINE_STATUS_ALIASES = {
+    "inprogress": "running",
+    "in_progress": "running",
+    "completed": "done",
+    "complete": "done",
+    "success": "done",
+    "error": "failed",
+    "canceled": "cancelled",
+}
+
+
 class TimelineItemIn(BaseModel):
     id: str
     sessionId: str
@@ -970,6 +987,19 @@ class TimelineItemIn(BaseModel):
     createdAt: str | None = None
     updatedAt: str | None = None
     completedAt: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_status(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        status = value.get("status")
+        if not isinstance(status, str):
+            return value
+        alias = TIMELINE_STATUS_ALIASES.get(status.strip().casefold())
+        if alias is None:
+            return value
+        return {**value, "status": alias}
 
 
 class TimelineItem(TimelineItemIn):
