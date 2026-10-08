@@ -8,11 +8,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -24,6 +27,7 @@ import androidx.compose.ui.unit.sp
 import com.agentsanywhere.app.ui.designsystem.AADropdownMenu
 import com.agentsanywhere.app.ui.designsystem.AADropdownMenuItem
 import com.agentsanywhere.app.ui.designsystem.DownGlyph
+import com.agentsanywhere.app.ui.designsystem.ForwardGlyph
 import com.agentsanywhere.app.ui.designsystem.LocalAAColors
 import com.agentsanywhere.app.ui.designsystem.noRippleClickable
 import com.agentsanywhere.app.ui.designsystem.rememberMenuWidth
@@ -42,6 +46,12 @@ internal data class NewSessionConfigurationOption(
     val label: String,
     val description: String? = null,
     val enabled: Boolean = true,
+    /**
+     * The provider serving this option, when the runtime's catalog names one.
+     * OpenScience serves 146 models from a dozen providers and repeats model
+     * names across them, so the provider is what makes a long list navigable.
+     */
+    val providerLabel: String? = null,
 )
 
 internal data class NewSessionConfigurationField(
@@ -182,19 +192,95 @@ private fun NewSessionConfigurationMenu(
             listOfNotNull(option.label, option.description?.takeIf(String::isNotBlank))
         },
     )
+    val providers = remember(options) {
+        options.mapNotNull(NewSessionConfigurationOption::providerLabel).distinct()
+    }
+    val selectedProvider = options.firstOrNull { it.id == selectedId }?.providerLabel
+    val collapsed = remember(options) { mutableStateMapOf<String, Boolean>() }
     AADropdownMenu(
         expanded = expanded,
         onDismissRequest = onDismiss,
         width = menuWidth,
     ) {
-        options.forEach { option ->
-            AADropdownMenuItem(
-                text = option.label,
-                selected = option.id == selectedId,
-                enabled = option.enabled,
-                supportingText = option.description,
-                onClick = { onSelect(option.id); onDismiss() },
-            )
+        if (providers.size <= 1) {
+            options.forEach { option ->
+                NewSessionConfigurationMenuItem(option, selectedId, onSelect, onDismiss)
+            }
+            return@AADropdownMenu
         }
+        options.groupBy(NewSessionConfigurationOption::providerLabel).forEach { (provider, group) ->
+            if (provider == null) {
+                group.forEach { option ->
+                    NewSessionConfigurationMenuItem(option, selectedId, onSelect, onDismiss)
+                }
+                return@forEach
+            }
+            val open = collapsed[provider]?.let { !it } ?: (provider == selectedProvider)
+            ProviderHeaderRow(
+                label = provider,
+                count = group.size,
+                expanded = open,
+                onClick = { collapsed[provider] = open },
+            )
+            if (!open) return@forEach
+            group.forEach { option ->
+                NewSessionConfigurationMenuItem(option, selectedId, onSelect, onDismiss)
+            }
+        }
+    }
+}
+
+@Composable
+private fun NewSessionConfigurationMenuItem(
+    option: NewSessionConfigurationOption,
+    selectedId: String?,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AADropdownMenuItem(
+        text = option.label,
+        selected = option.id == selectedId,
+        enabled = option.enabled,
+        supportingText = option.description,
+        onClick = { onSelect(option.id); onDismiss() },
+    )
+}
+
+@Composable
+private fun ProviderHeaderRow(
+    label: String,
+    count: Int,
+    expanded: Boolean,
+    onClick: () -> Unit,
+) {
+    val colors = LocalAAColors.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 40.dp)
+            .noRippleClickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (expanded) {
+            DownGlyph(color = colors.muted)
+        } else {
+            ForwardGlyph(color = colors.muted)
+        }
+        Text(
+            text = label,
+            color = colors.ink,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = count.toString(),
+            color = colors.muted,
+            fontSize = 12.sp,
+        )
     }
 }

@@ -1062,35 +1062,10 @@ fun SessionDetailScreen(
             scope.launch {
                 onLoadPreparedModelCatalog(pending.connectorId, pending.runtimeId)
                     .onSuccess { catalog ->
-                        preparedModelOptions = catalog.models.flatMap { model ->
-                            val reasoning = model.reasoningItems.filter { it.selectionId.isNotBlank() }
-                            if (reasoning.isNotEmpty()) {
-                                reasoning.map { item ->
-                                    com.agentsanywhere.app.feature.sessiondetail.RuntimeSelectionOption(
-                                        selectionId = item.selectionId,
-                                        label = listOf(model.displayName, item.displayName)
-                                            .filter(String::isNotBlank).joinToString(" · "),
-                                        description = item.description ?: model.description,
-                                        default = item.default || (model.default && reasoning.first() == item),
-                                        enabled = model.enabled && item.enabled,
-                                        disabledReason = item.disabledReason ?: model.disabledReason,
-                                    )
-                                }
-                            } else {
-                                model.selectionId?.takeIf(String::isNotBlank)?.let { id ->
-                                    listOf(
-                                        com.agentsanywhere.app.feature.sessiondetail.RuntimeSelectionOption(
-                                            selectionId = id,
-                                            label = model.displayName.ifBlank { model.id },
-                                            description = model.description,
-                                            default = model.default,
-                                            enabled = model.enabled,
-                                            disabledReason = model.disabledReason,
-                                        ),
-                                    )
-                                }.orEmpty()
-                            }
-                        }.distinctBy { it.selectionId }
+                        // One mapping for both catalogs: the prepared path used to
+                        // rebuild these options by hand, which is how it would have
+                        // kept dropping the provider after the shared one was fixed.
+                        preparedModelOptions = catalog.selectionOptions()
                         preparedSelections = preparedSelections.copy(
                             model = preparedModelOptions.validatedSelection(preparedSelections.model),
                         )

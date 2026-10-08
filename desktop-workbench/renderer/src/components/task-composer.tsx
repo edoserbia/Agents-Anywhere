@@ -61,8 +61,11 @@ import {
   catalogItemDisabledReason,
   catalogItemEnabled,
   catalogI18nText,
+  groupModelsByProvider,
+  hasModelProviderGrouping,
   modelCatalogDisplayName,
   modelIdsForSelectionId,
+  modelProvider,
   permissionIdForSelectionId,
   selectionIdForModelCatalog,
   selectionIdForPermissionCatalog,
@@ -514,6 +517,7 @@ export function TaskComposer() {
       enabled: catalogItemEnabled(item),
       disabledReason: catalogItemDisabledReason(item),
       selectionId: item.selectionId,
+      provider: modelProvider(item),
       reasoningItems: item.reasoningItems.map((reasoning) => ({
         id: reasoning.id,
         label: catalogI18nText(t, reasoning.metadata, "labelKey", reasoning.displayName),
@@ -525,6 +529,67 @@ export function TaskComposer() {
     })) ?? [],
     [modelCatalog, t],
   )
+  const renderModelMenuItem = (modelItem: (typeof models)[number]) => {
+    const modelEfforts = modelItem.reasoningItems
+    if (modelEfforts.length === 0) {
+      return (
+        <DropdownMenuItem
+          key={modelItem.id}
+          disabled={!modelItem.enabled}
+          className="gap-2"
+          onSelect={() => {
+            handleModelChange(modelItem.id, "")
+          }}
+        >
+          <Check className={cn("size-3.5", selectedModel === modelItem.id ? "opacity-100" : "opacity-0")} />
+          <span className="min-w-0 flex-1">
+            <WideOptionLabel>{modelItem.label}</WideOptionLabel>
+            {!modelItem.enabled && modelItem.disabledReason ? (
+              <span className="block whitespace-nowrap text-xs text-muted-foreground">
+                {modelItem.disabledReason}
+              </span>
+            ) : null}
+          </span>
+        </DropdownMenuItem>
+      )
+    }
+    return (
+      <DropdownMenuSub key={modelItem.id}>
+        <DropdownMenuSubTrigger className="gap-2" disabled={!modelItem.enabled}>
+          <Check className={cn("size-3.5", selectedModel === modelItem.id ? "opacity-100" : "opacity-0")} />
+          <WideOptionLabel title={modelItem.disabledReason ?? undefined}>
+            {modelItem.label}
+          </WideOptionLabel>
+        </DropdownMenuSubTrigger>
+        <WideDropdownMenuSubContent>
+          {modelEfforts.map((item) => (
+            <DropdownMenuItem
+              key={item.id}
+              disabled={!item.enabled}
+              className="gap-2"
+              onSelect={() => {
+                handleModelChange(modelItem.id, item.id)
+              }}
+            >
+              <Check className={cn(
+                "size-3.5",
+                selectedModel === modelItem.id && selectedReasoning === item.id ? "opacity-100" : "opacity-0",
+              )} />
+              <span className="min-w-0 flex-1">
+                <WideOptionLabel>{item.label}</WideOptionLabel>
+                {!item.enabled && item.disabledReason ? (
+                  <span className="block whitespace-nowrap text-xs text-muted-foreground">
+                    {item.disabledReason}
+                  </span>
+                ) : null}
+              </span>
+            </DropdownMenuItem>
+          ))}
+        </WideDropdownMenuSubContent>
+      </DropdownMenuSub>
+    )
+  }
+
   const selectedModelItem = models.find((item) => item.id === selectedModel)
   const reasoningOptions = selectedModelItem?.reasoningItems ?? []
   const permissionOptions = React.useMemo(
@@ -985,66 +1050,29 @@ export function TaskComposer() {
                           </Button>
                         </DropdownMenuTrigger>
                         <WideDropdownMenuContent align="start" className="p-1">
-                          {models.map((modelItem) => {
-                            const modelEfforts = modelItem.reasoningItems
-                            if (modelEfforts.length === 0) {
-                              return (
-                                <DropdownMenuItem
-                                  key={modelItem.id}
-                                  disabled={!modelItem.enabled}
-                                  className="gap-2"
-                                  onSelect={() => {
-                                    handleModelChange(modelItem.id, "")
-                                  }}
-                                >
-                                  <Check className={cn("size-3.5", selectedModel === modelItem.id ? "opacity-100" : "opacity-0")} />
-                                  <span className="min-w-0 flex-1">
-                                    <WideOptionLabel>{modelItem.label}</WideOptionLabel>
-                                    {!modelItem.enabled && modelItem.disabledReason ? (
-                                      <span className="block whitespace-nowrap text-xs text-muted-foreground">
-                                        {modelItem.disabledReason}
-                                      </span>
-                                    ) : null}
-                                  </span>
-                                </DropdownMenuItem>
-                              )
-                            }
-                            return (
-                              <DropdownMenuSub key={modelItem.id}>
-                                <DropdownMenuSubTrigger className="gap-2" disabled={!modelItem.enabled}>
-                                  <Check className={cn("size-3.5", selectedModel === modelItem.id ? "opacity-100" : "opacity-0")} />
-                                  <WideOptionLabel title={modelItem.disabledReason ?? undefined}>
-                                    {modelItem.label}
-                                  </WideOptionLabel>
-                                </DropdownMenuSubTrigger>
-                                <WideDropdownMenuSubContent>
-                                  {modelEfforts.map((item) => (
-                                    <DropdownMenuItem
-                                      key={item.id}
-                                      disabled={!item.enabled}
-                                      className="gap-2"
-                                      onSelect={() => {
-                                        handleModelChange(modelItem.id, item.id)
-                                      }}
-                                    >
-                                      <Check className={cn(
-                                        "size-3.5",
-                                        selectedModel === modelItem.id && selectedReasoning === item.id ? "opacity-100" : "opacity-0",
-                                      )} />
-                                      <span className="min-w-0 flex-1">
-                                        <WideOptionLabel>{item.label}</WideOptionLabel>
-                                        {!item.enabled && item.disabledReason ? (
-                                          <span className="block whitespace-nowrap text-xs text-muted-foreground">
-                                            {item.disabledReason}
-                                          </span>
-                                        ) : null}
-                                      </span>
-                                    </DropdownMenuItem>
-                                  ))}
-                                </WideDropdownMenuSubContent>
-                              </DropdownMenuSub>
+                          {hasModelProviderGrouping(models) ? (
+                            groupModelsByProvider(models).map((group) =>
+                              group.label ? (
+                                <DropdownMenuSub key={group.id}>
+                                  <DropdownMenuSubTrigger className="gap-2">
+                                    <span className="min-w-0 flex-1 truncate font-medium">{group.label}</span>
+                                    <span className="shrink-0 text-xs text-muted-foreground">
+                                      {group.items.length}
+                                    </span>
+                                  </DropdownMenuSubTrigger>
+                                  <WideDropdownMenuSubContent>
+                                    {group.items.map(renderModelMenuItem)}
+                                  </WideDropdownMenuSubContent>
+                                </DropdownMenuSub>
+                              ) : (
+                                <React.Fragment key={group.id}>
+                                  {group.items.map(renderModelMenuItem)}
+                                </React.Fragment>
+                              ),
                             )
-                          })}
+                          ) : (
+                            models.map(renderModelMenuItem)
+                          )}
                         </WideDropdownMenuContent>
                       </DropdownMenu>
                     ) : null}

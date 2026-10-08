@@ -1,6 +1,7 @@
 package com.agentsanywhere.app.feature.sessiondetail
 
 import com.agentsanywhere.app.api.RemoteRuntimeModelCatalog
+import com.agentsanywhere.app.feature.sessions.NewSessionModelCatalog
 import com.agentsanywhere.app.api.RemoteRuntimeNoticeAction
 import com.agentsanywhere.app.api.RemoteRuntimePermissionCatalog
 import com.agentsanywhere.app.api.RemoteSessionCommand
@@ -429,7 +430,29 @@ data class RuntimeSelectionOption(
     val default: Boolean,
     val enabled: Boolean = true,
     val disabledReason: String? = null,
+    /**
+     * The model's own name, with neither the provider nor the reasoning level
+     * attached. OpenScience puts the provider inside `displayName`
+     * ("GPT-6.1 Sol · AI98 Pro (codex relay)"), so deriving the model name by
+     * splitting that string on " · " both dropped the provider and leaked it
+     * into the reasoning label.
+     */
+    val modelName: String = "",
+    /** The provider serving this model, when the runtime's catalog names one. */
+    val providerLabel: String? = null,
+    /** The reasoning level's own name; null when the model has no levels. */
+    val effortLabel: String? = null,
 )
+
+/** A catalog string field, or null when the runtime did not publish it. */
+internal fun Map<String, Any?>.catalogText(key: String): String? =
+    (this[key] as? String)?.takeIf(String::isNotBlank)
+
+internal fun Map<String, Any?>.catalogProviderLabel(): String? =
+    catalogText("providerName") ?: catalogText("providerID")
+
+internal fun Map<String, Any?>.catalogModelName(displayName: String): String =
+    catalogText("modelName") ?: displayName
 
 internal enum class RuntimePermissionTranslation {
     RequestApproval,
@@ -504,6 +527,8 @@ private fun permissionTranslationByLabelKey(labelKey: String?): RuntimePermissio
 
 internal fun RemoteRuntimeModelCatalog.selectionOptions(): List<RuntimeSelectionOption> {
     return models.flatMap { model ->
+        val modelName = model.metadata.catalogModelName(model.displayName.ifBlank { model.id })
+        val providerLabel = model.metadata.catalogProviderLabel()
         val reasoning = model.reasoningItems.filter { it.selectionId.isNotBlank() }
         if (reasoning.isNotEmpty()) {
             reasoning.map { item ->
@@ -514,6 +539,9 @@ internal fun RemoteRuntimeModelCatalog.selectionOptions(): List<RuntimeSelection
                     default = item.default || (model.default && reasoning.first() == item),
                     enabled = model.enabled && item.enabled,
                     disabledReason = item.disabledReason ?: model.disabledReason,
+                    modelName = modelName,
+                    providerLabel = providerLabel,
+                    effortLabel = item.displayName.takeIf(String::isNotBlank),
                 )
             }
         } else {
@@ -526,6 +554,52 @@ internal fun RemoteRuntimeModelCatalog.selectionOptions(): List<RuntimeSelection
                         default = model.default,
                         enabled = model.enabled,
                         disabledReason = model.disabledReason,
+                        modelName = modelName,
+                        providerLabel = providerLabel,
+                    ),
+                )
+            }.orEmpty()
+        }
+    }.distinctBy { it.selectionId }
+}
+
+/**
+ * The same options for the catalog the new-session flow loads.
+ *
+ * The two catalogs differ only in their DTO family, so the mapping is repeated
+ * rather than shared through a translation layer neither flow needs.
+ */
+internal fun NewSessionModelCatalog.selectionOptions(): List<RuntimeSelectionOption> {
+    return models.flatMap { model ->
+        val modelName = model.metadata.catalogModelName(model.displayName.ifBlank { model.id })
+        val providerLabel = model.metadata.catalogProviderLabel()
+        val reasoning = model.reasoningItems.filter { it.selectionId.isNotBlank() }
+        if (reasoning.isNotEmpty()) {
+            reasoning.map { item ->
+                RuntimeSelectionOption(
+                    selectionId = item.selectionId,
+                    label = listOf(model.displayName, item.displayName).filter(String::isNotBlank).joinToString(" · "),
+                    description = item.description ?: model.description,
+                    default = item.default || (model.default && reasoning.first() == item),
+                    enabled = model.enabled && item.enabled,
+                    disabledReason = item.disabledReason ?: model.disabledReason,
+                    modelName = modelName,
+                    providerLabel = providerLabel,
+                    effortLabel = item.displayName.takeIf(String::isNotBlank),
+                )
+            }
+        } else {
+            model.selectionId?.takeIf(String::isNotBlank)?.let { selectionId ->
+                listOf(
+                    RuntimeSelectionOption(
+                        selectionId = selectionId,
+                        label = model.displayName.ifBlank { model.id },
+                        description = model.description,
+                        default = model.default,
+                        enabled = model.enabled,
+                        disabledReason = model.disabledReason,
+                        modelName = modelName,
+                        providerLabel = providerLabel,
                     ),
                 )
             }.orEmpty()

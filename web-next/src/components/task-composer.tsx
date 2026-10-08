@@ -56,8 +56,11 @@ import {
   catalogItemDisabledReason,
   catalogItemEnabled,
   catalogI18nText,
+  groupModelsByProvider,
+  hasModelProviderGrouping,
   modelCatalogDisplayName,
   modelIdsForSelectionId,
+  modelProvider,
   permissionIdForSelectionId,
   selectionIdForModelCatalog,
   selectionIdForPermissionCatalog,
@@ -510,6 +513,7 @@ export function TaskComposer() {
       enabled: catalogItemEnabled(item),
       disabledReason: catalogItemDisabledReason(item),
       selectionId: item.selectionId,
+      provider: modelProvider(item),
       reasoningItems: item.reasoningItems.map((reasoning) => ({
         id: reasoning.id,
         label: catalogI18nText(t, reasoning.metadata, "labelKey", reasoning.displayName),
@@ -523,6 +527,67 @@ export function TaskComposer() {
   )
   const selectedModelItem = models.find((item) => item.id === selectedModel)
   const reasoningOptions = selectedModelItem?.reasoningItems ?? []
+
+  const renderModelMenuItem = (modelItem: (typeof models)[number]) => {
+    const modelEfforts = modelItem.reasoningItems
+    if (modelEfforts.length === 0) {
+      return (
+        <DropdownMenuItem
+          key={modelItem.id}
+          disabled={!modelItem.enabled}
+          className="gap-2"
+          onSelect={() => {
+            handleModelChange(modelItem.id, "")
+          }}
+        >
+          <Check className={cn("size-3.5", selectedModel === modelItem.id ? "opacity-100" : "opacity-0")} />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate">{modelItem.label}</span>
+            {!modelItem.enabled && modelItem.disabledReason ? (
+              <span className="block truncate text-xs text-muted-foreground">
+                {modelItem.disabledReason}
+              </span>
+            ) : null}
+          </span>
+        </DropdownMenuItem>
+      )
+    }
+    return (
+      <DropdownMenuSub key={modelItem.id}>
+        <DropdownMenuSubTrigger className="gap-2" disabled={!modelItem.enabled}>
+          <Check className={cn("size-3.5", selectedModel === modelItem.id ? "opacity-100" : "opacity-0")} />
+          <span className="max-w-40 truncate" title={modelItem.disabledReason ?? undefined}>
+            {modelItem.label}
+          </span>
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent className="w-56">
+          {modelEfforts.map((item) => (
+            <DropdownMenuItem
+              key={item.id}
+              disabled={!item.enabled}
+              className="gap-2"
+              onSelect={() => {
+                handleModelChange(modelItem.id, item.id)
+              }}
+            >
+              <Check className={cn(
+                "size-3.5",
+                selectedModel === modelItem.id && selectedReasoning === item.id ? "opacity-100" : "opacity-0",
+              )} />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">{item.label}</span>
+                {!item.enabled && item.disabledReason ? (
+                  <span className="block truncate text-xs text-muted-foreground">
+                    {item.disabledReason}
+                  </span>
+                ) : null}
+              </span>
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+    )
+  }
   const permissionOptions = React.useMemo(
     () => permissionCatalog?.permissions.map((item) => ({
       id: item.id,
@@ -990,66 +1055,29 @@ export function TaskComposer() {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="start" className="w-56">
-                          {models.map((modelItem) => {
-                            const modelEfforts = modelItem.reasoningItems
-                            if (modelEfforts.length === 0) {
-                              return (
-                                <DropdownMenuItem
-                                  key={modelItem.id}
-                                  disabled={!modelItem.enabled}
-                                  className="gap-2"
-                                  onSelect={() => {
-                                    handleModelChange(modelItem.id, "")
-                                  }}
-                                >
-                                  <Check className={cn("size-3.5", selectedModel === modelItem.id ? "opacity-100" : "opacity-0")} />
-                                  <span className="min-w-0 flex-1">
-                                    <span className="block truncate">{modelItem.label}</span>
-                                    {!modelItem.enabled && modelItem.disabledReason ? (
-                                      <span className="block truncate text-xs text-muted-foreground">
-                                        {modelItem.disabledReason}
-                                      </span>
-                                    ) : null}
-                                  </span>
-                                </DropdownMenuItem>
-                              )
-                            }
-                            return (
-                              <DropdownMenuSub key={modelItem.id}>
-                                <DropdownMenuSubTrigger className="gap-2" disabled={!modelItem.enabled}>
-                                  <Check className={cn("size-3.5", selectedModel === modelItem.id ? "opacity-100" : "opacity-0")} />
-                                  <span className="max-w-40 truncate" title={modelItem.disabledReason ?? undefined}>
-                                    {modelItem.label}
-                                  </span>
-                                </DropdownMenuSubTrigger>
-                                <DropdownMenuSubContent className="w-56">
-                                  {modelEfforts.map((item) => (
-                                    <DropdownMenuItem
-                                      key={item.id}
-                                      disabled={!item.enabled}
-                                      className="gap-2"
-                                      onSelect={() => {
-                                        handleModelChange(modelItem.id, item.id)
-                                      }}
-                                    >
-                                      <Check className={cn(
-                                        "size-3.5",
-                                        selectedModel === modelItem.id && selectedReasoning === item.id ? "opacity-100" : "opacity-0",
-                                      )} />
-                                      <span className="min-w-0 flex-1">
-                                        <span className="block truncate">{item.label}</span>
-                                        {!item.enabled && item.disabledReason ? (
-                                          <span className="block truncate text-xs text-muted-foreground">
-                                            {item.disabledReason}
-                                          </span>
-                                        ) : null}
-                                      </span>
-                                    </DropdownMenuItem>
-                                  ))}
-                                </DropdownMenuSubContent>
-                              </DropdownMenuSub>
+                          {hasModelProviderGrouping(models) ? (
+                            groupModelsByProvider(models).map((group) =>
+                              group.label ? (
+                                <DropdownMenuSub key={group.id}>
+                                  <DropdownMenuSubTrigger className="gap-2">
+                                    <span className="max-w-44 truncate font-medium">{group.label}</span>
+                                    <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                                      {group.items.length}
+                                    </span>
+                                  </DropdownMenuSubTrigger>
+                                  <DropdownMenuSubContent className="w-64">
+                                    {group.items.map(renderModelMenuItem)}
+                                  </DropdownMenuSubContent>
+                                </DropdownMenuSub>
+                              ) : (
+                                <React.Fragment key={group.id}>
+                                  {group.items.map(renderModelMenuItem)}
+                                </React.Fragment>
+                              ),
                             )
-                          })}
+                          ) : (
+                            models.map(renderModelMenuItem)
+                          )}
                         </DropdownMenuContent>
                       </DropdownMenu>
                     ) : null}

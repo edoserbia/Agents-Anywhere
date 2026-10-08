@@ -14,6 +14,11 @@ import {
 } from "@/components/ui/drawer"
 import { Separator } from "@/components/ui/separator"
 import { cn } from "@/lib/utils"
+import {
+  groupModelsByProvider,
+  hasModelProviderGrouping,
+  type ModelProvider,
+} from "@/components/session/catalog-selection"
 
 export type SelectionOption = {
   id: string
@@ -24,6 +29,7 @@ export type SelectionOption = {
 }
 
 export type ModelSelectionOption = SelectionOption & {
+  provider: ModelProvider
   reasoningItems: SelectionOption[]
 }
 
@@ -66,10 +72,75 @@ export function SelectionSettingsDrawer({
 }) {
   const [open, setOpen] = React.useState(false)
   const [expandedModelId, setExpandedModelId] = React.useState<string | null>(null)
+  const [providerToggles, setProviderToggles] = React.useState<Record<string, boolean>>({})
 
   const setDrawerOpen = (nextOpen: boolean) => {
     setOpen(nextOpen)
-    if (!nextOpen) setExpandedModelId(null)
+    if (!nextOpen) {
+      setExpandedModelId(null)
+      setProviderToggles({})
+    }
+  }
+
+  // A runtime that serves one model per provider has nothing to fold, so the
+  // flat list stays exactly as it was. Grouping only appears when it can tell
+  // two otherwise identical model names apart.
+  const providerGroups = React.useMemo(
+    () => (hasModelProviderGrouping(modelItems) ? groupModelsByProvider(modelItems) : []),
+    [modelItems],
+  )
+  // The provider holding the current choice opens itself, so the list never
+  // hides the model the reader came to change.
+  const selectedProviderId =
+    modelItems.find((model) => model.id === selectedModel)?.provider.id ?? ""
+  const providerOpen = (id: string) => providerToggles[id] ?? id === selectedProviderId
+
+  const renderModel = (model: ModelSelectionOption) => {
+    const hasReasoning = model.reasoningItems.length > 0
+    const expanded = expandedModelId === model.id
+    return (
+      <div key={model.id} className="flex flex-col gap-1">
+        <SelectionRow
+          selected={selectedModel === model.id}
+          label={model.label}
+          helper={model.enabled === false ? model.disabledReason ?? undefined : model.description ?? undefined}
+          disabled={modelDisabled || model.enabled === false}
+          trailing={hasReasoning
+            ? expanded
+              ? <ChevronDown className="size-4" />
+              : <ChevronRight className="size-4" />
+            : null}
+          onClick={() => {
+            if (hasReasoning) {
+              setExpandedModelId(expanded ? null : model.id)
+              return
+            }
+            onModelChange(model.id, "")
+            setDrawerOpen(false)
+          }}
+        />
+        {expanded ? (
+          <div className="ml-7 flex flex-col gap-1 border-l border-border pl-2">
+            <p className="px-3 py-1 text-xs font-medium text-muted-foreground">
+              {reasoningLabel}
+            </p>
+            {model.reasoningItems.map((reasoning) => (
+              <SelectionRow
+                key={reasoning.id}
+                selected={selectedModel === model.id && selectedReasoning === reasoning.id}
+                label={reasoning.label}
+                helper={reasoning.enabled === false ? reasoning.disabledReason ?? undefined : reasoning.description ?? undefined}
+                disabled={modelDisabled || reasoningDisabled || reasoning.enabled === false}
+                onClick={() => {
+                  onModelChange(model.id, reasoning.id)
+                  setDrawerOpen(false)
+                }}
+              />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    )
   }
 
   return (
@@ -94,53 +165,38 @@ export function SelectionSettingsDrawer({
         <div className="flex max-h-[58vh] flex-col gap-5 overflow-y-auto px-4 pb-4">
           {modelItems.length > 0 ? (
             <SelectionSection title={modelLabel}>
-              {modelItems.map((model) => {
-                const hasReasoning = model.reasoningItems.length > 0
-                const expanded = expandedModelId === model.id
-                return (
-                  <div key={model.id} className="flex flex-col gap-1">
-                    <SelectionRow
-                      selected={selectedModel === model.id}
-                      label={model.label}
-                      helper={model.enabled === false ? model.disabledReason ?? undefined : model.description ?? undefined}
-                      disabled={modelDisabled || model.enabled === false}
-                      trailing={hasReasoning
-                        ? expanded
-                          ? <ChevronDown className="size-4" />
-                          : <ChevronRight className="size-4" />
-                        : null}
-                      onClick={() => {
-                        if (hasReasoning) {
-                          setExpandedModelId(expanded ? null : model.id)
-                          return
-                        }
-                        onModelChange(model.id, "")
-                        setDrawerOpen(false)
-                      }}
-                    />
-                    {expanded ? (
-                      <div className="ml-7 flex flex-col gap-1 border-l border-border pl-2">
-                        <p className="px-3 py-1 text-xs font-medium text-muted-foreground">
-                          {reasoningLabel}
-                        </p>
-                        {model.reasoningItems.map((reasoning) => (
-                          <SelectionRow
-                            key={reasoning.id}
-                            selected={selectedModel === model.id && selectedReasoning === reasoning.id}
-                            label={reasoning.label}
-                            helper={reasoning.enabled === false ? reasoning.disabledReason ?? undefined : reasoning.description ?? undefined}
-                            disabled={modelDisabled || reasoningDisabled || reasoning.enabled === false}
-                            onClick={() => {
-                              onModelChange(model.id, reasoning.id)
-                              setDrawerOpen(false)
-                            }}
-                          />
-                        ))}
+              {providerGroups.length > 0
+                ? providerGroups.map((group) => {
+                    const rows = group.items.map(renderModel)
+                    if (!group.label) return <React.Fragment key={group.id}>{rows}</React.Fragment>
+                    const expanded = providerOpen(group.id)
+                    return (
+                      <div key={group.id} className="flex flex-col gap-1">
+                        <button
+                          type="button"
+                          aria-expanded={expanded}
+                          onClick={() =>
+                            setProviderToggles((current) => ({ ...current, [group.id]: !expanded }))
+                          }
+                          className="flex w-full items-center gap-1.5 rounded-xl px-3 py-2 text-left text-sm hover:bg-accent"
+                        >
+                          {expanded
+                            ? <ChevronDown className="size-4 shrink-0 opacity-70" />
+                            : <ChevronRight className="size-4 shrink-0 opacity-70" />}
+                          <span className="min-w-0 flex-1 truncate font-medium">{group.label}</span>
+                          <span className="shrink-0 text-xs text-muted-foreground">
+                            {group.items.length}
+                          </span>
+                        </button>
+                        {expanded ? (
+                          <div className="ml-4 flex flex-col gap-1 border-l border-border pl-2">
+                            {rows}
+                          </div>
+                        ) : null}
                       </div>
-                    ) : null}
-                  </div>
-                )
-              })}
+                    )
+                  })
+                : modelItems.map(renderModel)}
             </SelectionSection>
           ) : null}
 

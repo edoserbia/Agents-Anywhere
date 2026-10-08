@@ -45,6 +45,7 @@ import com.agentsanywhere.app.feature.files.remoteParentPath
 import com.agentsanywhere.app.feature.devices.DeviceRuntimeList
 import com.agentsanywhere.app.feature.sessions.NewSessionDirectory
 import com.agentsanywhere.app.feature.sessions.NewSessionDraft
+import com.agentsanywhere.app.feature.sessiondetail.catalogProviderLabel
 import com.agentsanywhere.app.feature.sessions.NewSessionModelCatalog
 import com.agentsanywhere.app.feature.sessions.NewSessionPathEntry
 import com.agentsanywhere.app.feature.sessions.NewSessionPermissionCatalog
@@ -612,6 +613,7 @@ fun NewSessionScreen(
                             id = model.id,
                             label = model.displayName,
                             enabled = enabled,
+                            providerLabel = model.metadata.catalogProviderLabel(),
                         )
                     },
                     enabled = !creatingProject && runtimeSelection.modelCatalog.fresh,

@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,6 +20,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -30,6 +32,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -39,6 +42,8 @@ import com.agentsanywhere.app.ui.designsystem.AABottomSheet
 import com.agentsanywhere.app.ui.designsystem.AABottomSheetColors
 import com.agentsanywhere.app.ui.designsystem.AABottomSheetDefaults
 import com.agentsanywhere.app.ui.designsystem.AABottomSheetItem
+import com.agentsanywhere.app.ui.designsystem.DownGlyph
+import com.agentsanywhere.app.ui.designsystem.ForwardGlyph
 import com.agentsanywhere.app.ui.designsystem.noRippleClickable
 
 private enum class RuntimeSettingsPage {
@@ -46,22 +51,46 @@ private enum class RuntimeSettingsPage {
     ModeEffort,
 }
 
-private data class ModelOptionGroup(
+internal data class ModelOptionGroup(
     val label: String,
     val options: List<RuntimeSelectionOption>,
 )
 
-private val RuntimeSelectionOption.modelLabel: String
-    get() = label.substringBefore(" · ").ifBlank { label }
+/**
+ * One provider and the models it serves.
+ *
+ * OpenScience serves 146 models from a dozen providers, and the same model name
+ * appears under several of them, so a flat list of model names cannot answer
+ * "which provider offers this?". A runtime that names no provider keeps the
+ * flat list, because a header there would repeat what every label already says.
+ */
+internal data class ProviderOptionGroup(
+    val label: String?,
+    val models: List<ModelOptionGroup>,
+)
 
-private val RuntimeSelectionOption.effortLabel: String?
-    get() = label.substringAfter(" · ", "").takeIf(String::isNotBlank)
+internal val RuntimeSelectionOption.modelLabel: String
+    get() = modelName.ifBlank { label.substringBefore(" · ") }.ifBlank { label }
+
+internal val RuntimeSelectionOption.effortLabelText: String?
+    get() = effortLabel?.takeIf(String::isNotBlank)
+        ?: label.substringAfter(" · ", "").takeIf(String::isNotBlank)
 
 internal fun RuntimeSelectionOption.effortDisplayLabel(defaultLabel: String): String =
-    effortLabel ?: defaultLabel
+    effortLabelText ?: defaultLabel
 
-private fun List<RuntimeSelectionOption>.groupByModelLabel(): List<ModelOptionGroup> =
+internal fun List<RuntimeSelectionOption>.groupByModelLabel(): List<ModelOptionGroup> =
     groupBy(RuntimeSelectionOption::modelLabel).map { (label, options) -> ModelOptionGroup(label, options) }
+
+internal fun List<RuntimeSelectionOption>.groupByProvider(): List<ProviderOptionGroup> {
+    val providers = mapNotNull(RuntimeSelectionOption::providerLabel).distinct()
+    if (providers.size <= 1) return listOf(ProviderOptionGroup(null, groupByModelLabel()))
+    // Providers first, then the models inside each one: grouping by model name
+    // across the whole catalog would merge two providers that serve the same
+    // model into one row, which is the confusion this is here to remove.
+    return groupBy(RuntimeSelectionOption::providerLabel)
+        .map { (provider, options) -> ProviderOptionGroup(provider, options.groupByModelLabel()) }
+}
 
 @Composable
 internal fun SessionRuntimeSettingsSheet(
@@ -84,9 +113,17 @@ internal fun SessionRuntimeSettingsSheet(
     var page by remember(runtimeLabel) { mutableStateOf(RuntimeSettingsPage.Model) }
     val palette = AABottomSheetDefaults.colors()
     val groupedModels = remember(modelOptions) { modelOptions.groupByModelLabel() }
+    val providerGroups = remember(modelOptions) { modelOptions.groupByProvider() }
     val selectedModelGroup = groupedModels.firstOrNull { group ->
         group.options.any { it.selectionId == selectedModelId }
     } ?: groupedModels.firstOrNull()
+    val selectedProviderLabel = remember(selectedModelId, modelOptions) {
+        modelOptions.firstOrNull { it.selectionId == selectedModelId }?.providerLabel
+    }
+    val collapsedProviders = remember(runtimeLabel) { mutableStateMapOf<String, Boolean>() }
+    val providerExpanded: (String?) -> Boolean = { provider ->
+        provider == null || collapsedProviders[provider]?.let { !it } ?: (provider == selectedProviderLabel)
+    }
     val selectedPermissionLabel = permissionOptions
         .firstOrNull { it.selectionId == selectedPermissionId }
         ?.label
@@ -107,6 +144,14 @@ internal fun SessionRuntimeSettingsSheet(
         when (page) {
             RuntimeSettingsPage.Model -> ModelPage(
                 groups = groupedModels,
+                providerGroups = providerGroups,
+                providerExpanded = providerExpanded,
+                onToggleProvider = { provider ->
+                    // The map is the override, so a first tap on a folded
+                    // provider must record "collapsed = false", not repeat the
+                    // default that folded it.
+                    collapsedProviders[provider] = providerExpanded(provider)
+                },
                 selectedId = selectedModelId,
                 permissionLabel = selectedPermissionLabel,
                 effortLabel = selectedEffortLabel,
@@ -140,6 +185,9 @@ internal fun SessionRuntimeSettingsSheet(
 @Composable
 private fun ModelPage(
     groups: List<ModelOptionGroup>,
+    providerGroups: List<ProviderOptionGroup>,
+    providerExpanded: (String?) -> Boolean,
+    onToggleProvider: (String) -> Unit,
     selectedId: String?,
     permissionLabel: String?,
     effortLabel: String?,
@@ -153,6 +201,9 @@ private fun ModelPage(
 ) {
     ModelOptions(
         groups = groups,
+        providerGroups = providerGroups,
+        providerExpanded = providerExpanded,
+        onToggleProvider = onToggleProvider,
         selectedId = selectedId,
         loading = loading,
         errorMessage = errorMessage,
@@ -176,6 +227,9 @@ private fun ModelPage(
 @Composable
 private fun ModelOptions(
     groups: List<ModelOptionGroup>,
+    providerGroups: List<ProviderOptionGroup>,
+    providerExpanded: (String?) -> Boolean,
+    onToggleProvider: (String) -> Unit,
     selectedId: String?,
     loading: Boolean,
     errorMessage: String?,
@@ -184,41 +238,115 @@ private fun ModelOptions(
     onRetry: () -> Unit,
     onSelect: (String) -> Unit,
 ) {
-    val options = groups.map { group ->
+    val rows = groups.map { group ->
         val current = group.options.firstOrNull { it.selectionId == selectedId }
-        current
+        val option = current
             ?: group.options.firstOrNull { it.enabled && it.default }
             ?: group.options.firstOrNull { it.enabled }
             ?: group.options.first()
-    }.map { option -> option.copy(label = option.modelLabel) }
+        group to option.copy(label = option.modelLabel)
+    }
     val selectedIds = groups
         .firstOrNull { group -> group.options.any { option -> option.selectionId == selectedId } }
         ?.options
         ?.mapTo(mutableSetOf()) { it.selectionId }
         .orEmpty()
+    val modelRow: @Composable (RuntimeSelectionOption, Modifier) -> Unit = { option, modifier ->
+        AABottomSheetItem(
+            text = option.label,
+            supportingText = option.disabledReason,
+            selected = option.selectionId == selectedId || option.selectionId in selectedIds,
+            enabled = !busy && !loading && option.enabled,
+            modifier = modifier,
+            onClick = { onSelect(option.selectionId) },
+        )
+    }
+    val grouped = providerGroups.any { it.label != null }
 
     when {
-        loading && options.isEmpty() -> SheetLoading(palette = palette)
-        errorMessage != null && options.isEmpty() -> SheetError(
+        loading && rows.isEmpty() -> SheetLoading(palette = palette)
+        errorMessage != null && rows.isEmpty() -> SheetError(
             message = errorMessage,
             retryEnabled = !busy && !loading,
             onRetry = onRetry,
         )
-        options.isEmpty() -> SheetEmpty(palette = palette)
+        rows.isEmpty() -> SheetEmpty(palette = palette)
         else -> Column(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            options.forEach { option ->
-                AABottomSheetItem(
-                    text = option.label,
-                    supportingText = option.disabledReason,
-                    selected = option.selectionId == selectedId || option.selectionId in selectedIds,
-                    enabled = !busy && !loading && option.enabled,
-                    onClick = { onSelect(option.selectionId) },
+            if (!grouped) {
+                rows.forEach { (_, option) -> modelRow(option, Modifier) }
+                return@Column
+            }
+            providerGroups.forEach { provider ->
+                val label = provider.label
+                if (label == null) {
+                    // A runtime that named some providers but not others keeps
+                    // the unnamed ones visible, just without a header to fold.
+                    rows.filter { (group, _) -> provider.models.any { it === group } }
+                        .forEach { (_, option) -> modelRow(option, Modifier) }
+                    return@forEach
+                }
+                val expanded = providerExpanded(label)
+                ProviderSectionHeader(
+                    label = label,
+                    count = provider.models.sumOf { it.options.size },
+                    expanded = expanded,
+                    palette = palette,
+                    onClick = { onToggleProvider(label) },
                 )
+                if (!expanded) return@forEach
+                rows.filter { (group, _) -> provider.models.any { it === group } }
+                    .forEach { (_, option) -> modelRow(option, Modifier.padding(start = 12.dp)) }
             }
         }
+    }
+}
+
+/**
+ * The row that folds one provider's models away.
+ *
+ * The count is the number of model rows behind it, so the list says how much it
+ * is hiding; the chevron says which way it will move.
+ */
+@Composable
+private fun ProviderSectionHeader(
+    label: String,
+    count: Int,
+    expanded: Boolean,
+    palette: AABottomSheetColors,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .noRippleClickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (expanded) {
+            DownGlyph(color = palette.content.copy(alpha = 0.7f))
+        } else {
+            ForwardGlyph(color = palette.content.copy(alpha = 0.7f))
+        }
+        Text(
+            text = label,
+            color = palette.content,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = count.toString(),
+            color = palette.secondaryContent,
+            fontSize = 12.sp,
+        )
     }
 }
 
