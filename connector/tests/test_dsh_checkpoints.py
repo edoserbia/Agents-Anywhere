@@ -160,3 +160,48 @@ def test_partial_snapshot_cannot_commit_checkpoint(tmp_path):
         assert not store.flush()
         await relay.close()
     asyncio.run(run())
+
+
+def test_a_dead_worker_wakes_a_feed_blocked_on_a_full_staging_queue():
+    """The staging queue's only consumer is the worker that just died.
+
+    A feed blocked in `_staging.put()` is not waiting on the restart queue, so
+    the sentinel cannot reach it: it waits for room that will never come, and
+    the relay hangs until something cancels it from outside. The feed has to be
+    blocked *before* the worker dies for this to bite, which is what happens
+    when the worker is slow and the link is behind.
+    """
+
+    async def run():
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def operation(op):
+            started.set()
+            await release.wait()          # hold the worker inside an operation
+            raise RuntimeError("operation failed")
+
+        async def request(method, params=None):
+            return {}
+
+        relay = SyncRelay(SimpleNamespace(request=request), None)
+        relay.operation = operation
+        relay._staging = asyncio.Queue(maxsize=1)
+        relay._staging_task = asyncio.create_task(relay._drain_operations())
+
+        await relay._staging.put({"kind": "first"})
+        await asyncio.wait_for(started.wait(), 1)     # worker is now inside it
+        await relay._staging.put({"kind": "second"})  # queue is full
+
+        # A feed tries to stage and has nowhere to put it.
+        blocked = asyncio.create_task(relay._stage({"kind": "third"}))
+        await asyncio.sleep(0.05)
+        assert not blocked.done(), "the feed should be blocked on the full queue"
+
+        release.set()                                 # the worker dies now
+        with pytest.raises(RuntimeError, match="operation failed"):
+            await asyncio.wait_for(blocked, 2)
+
+        await relay._stop_staging()
+
+    asyncio.run(run())

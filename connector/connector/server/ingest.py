@@ -77,6 +77,10 @@ DEFAULT_TIMELINE_WINDOW_SECONDS = 0.4
 # Server upgrade is picked up without restarting every Connector.
 INGEST_CAPABILITY_TTL_SECONDS = 600.0
 
+# How long a *failed* capability probe is trusted. Short, so a blip does not
+# turn compression off for the whole TTL.
+INGEST_CAPABILITY_RETRY_SECONDS = 30.0
+
 # Bodies above this are staged and resumed rather than risked in one request.
 # A complete timeline snapshot cannot be split — the Server replaces the whole
 # timeline with it — so a transfer interrupted at 90% has nothing to show for
@@ -171,6 +175,7 @@ class ConnectorIngestClient:
         self._timeline_room.set()
         # Resolved on first use from the Server's own advertisement.
         self._encodings: frozenset[str] | None = None
+        self._encodings_ttl = INGEST_CAPABILITY_TTL_SECONDS
         self._capabilities: dict[str, Any] = {}
         # Staged transfers by body digest, so a retry of the same batch resumes
         # the transfer it already began instead of opening a new one.
@@ -269,7 +274,8 @@ class ConnectorIngestClient:
                 if method in TIMELINE_LATEST_METHODS
                 else self._latest_value
             )
-            self._hold_replace(hold, key, entry)
+            if not self._hold_replace(hold, key, entry):
+                return
             self._available.set()
             return
         try:
@@ -374,15 +380,6 @@ class ConnectorIngestClient:
                 ):
                     break
                 await self._timeline_room.wait()
-            live = self._latest_timeline.get(key)
-            if live is not None and live.get("durable"):
-                # The superseded revision is resolved: its content is contained
-                # in the newest one, which is about to take the same slot. That
-                # can satisfy a parked barrier, so it has to wake it — otherwise
-                # the barrier sleeps to its deadline and fails a checkpoint whose
-                # condition was already met.
-                self._durable_resolved += 1
-                self._durable_progress.set()
             self._hold_replace(self._latest_timeline, key, entry)
             self._durable_submitted += 1
             return
@@ -429,6 +426,7 @@ class ConnectorIngestClient:
         # Checked before the loop, not inside it: refused notifications are
         # already counted as resolved, so the watermark alone would let this
         # barrier report success for data the Server never took.
+        self._raise_if_closed()
         self._raise_if_refused(target)
         while self._durable_resolved < target:
             self._durable_progress.clear()
@@ -639,7 +637,31 @@ class ConnectorIngestClient:
             taken += 1
         return taken
 
-    def _hold_replace(self, hold: dict[str, Any], key: str, entry: dict[str, Any]) -> None:
+    def _evict_oldest_replaceable(self, hold: dict[str, Any]) -> bool:
+        """Make room by dropping the oldest entry that nothing was promised.
+
+        Promised data is never the thing dropped: the durable path waits for
+        room instead, because dropping it would break the promise a checkpoint
+        depends on.
+        """
+
+        for existing_key, existing in hold.items():
+            if not existing.get("durable"):
+                hold.pop(existing_key)
+                self._dropped += 1
+                if self._dropped == 1 or self._dropped % 50 == 0:
+                    logger.warning(
+                        "connector ingest hold is full; dropped notification method={} dropped_total={} pending={}",
+                        existing.get("method"),
+                        self._dropped,
+                        len(hold),
+                    )
+                return True
+        return False
+
+    def _hold_replace(
+        self, hold: dict[str, Any], key: str, entry: dict[str, Any]
+    ) -> bool:
         """Put a newer revision in a hold slot, keeping the slot's deadline.
 
         Re-inserting moves the entry to the back, so the hold stays ordered by
@@ -651,10 +673,27 @@ class ConnectorIngestClient:
         """
 
         live = hold.get(key)
-        if live is not None and live.get("notBefore") is not None:
-            entry["notBefore"] = live["notBefore"]
+        if live is not None:
+            if live.get("durable"):
+                # The superseded revision is resolved: the newest one contains
+                # it. That can satisfy a parked barrier, so it has to wake it —
+                # otherwise the barrier sleeps to its deadline and fails a
+                # checkpoint whose condition was already met. Counting it here
+                # rather than in the caller also covers the legacy path, which
+                # can replace a promised slot and used to leave the watermark
+                # permanently ahead of what it had resolved.
+                self._durable_resolved += 1
+                self._durable_progress.set()
+            if live.get("notBefore") is not None:
+                entry["notBefore"] = live["notBefore"]
+        elif len(hold) >= self._durable_limit():
+            # Bounded. The legacy path cannot wait for room without stalling an
+            # RPC whose response the Server is waiting on, so it drops instead.
+            if not self._evict_oldest_replaceable(hold):
+                return False
         hold.pop(key, None)
         hold[key] = entry
+        return True
 
     def _ready(self, entry: dict[str, Any]) -> bool:
         """Whether a held timeline entry has waited out its coalescing window.
@@ -1043,10 +1082,9 @@ class ConnectorIngestClient:
         now = time.monotonic()
         if (
             self._encodings is not None
-            and now - self._encodings_checked_at < INGEST_CAPABILITY_TTL_SECONDS
+            and now - self._encodings_checked_at < self._encodings_ttl
         ):
             return self._encodings
-        self._encodings_checked_at = now
         client = self._http_client_getter()
         owned = client is None
         if client is None:
@@ -1060,11 +1098,16 @@ class ConnectorIngestClient:
         except Exception:  # noqa: BLE001 - discovery must never break ingest
             # An old Server, an unreachable one, or a client that cannot answer
             # this at all all mean the same thing: plain, whole-body uploads,
-            # which every version understands.
+            # which every version understands. The failure is cached only
+            # briefly, though: caching it for the full TTL meant one unreachable
+            # /health disabled compression and resumable uploads for ten
+            # minutes, which is the opposite of what a bad link needs.
             payload = {}
+            self._encodings_ttl = INGEST_CAPABILITY_RETRY_SECONDS
         finally:
             if owned:
                 await client.aclose()
+        self._encodings_checked_at = time.monotonic()
         ingest = payload.get("ingest") if isinstance(payload, dict) else None
         self._capabilities = dict(ingest) if isinstance(ingest, dict) else {}
         encodings = self._capabilities.get("encodings")

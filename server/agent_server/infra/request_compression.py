@@ -88,10 +88,13 @@ def _request_encoding(scope: Scope) -> str | None:
 def _rewritten_headers(headers: Iterable[tuple[bytes, bytes]], length: int) -> list[tuple[bytes, bytes]]:
     """Drop the encoding and correct the length for the decoded body."""
 
+    # `transfer-encoding` goes too: the body is now a single decoded buffer, and
+    # announcing a length while still claiming chunked framing is invalid.
     rewritten = [
         (name, value)
         for name, value in headers
-        if name.lower() not in {b"content-encoding", b"content-length"}
+        if name.lower()
+        not in {b"content-encoding", b"content-length", b"transfer-encoding"}
     ]
     rewritten.append((b"content-length", str(length).encode("ascii")))
     return rewritten

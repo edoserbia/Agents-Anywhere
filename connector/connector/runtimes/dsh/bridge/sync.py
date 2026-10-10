@@ -480,6 +480,14 @@ class SyncRelay:
                 "DSH sync operation failed; resubscribing for history calibration ({})",
                 type(error).__name__,
             )
+            # A feed blocked in `_staging.put()` is not waiting on `queue`, so
+            # the sentinel below cannot reach it: with the queue full and its
+            # only consumer gone, it would wait forever and the relay would hang
+            # until it was cancelled from outside. Draining makes room so the
+            # put returns, and `_stage` then raises the error on its next check.
+            while not self._staging.empty():
+                self._staging.get_nowait()
+                self._staging.task_done()
             # `restart` wakes a feed that is waiting for its next batch. Keep
             # the error itself so the feed reports the real cause.
             while not self.queue.empty():

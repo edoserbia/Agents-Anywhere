@@ -1197,3 +1197,118 @@ def test_a_synchronous_snapshot_does_not_overtake_the_durable_backlog():
         ], batches
 
     asyncio.run(run())
+
+
+def test_a_legacy_enqueue_replacing_a_promised_slot_resolves_it(monkeypatch):
+    """Both paths write the same hold, so both must keep the watermark honest.
+
+    The legacy path can replace a slot the durable path is still promising. It
+    did so without counting a resolution, leaving `_durable_submitted`
+    permanently ahead of `_durable_resolved` — after which every barrier, not
+    just that one, timed out.
+    """
+
+    async def run():
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            ingest._timeline_window_seconds = lambda: 30.0   # stays in the hold
+            await ingest.submit_notifications([{
+                "method": "timeline.itemUpsert",
+                "params": {"sessionId": "s1", "item": {"id": "x", "revision": 1}},
+            }])
+            # The same item, through the other path.
+            await ingest.enqueue(
+                "timeline.itemUpsert",
+                {"sessionId": "s1", "item": {"id": "x", "revision": 2}},
+            )
+
+            assert ingest._durable_submitted == ingest._durable_resolved, (
+                "the watermark was left permanently ahead: "
+                f"{ingest._durable_submitted} submitted, "
+                f"{ingest._durable_resolved} resolved"
+            )
+
+    asyncio.run(run())
+
+
+def test_the_legacy_hold_is_bounded(monkeypatch):
+    """`enqueue` cannot wait for room, so it must not grow without limit either.
+
+    This is the lane a runtime streaming distinct items fills while the link is
+    down, and nothing bounded it.
+    """
+
+    monkeypatch.setenv("AA_CONNECTOR_INGEST_DURABLE_LIMIT", "8")
+
+    async def run():
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            for index in range(200):
+                await ingest.enqueue(
+                    "timeline.itemUpsert",
+                    {"sessionId": "s1", "item": {"id": f"item-{index}"}},
+                )
+            assert len(ingest._latest_timeline) <= 8, len(ingest._latest_timeline)
+            assert ingest._dropped > 0, "it should have dropped rather than grown"
+
+    asyncio.run(run())
+
+
+def test_a_failed_capability_probe_is_not_trusted_for_the_whole_ttl(monkeypatch):
+    """One unreachable /health must not turn compression off for ten minutes.
+
+    The probe stamped its timestamp before asking, so a failure was cached for
+    the full TTL — and that is exactly the situation a bad link produces.
+    """
+
+    from connector.server import ingest as ingest_module
+
+    async def run():
+        calls = {"health": 0}
+
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            if request.url.path.endswith("/health"):
+                calls["health"] += 1
+                if calls["health"] == 1:
+                    raise httpx.ConnectError("unreachable", request=request)
+                return httpx.Response(200, json={
+                    "status": "ok",
+                    "ingest": {"encodings": ["gzip"], "resumable": True},
+                })
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            assert await ingest._server_encodings() == frozenset()
+            # Within the retry window the answer is cached...
+            assert await ingest._server_encodings() == frozenset()
+            assert calls["health"] == 1
+            # ...but not for the long TTL, so the next probe recovers.
+            ingest._encodings_checked_at -= (
+                ingest_module.INGEST_CAPABILITY_RETRY_SECONDS + 1
+            )
+            assert await ingest._server_encodings() == frozenset({"gzip"})
+            assert calls["health"] == 2
+
+    asyncio.run(run())
