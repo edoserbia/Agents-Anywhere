@@ -1735,3 +1735,40 @@ def test_a_body_is_compressed_reproducibly():
         )
 
     asyncio.run(run())
+
+
+def test_a_parked_barrier_is_told_about_its_own_refused_data():
+    """The barrier is already waiting when the refusal happens.
+
+    It has to be woken and told, not left to its deadline: the refusal resolves
+    the range it covers, so without a report it would exit the loop and report
+    success for data the Server never took.
+    """
+
+    async def run():
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            if request.url.path.endswith("/connector/ingest"):
+                return httpx.Response(413, json={"code": "too_large"})
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            flusher = asyncio.create_task(ingest.flush_loop())
+            await ingest.submit_notifications([{
+                "method": "session.meta.upsert",
+                "params": {"sessionId": "s1", "title": "refused"},
+            }])
+            # Parked before the upload is even attempted.
+            waiting = asyncio.create_task(ingest.flush_notifications(timeout=5))
+            with pytest.raises(httpx.HTTPStatusError):
+                await asyncio.wait_for(waiting, 6)
+
+            flusher.cancel()
+            await asyncio.gather(flusher, return_exceptions=True)
+
+    asyncio.run(run())
