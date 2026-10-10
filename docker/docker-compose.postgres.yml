@@ -89,6 +89,14 @@ services:
     environment:
       AGENT_SERVER_DB_BACKEND: postgres
       AGENT_SERVER_DB_URL: postgresql+asyncpg://agents_anywhere:${POSTGRES_PASSWORD:-agents_anywhere_dev_password}@postgres-next:5432/agents_anywhere
+      # The code default is 8 MiB, which is thirty-two times what a Connector
+      # built from this repository sends. The Connector deployed *before* this
+      # release batches by count instead of by size, so its legitimate batches
+      # run past that and were refused with 413 — 671 of them in a thirty minute
+      # window against 4465 accepted. 32 MiB admits those while still refusing
+      # the pathological body that used to ratchet memory until the container
+      # was killed.
+      AGENT_SERVER_MAX_REQUEST_BODY_BYTES: ${AGENT_SERVER_MAX_REQUEST_BODY_BYTES:-33554432}
       AGENT_SERVER_DB_POOL_SIZE: ${AGENT_SERVER_DB_POOL_SIZE:-10}
       AGENT_SERVER_DB_MAX_OVERFLOW: ${AGENT_SERVER_DB_MAX_OVERFLOW:-20}
       AGENT_SERVER_DB_POOL_TIMEOUT: ${AGENT_SERVER_DB_POOL_TIMEOUT:-30}
