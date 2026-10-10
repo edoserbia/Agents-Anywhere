@@ -167,6 +167,8 @@ class ConnectorIngestClient:
         # blocked: one rejected batch used to stop every session on this
         # Connector until the process was restarted.
         self._durable_refused_through = 0
+        # Whether the current refusal has already been reported to a caller.
+        self._durable_refusal_reported = True
         self._durable_room = asyncio.Event()
         self._durable_room.set()
         self._durable_progress = asyncio.Event()
@@ -399,15 +401,22 @@ class ConnectorIngestClient:
             raise self._closed
 
     def _raise_if_refused(self, target: int) -> None:
-        """A barrier may not pass data the Server refused.
+        """Tell the caller about a refusal, once.
 
-        The refusal is tied to the submissions it covered, not to the client:
-        a checkpoint covering refused data must still fail, while a later
-        checkpoint over newer data is free to succeed.
+        A barrier is cumulative, so every barrier taken after a refusal covers
+        the refused range and comparing targets cannot separate them. What
+        matters is that the caller is *told*: its contract on a failed
+        checkpoint is to resubscribe and re-send a complete snapshot, which
+        supersedes whatever was refused. So the refusal is reported to the first
+        barrier that observes it and not again — reporting it forever would
+        wedge the Connector until a restart, and reporting it never would let a
+        checkpoint advance over data the Server never took.
         """
 
-        if self._durable_error is not None and target <= self._durable_refused_through:
-            raise self._durable_error
+        if self._durable_error is None or self._durable_refusal_reported:
+            return
+        self._durable_refusal_reported = True
+        raise self._durable_error
 
     async def flush_notifications(
         self, timeout: float | None = None
@@ -468,6 +477,8 @@ class ConnectorIngestClient:
 
         if self._durable_error is None:
             self._durable_error = error
+        # A new refusal is news again, whichever refusal came before it.
+        self._durable_refusal_reported = False
         # Every refusal extends the range, not only the first: a later batch
         # refused on its own must still fail the barrier that covers it, or a
         # checkpoint would advance over data the Server never took.
@@ -674,6 +685,18 @@ class ConnectorIngestClient:
 
         live = hold.get(key)
         if live is not None:
+            if live.get("durable") and not entry.get("durable"):
+                # The replacement came from the legacy lane, which promises
+                # nothing and may therefore be evicted. Leaving the promise on
+                # the old entry while counting it resolved would let eviction
+                # drop the only copy of data the barrier had already accepted —
+                # so the promise moves to the revision that replaces it, which
+                # is a complete replacement for the older one. It becomes an
+                # outstanding submission in its own right, otherwise the
+                # resolution just counted would let a barrier pass while this
+                # entry is still sitting unsent.
+                entry["durable"] = True
+                self._durable_submitted += 1
             if live.get("durable"):
                 # The superseded revision is resolved: the newest one contains
                 # it. That can satisfy a parked barrier, so it has to wake it —
@@ -753,10 +776,19 @@ class ConnectorIngestClient:
                     if self._inflight:
                         await self._post_batch(self._inflight)
                         self._advance_durable()
-                    remaining = max(
-                        0, remaining - max(taken, len(self._inflight))
-                    )
+                    progressed = max(taken, len(self._inflight))
                     self._inflight = []
+                    if not progressed:
+                        # Nothing could be taken: the head is still inside its
+                        # coalescing window. Waiting for it is the point — an
+                        # older entry must not be overtaken — but it has to be a
+                        # real wait. Without this the loop repeated with no
+                        # await at all and froze every task in the process for
+                        # the rest of the window, which is up to the configured
+                        # window and reachable from the publish path.
+                        await asyncio.sleep(FLUSH_WINDOW_SECONDS)
+                        continue
+                    remaining = max(0, remaining - progressed)
                 await self._post_batch(notifications)
             finally:
                 self._posting = False
@@ -772,10 +804,16 @@ class ConnectorIngestClient:
         if not notifications:
             return
         body = _encode_batch(notifications)
+        # Kept for the transfer key: `gzip.compress` stamps the current time into
+        # its header, so the compressed bytes differ on every attempt. Keying on
+        # them meant a retry never recognised the transfer it had already begun
+        # and started a new one — the resume path defeated for exactly the large
+        # bodies it exists for.
+        raw_body = body
         raw_size = len(body)
         encoding = await self._request_encoding(raw_size)
         if encoding is not None:
-            body = gzip.compress(body, compresslevel=6)
+            body = gzip.compress(body, compresslevel=6, mtime=0)
         wire_size = len(body)
         started_at = time.monotonic()
         access_token = await self._access_token_provider(False)
@@ -792,7 +830,8 @@ class ConnectorIngestClient:
             try:
                 if staged:
                     response = await self._post_staged_batch(
-                        client, access_token, body, encoding, _body_digest(body)
+                        client, access_token, body, encoding,
+                        _body_digest(raw_body),
                     )
                 else:
                     response = await self._post_ingest_batch(
@@ -833,11 +872,11 @@ class ConnectorIngestClient:
             # Permanent: nothing will retry this body, so release the staging
             # rather than waiting for the sweep.
             if staged:
-                await self._discard_staged(client, access_token, body)
+                await self._discard_staged(client, access_token, raw_body)
             raise
         else:
             if staged:
-                self._forget_staged(_body_digest(body))
+                self._forget_staged(_body_digest(raw_body))
         finally:
             if owned:
                 await client.aclose()
@@ -900,7 +939,7 @@ class ConnectorIngestClient:
         upload_id = self._staged_uploads.get(digest)
         offset = 0
         if upload_id is not None:
-            offset = await self._staged_offset(client, headers, upload_id)
+            offset = await self._staged_offset(client, send, upload_id)
             if offset < 0:
                 # The Server no longer has it — expired, or swept — so start over.
                 upload_id = None
@@ -959,16 +998,24 @@ class ConnectorIngestClient:
             )
         )
 
-    async def _staged_offset(
-        self, client: httpx.AsyncClient, headers: dict[str, str], upload_id: str
-    ) -> int:
-        """How much the Server already holds, or -1 if it holds nothing."""
+    async def _staged_offset(self, client, send, upload_id: str) -> int:
+        """How much the Server already holds, or -1 if it holds nothing.
+
+        Goes through `send` like every other staged request. It used to be the
+        one call that did not, so a retryable status here was read as permanent:
+        the handler deleted the staged bytes and the batch was reported as
+        refused, which is the opposite of what resuming is for.
+        """
 
         try:
-            response = await client.get(
-                api_v2_url(self._server_url, f"/connector/ingest/uploads/{upload_id}"),
-                headers=headers,
-                timeout=self._upload_timeout(),
+            response = await send(
+                lambda token: client.get(
+                    api_v2_url(
+                        self._server_url, f"/connector/ingest/uploads/{upload_id}"
+                    ),
+                    headers=bearer(token),
+                    timeout=self._upload_timeout(),
+                )
             )
         except httpx.RequestError:
             # Unreachable is not the same as missing; let the upload continue
@@ -976,6 +1023,7 @@ class ConnectorIngestClient:
             return self._staged_offsets.get(upload_id, 0)
         if response.status_code == 404:
             return -1
+        _raise_for_transient_status(response, "read staged upload")
         response.raise_for_status()
         return int(response.json()["receivedBytes"])
 
@@ -1104,6 +1152,11 @@ class ConnectorIngestClient:
             # minutes, which is the opposite of what a bad link needs.
             payload = {}
             self._encodings_ttl = INGEST_CAPABILITY_RETRY_SECONDS
+        else:
+            # A success is trusted for the full window again. Leaving the short
+            # retry window in place made every later probe run every thirty
+            # seconds for the life of the process.
+            self._encodings_ttl = INGEST_CAPABILITY_TTL_SECONDS
         finally:
             if owned:
                 await client.aclose()

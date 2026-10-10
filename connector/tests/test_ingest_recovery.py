@@ -1200,42 +1200,63 @@ def test_a_synchronous_snapshot_does_not_overtake_the_durable_backlog():
     asyncio.run(run())
 
 
-def test_a_legacy_enqueue_replacing_a_promised_slot_resolves_it(monkeypatch):
-    """Both paths write the same hold, so both must keep the watermark honest.
+def test_a_legacy_enqueue_replacing_a_promised_slot_keeps_the_promise():
+    """Both paths write the same hold, so both must keep the promise honest.
 
-    The legacy path can replace a slot the durable path is still promising. It
-    did so without counting a resolution, leaving `_durable_submitted`
-    permanently ahead of `_durable_resolved` — after which every barrier, not
-    just that one, timed out.
+    The legacy path can replace a slot the durable path is still promising, and
+    its replacement is evictable. Counting the old promise resolved while the
+    replacement stayed evictable let eviction drop the only copy of data a
+    barrier had already accepted. The promise moves to the revision that
+    replaces it — which is a complete replacement for it — and that revision is
+    an outstanding submission in its own right, so a barrier cannot pass while
+    it is still unsent.
     """
 
     async def run():
+        sent: list = []
+
         async def token(force):
             return "token"
 
         async def transport(request):
+            if request.url.path.endswith("/connector/ingest"):
+                sent.extend(json.loads(request.content)["notifications"])
             return httpx.Response(200, json={"accepted": 1, "rejected": []})
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
             ingest = ConnectorIngestClient(
                 "https://server.test", token, lambda: http, lambda timeout: http
             )
-            ingest._timeline_window_seconds = lambda: 30.0   # stays in the hold
+            # Long enough to observe the outstanding state, short enough that
+            # the flush loop can still finish. The deadline is taken from the
+            # first revision and preserved by the replacement, which is why
+            # changing the setting later would not help.
+            ingest._timeline_window_seconds = lambda: 0.3
             await ingest.submit_notifications([{
                 "method": "timeline.itemUpsert",
                 "params": {"sessionId": "s1", "item": {"id": "x", "revision": 1}},
             }])
-            # The same item, through the other path.
             await ingest.enqueue(
                 "timeline.itemUpsert",
                 {"sessionId": "s1", "item": {"id": "x", "revision": 2}},
             )
 
-            assert ingest._durable_submitted == ingest._durable_resolved, (
-                "the watermark was left permanently ahead: "
+            held = ingest._latest_timeline["timeline.itemUpsert:s1:x"]
+            assert held.get("durable"), "the promise must move to the replacement"
+            assert ingest._durable_submitted - ingest._durable_resolved == 1, (
+                "the replacement is outstanding, so a barrier must not pass: "
                 f"{ingest._durable_submitted} submitted, "
                 f"{ingest._durable_resolved} resolved"
             )
+
+            # Once it is actually sent, the watermark catches up.
+            flusher = asyncio.create_task(ingest.flush_loop())
+            await asyncio.wait_for(ingest.flush_notifications(timeout=5), 6)
+            flusher.cancel()
+            await asyncio.gather(flusher, return_exceptions=True)
+
+            assert ingest._durable_submitted == ingest._durable_resolved
+            assert [n["params"]["item"]["revision"] for n in sent] == [2], sent
 
     asyncio.run(run())
 
@@ -1311,6 +1332,10 @@ def test_a_failed_capability_probe_is_not_trusted_for_the_whole_ttl(monkeypatch)
             )
             assert await ingest._server_encodings() == frozenset({"gzip"})
             assert calls["health"] == 2
+            # A success is trusted for the full window again; keeping the short
+            # retry window would probe every thirty seconds for the life of the
+            # process.
+            assert ingest._encodings_ttl == ingest_module.INGEST_CAPABILITY_TTL_SECONDS
 
     asyncio.run(run())
 
@@ -1452,5 +1477,261 @@ def test_a_long_outage_stays_bounded_and_still_drains(monkeypatch):
         assert peak["durable"] <= 64, f"the lane grew past its bound: {peak}"
         assert during < 100, f"it hammered the Server while it was down: {during}"
         assert state["delivered"] >= 1000, state
+
+    asyncio.run(run())
+
+
+def test_a_refusal_is_reported_to_the_caller_exactly_once():
+    """Fail closed once, then let the caller recover.
+
+    A barrier is cumulative, so every barrier taken after a refusal covers the
+    refused range. "Any barrier covering refused data must fail" therefore means
+    "fail forever", which wedges the Connector until it is restarted — the exact
+    failure class this work set out to remove. The contract that makes reporting
+    it once safe is the caller's: a failed checkpoint means the stream is
+    resubscribed and a complete snapshot re-sent, which supersedes what was
+    refused.
+
+    So: the first barrier after a refusal fails, the next one is free to
+    succeed, and a *new* refusal is news again.
+    """
+
+    async def run():
+        refuse = {"on": True}
+
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            if request.url.path.endswith("/connector/ingest") and refuse["on"]:
+                return httpx.Response(413, json={"code": "too_large"})
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            flusher = asyncio.create_task(ingest.flush_loop())
+
+            await ingest.submit_notifications([{
+                "method": "session.meta.upsert",
+                "params": {"sessionId": "s1", "title": "refused"},
+            }])
+            with pytest.raises(httpx.HTTPStatusError):
+                await asyncio.wait_for(ingest.flush_notifications(timeout=3), 4)
+
+            # Reported: the caller has been told, so later data may proceed.
+            refuse["on"] = False
+            await ingest.submit_notifications([{
+                "method": "session.meta.upsert",
+                "params": {"sessionId": "s1", "title": "after"},
+            }])
+            await asyncio.wait_for(ingest.flush_notifications(timeout=3), 4)
+
+            # A second refusal is a new thing to report.
+            refuse["on"] = True
+            await ingest.submit_notifications([{
+                "method": "session.meta.upsert",
+                "params": {"sessionId": "s1", "title": "refused again"},
+            }])
+            with pytest.raises(httpx.HTTPStatusError):
+                await asyncio.wait_for(ingest.flush_notifications(timeout=3), 4)
+
+            flusher.cancel()
+            await asyncio.gather(flusher, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_waiting_for_a_window_never_freezes_the_event_loop():
+    """The drain waits for an older entry; it must not do so by spinning.
+
+    `_collect_pending` can now take nothing when the head is inside its
+    coalescing window, and the drain loop reduced its counter only by the work
+    it took — so a zero-progress pass repeated with no await anywhere and froze
+    every task in the process for the rest of the window. The publish path
+    reaches it.
+    """
+
+    async def run():
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            ingest._timeline_window_seconds = lambda: 0.4
+            await ingest.submit_notifications([{
+                "method": "timeline.itemUpsert",
+                "params": {"sessionId": "s1", "item": {"id": "x", "revision": 1}},
+            }])
+
+            beat = asyncio.create_task(heartbeat())
+            await asyncio.sleep(0.05)
+            before = ticks
+            await ingest.post_batch([{
+                "method": "session.meta.upsert",
+                "params": {"sessionId": "s1", "title": "synchronous"},
+            }])
+            during = ticks - before
+            beat.cancel()
+            await asyncio.gather(beat, return_exceptions=True)
+
+        assert during >= 5, f"the event loop was frozen: only {during} ticks"
+
+    asyncio.run(run())
+
+
+def _staging_server_that_fails_the_probe(state: dict, requests: list):
+    """Cuts one PUT (so the id is remembered), then fails the resume probe once."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        path = request.url.path
+        if path.endswith("/health"):
+            return httpx.Response(200, json={
+                "status": "ok", "ingest": {"encodings": ["gzip"], "resumable": True}})
+        if path.endswith("/connector/ingest/uploads"):
+            state["received"] = bytearray()
+            state["id"] = "u" * 24
+            return httpx.Response(200, json={"uploadId": state["id"], "receivedBytes": 0})
+        if path.endswith(f"/uploads/{state.get('id')}"):
+            if request.method == "DELETE":
+                state["discarded"] = True
+                return httpx.Response(204)
+            if request.method == "GET":
+                # The probe: a proxy having a bad moment, once.
+                if not state.get("probe_failed"):
+                    state["probe_failed"] = True
+                    return httpx.Response(503, json={"detail": "unavailable"})
+                return httpx.Response(200, json={
+                    "uploadId": state["id"], "receivedBytes": len(state["received"])})
+            if not state.get("cut"):
+                # The connection dies, so the Connector keeps the upload id and
+                # the bytes it already sent — that is what makes the next
+                # attempt a *resume*, and therefore probe the Server.
+                state["cut"] = True
+                raise httpx.ReadError("connection reset", request=request)
+            state["received"].extend(request.content)
+            return httpx.Response(200, json={
+                "uploadId": state["id"], "receivedBytes": len(state["received"])})
+        if path.endswith("/commit"):
+            state["committed"] = bytes(state["received"])
+            return httpx.Response(200, json={"accepted": 1, "rejected": [], "nextSeq": 1})
+        raise AssertionError(f"unexpected request {request.method} {path}")
+
+    return httpx.MockTransport(handler)
+
+
+def test_a_retryable_status_on_the_resume_probe_keeps_the_bytes(monkeypatch):
+    """The probe is a staged request like any other.
+
+    It was the one call not routed through the shared classification, so a 503
+    while asking how much the Server already holds was read as permanent: the
+    transfer was deleted and the batch reported as refused — the failure the
+    previous fix closed for create and PUT, one function over.
+    """
+
+    from connector.server import ingest as ingest_module
+
+    monkeypatch.setattr(ingest_module, "RESUMABLE_UPLOAD_MIN_BYTES", 0)
+    state: dict = {}
+    requests: list = []
+
+    async def token(force):
+        return "token"
+
+    async def run():
+        async with httpx.AsyncClient(
+            transport=_staging_server_that_fails_the_probe(state, requests)
+        ) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            big = "y" * (ingest_module.RESUMABLE_UPLOAD_CHUNK_BYTES + 4096)
+            await ingest.submit_notifications([{
+                "method": "timeline.sync",
+                "params": {"sessionId": "s1", "complete": True,
+                           "items": [{"id": "big", "text": big}]},
+            }])
+            flusher = asyncio.create_task(ingest.flush_loop())
+            await asyncio.wait_for(ingest.flush_notifications(timeout=20), 25)
+            flusher.cancel()
+            await asyncio.gather(flusher, return_exceptions=True)
+
+    asyncio.run(run())
+
+    probes = [r for r in requests if r[0] == "GET" and "uploads" in r[1]]
+    assert probes, "the resume probe was never reached"
+    assert state.get("probe_failed"), probes
+    assert not state.get("discarded"), "a retryable probe must not delete the transfer"
+    assert state.get("committed"), "the transfer must still finish"
+
+
+def test_a_body_is_compressed_reproducibly():
+    """The transfer key is derived from the body, so the wire bytes must not drift.
+
+    `gzip.compress` stamps the current time into its header by default, so the
+    same notifications compressed twice produced different bytes a second apart.
+    A retry therefore never recognised the transfer it had already begun and
+    opened a new one, which defeats resuming for exactly the large bodies it
+    exists for. Two things keep it stable: the key is taken from the *raw*
+    batch, and the compressed form is reproducible too — this checks the second
+    through the real send path, not by repeating the literal.
+    """
+
+    async def run():
+        bodies: list[bytes] = []
+
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            if request.url.path.endswith("/health"):
+                # It has to advertise compression, or the body is sent as plain
+                # JSON and the test proves nothing about the compressed form.
+                return httpx.Response(200, json={
+                    "status": "ok",
+                    "ingest": {"encodings": ["gzip"], "resumable": True},
+                })
+            if request.url.path.endswith("/connector/ingest"):
+                bodies.append(request.content)
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            # Big enough to be compressed, small enough not to be staged.
+            payload = [{
+                "method": "timeline.itemUpsert",
+                "params": {"sessionId": "s1",
+                           "item": {"id": "x", "revision": 1, "content": "y" * 5000}},
+            }]
+            flusher = asyncio.create_task(ingest.flush_loop())
+            for _ in range(2):
+                await ingest.submit_notifications(list(payload))
+                await asyncio.wait_for(ingest.flush_notifications(timeout=5), 6)
+                await asyncio.sleep(1.1)
+            flusher.cancel()
+            await asyncio.gather(flusher, return_exceptions=True)
+
+        assert len(bodies) == 2, bodies
+        assert bodies[0] == bodies[1], (
+            "the same batch compressed to different bytes; a retry would open a "
+            "new transfer instead of resuming"
+        )
 
     asyncio.run(run())
