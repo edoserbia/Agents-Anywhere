@@ -17,6 +17,8 @@ import zlib
 from collections.abc import Awaitable, Callable, Iterable, MutableMapping
 from typing import Any
 
+from starlette.requests import ClientDisconnect
+
 MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
 
 # zlib's 47 accepts a gzip *or* zlib wrapper, which covers both encodings a
@@ -106,9 +108,19 @@ def decompress_request_body(encoding: str, body: bytes, max_bytes: int = MAX_DEC
 
 
 async def _read_body(receive: Receive) -> bytes:
+    """Collect the whole request body, or end the request if the peer goes away.
+
+    A disconnect must not be mistaken for "keep waiting": the server answers
+    `http.disconnect` for a connection that is already gone, so skipping it
+    spins forever and pins a request task. Mobile links drop mid-upload
+    routinely, which is exactly when this would fire.
+    """
+
     chunks: list[bytes] = []
     while True:
         message = await receive()
+        if message["type"] == "http.disconnect":
+            raise ClientDisconnect
         if message["type"] != "http.request":
             continue
         chunks.append(message.get("body", b""))

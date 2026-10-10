@@ -8,13 +8,17 @@ stream that never catches up, so the negotiated path is covered directly.
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
 
 from agent_server.app import create_app
 from agent_server.infra.request_compression import (
+    _read_body,
     REQUEST_ENCODINGS,
     RequestDecompressionMiddleware,
 )
@@ -140,3 +144,28 @@ def test_decompression_is_bounded(tmp_path) -> None:
     )
 
     assert response.status_code == 400
+
+
+def test_a_client_that_disappears_mid_body_ends_the_request():
+    """A disconnect must not be mistaken for "keep waiting".
+
+    The server answers `http.disconnect` for a connection that is already gone,
+    so skipping it spins forever and pins a request task. A mobile link dropping
+    mid-upload — routine on the deployment this was written for — would trigger
+    exactly that, so the request has to end instead.
+    """
+
+    calls = {"n": 0}
+
+    async def receive():
+        calls["n"] += 1
+        # Bounded so the old behaviour fails instead of hanging the suite.
+        if calls["n"] > 50:
+            raise AssertionError("kept asking after the client was gone")
+        if calls["n"] == 1:
+            return {"type": "http.request", "body": b"partial", "more_body": True}
+        return {"type": "http.disconnect"}
+
+    with pytest.raises(ClientDisconnect):
+        asyncio.run(_read_body(receive))
+    assert calls["n"] == 2, "it must stop at the disconnect, not keep asking"
