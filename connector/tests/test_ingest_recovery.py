@@ -4,6 +4,7 @@ import asyncio
 import gzip
 import json
 import os
+import random
 
 import httpx
 import pytest
@@ -1312,3 +1313,82 @@ def test_a_failed_capability_probe_is_not_trusted_for_the_whole_ttl(monkeypatch)
             assert calls["health"] == 2
 
     asyncio.run(run())
+
+
+def test_nothing_ever_overtakes_something_admitted_before_it():
+    """Randomised ordering across every lane, with coalescing active.
+
+    Coalescing is allowed to *drop* an entry — a superseded revision is
+    contained in the newest one — so the invariant is not equality. It is that
+    for any two notifications that do reach the wire, their relative order
+    matches admission order. An overtake is what silently loses data, because a
+    complete snapshot replaces the timeline wholesale.
+
+    Deterministic seed, and the item ids come from a small pool so revisions
+    really do supersede: without that, every entry survives and the test proves
+    nothing about coalescing and ordering together.
+    """
+
+    rng = random.Random(20261010)
+
+    async def one_round(rounds=120):
+        admitted: list[str] = []
+        seen: list[str] = []
+
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            if request.url.path.endswith("/connector/ingest"):
+                for row in json.loads(request.content)["notifications"]:
+                    tag = row["params"].get("tag")
+                    if tag:
+                        seen.append(tag)
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            ingest._timeline_window_seconds = lambda: rng.choice([0.0, 0.05, 0.15])
+            flusher = asyncio.create_task(ingest.flush_loop())
+            for index in range(rounds):
+                tag = f"t{index}"
+                admitted.append(tag)
+                roll = rng.random()
+                if roll < 0.4:
+                    await ingest.submit_notifications([{
+                        "method": "timeline.itemUpsert",
+                        "params": {"sessionId": "s1", "tag": tag,
+                                   "item": {"id": f"i{rng.randrange(4)}",
+                                            "revision": index}},
+                    }])
+                elif roll < 0.7:
+                    await ingest.submit_notifications([{
+                        "method": "timeline.sync",
+                        "params": {"sessionId": "s1", "tag": tag,
+                                   "complete": True, "items": []},
+                    }])
+                else:
+                    await ingest.enqueue(
+                        "timeline.itemUpsert",
+                        {"sessionId": "s1", "tag": tag,
+                         "item": {"id": f"e{rng.randrange(4)}", "revision": index}},
+                    )
+                await asyncio.sleep(rng.choice([0, 0.002, 0.01]))
+            await asyncio.wait_for(ingest.flush_notifications(timeout=10), 15)
+            await asyncio.sleep(0.5)          # let a held entry drain
+            flusher.cancel()
+            await asyncio.gather(flusher, return_exceptions=True)
+
+        order = {tag: number for number, tag in enumerate(admitted)}
+        positions = [order[tag] for tag in seen]
+        assert positions == sorted(positions), next(
+            (seen[i], seen[i + 1]) for i in range(len(seen) - 1)
+            if positions[i] > positions[i + 1]
+        )
+        assert len(seen) < len(admitted), "nothing was superseded"
+        return len(seen)
+
+    sent = sum(asyncio.run(one_round()) for _ in range(4))
+    assert sent > 0
