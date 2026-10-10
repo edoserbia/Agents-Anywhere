@@ -3665,3 +3665,42 @@ def test_active_recovery_does_not_commit_a_deferred_timeline_replacement():
         commit.assert_awaited_once()
         assert runner._recovered["codex"] == runner._recovery_generation
     asyncio.run(run())
+
+
+def test_every_connection_attempt_gets_a_fresh_http_pool():
+    """A client built once keeps the network as it was at startup.
+
+    Pooled connections the proxy has since dropped, and the proxy configuration
+    read at construction, both go stale. Observed in production: after one
+    websocket keepalive timeout the Connector failed every request for an hour —
+    `backend authentication request failed` — while the same URL answered curl,
+    and only restarting the process cleared it.
+    """
+
+    async def exercise():
+        built = []
+
+        class Client:
+            def __init__(self):
+                self.closed = 0
+                built.append(self)
+
+            async def aclose(self):
+                self.closed += 1
+
+        client = BackendRpcClient(
+            ConnectorConfig("https://server.test", "conn_test", "secret"),
+            agent_runtime_providers=(),
+        )
+        client._new_http_client = lambda timeout: Client()
+
+        await client._reset_http_client()
+        first = client._get_http_client()
+        await client._reset_http_client()
+        second = client._get_http_client()
+
+        assert first is not second, "a reconnect must not reuse the old pool"
+        assert first.closed == 1, "the replaced pool must be closed"
+        assert len(built) == 2
+
+    asyncio.run(exercise())

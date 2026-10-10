@@ -144,11 +144,11 @@ class BackendRpcClient:
         self._runtime_sync_task: asyncio.Task[None] | None = None
 
     async def run_forever(self) -> None:
-        self._http_client = self._new_http_client(timeout=60)
         ingest_flush_task = asyncio.create_task(self._ingest.flush_loop())
         sync_state_flush_task = asyncio.create_task(self._sync_state_flush_loop())
         try:
             while True:
+                await self._reset_http_client()
                 try:
                     connection_task = asyncio.create_task(self.run_once())
                     try:
@@ -526,6 +526,24 @@ class BackendRpcClient:
             pass
         except Exception:
             logger.exception("connector background task failed")
+
+    async def _reset_http_client(self) -> None:
+        """Give every connection attempt a fresh pool and fresh proxy settings.
+
+        A client built once at startup keeps the network as it was then: pooled
+        connections the proxy has since dropped, and the proxy configuration as
+        it was read when the client was constructed. After a link blip that is
+        enough to make every later request fail — observed here as an hour of
+        `backend authentication request failed` while the very same URL answered
+        curl — and only restarting the process cleared it. One pool per attempt
+        bounds any such state to the attempt that created it.
+        """
+
+        if self._http_client is not None:
+            with suppress(Exception):
+                await self._http_client.aclose()
+            self._http_client = None
+        self._http_client = self._new_http_client(timeout=60)
 
     def _get_http_client(self) -> httpx.AsyncClient | None:
         return self._http_client
