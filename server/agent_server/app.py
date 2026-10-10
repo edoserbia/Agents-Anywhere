@@ -54,6 +54,10 @@ from agent_server.infra.db.migrations import (
 from agent_server.infra.fs_downloads import FsDownloadRelayManager
 from agent_server.infra.ingest_uploads import IngestUploadStore
 from agent_server.infra.redis_coordinator import RedisCoordinator
+from agent_server.infra.request_limits import (
+    MAX_REQUEST_BODY_BYTES,
+    RequestBodyLimitMiddleware,
+)
 from agent_server.infra.request_compression import (
     REQUEST_ENCODINGS,
     RequestDecompressionMiddleware,
@@ -201,6 +205,18 @@ def create_app(
     # timeline is verbose JSON that repeats whole messages on every revision.
     # Added last so it runs first, before any body parsing.
     app.add_middleware(RequestDecompressionMiddleware)
+    # The ingest route buffers a parsed JSON body, and the Connector deployed
+    # today batches by count rather than by size. On a host this small an
+    # unbounded body is an out-of-memory kill, which is a 502 for everyone.
+    request_body_limit = int(
+        os.environ.get(
+            "AGENT_SERVER_MAX_REQUEST_BODY_BYTES", str(MAX_REQUEST_BODY_BYTES)
+        )
+    )
+    # Recorded so a test can assert the ceiling it is actually running under
+    # rather than the default it hopes for.
+    app.state.request_body_limit = request_body_limit
+    app.add_middleware(RequestBodyLimitMiddleware, limit=request_body_limit)
     def ingest_upload_root() -> Path:
         """Where partially received ingest bodies are staged.
 
