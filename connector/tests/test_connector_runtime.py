@@ -3744,3 +3744,74 @@ def test_the_reconnect_loop_rebuilds_the_http_pool_each_attempt():
         assert len(resets) == 3, "every connection attempt must start a new pool"
 
     asyncio.run(exercise())
+
+
+def _proxy_endpoint(client) -> dict:
+    """Where this client would actually send a request.
+
+    Read out of the client's own mounts, so the answer is what httpx uses
+    rather than what the environment currently says.
+    """
+
+    return {
+        str(pattern.pattern): (
+            getattr(transport._pool, "_proxy_url", None).port
+            if getattr(transport._pool, "_proxy_url", None)
+            else None
+        )
+        for pattern, transport in client._mounts.items()
+    }
+
+
+def test_a_reconnect_rereads_the_proxy_configuration(monkeypatch):
+    """The proxy endpoint is frozen into a client when it is built.
+
+    Live incident: an hour of `backend authentication request failed` with an
+    empty message — a timeout — while curl to the same URL answered, cleared
+    only by restarting the process. A proxy that moved or died after the client
+    was built explains all of that: the client keeps dialling the endpoint it
+    captured, so every attempt times out until something builds a new client.
+
+    Driven through the reconnect loop, not the rebuild helper, because the
+    helper alone was already correct when the loop stopped calling it.
+
+    Both spellings are set because they compete on macOS, where getproxies()
+    also mixes in the system configuration.
+    """
+
+    for name in (
+        "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
+        "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    async def exercise():
+        client = BackendRpcClient(
+            ConnectorConfig(
+                "https://server.test", "conn_test", "secret", reconnect_seconds=0
+            ),
+            agent_runtime_providers=(),
+        )
+        seen = []
+
+        async def run_once():
+            seen.append(_proxy_endpoint(client._get_http_client()))
+            if len(seen) == 1:
+                # The proxy moves while the connection is being made.
+                monkeypatch.setenv("http_proxy", "http://127.0.0.1:22222")
+                monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:22222")
+                raise OSError("link down")
+            raise asyncio.CancelledError()
+
+        monkeypatch.setenv("http_proxy", "http://127.0.0.1:11111")
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:11111")
+        client.run_once = run_once
+
+        with pytest.raises(asyncio.CancelledError):
+            await client.run_forever()
+
+        # First attempt used the endpoint captured then; the retry, after the
+        # proxy moved, used the new one instead of the dead one.
+        assert seen == [{"http://": 11111}, {"http://": 22222}]
+
+    asyncio.run(exercise())
