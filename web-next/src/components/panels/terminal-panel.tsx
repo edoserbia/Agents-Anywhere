@@ -14,7 +14,6 @@ import { Separator } from "@/components/ui/separator"
 import { dashboardApi } from "@/features/dashboard/api"
 import type { TerminalView } from "@/features/dashboard/types"
 import { apiPath } from "@/lib/api"
-import { webSocketUrl } from "@/lib/api/stream-url"
 import { cn } from "@/lib/utils"
 
 type TerminalPanelBodyProps = {
@@ -539,9 +538,7 @@ function XtermHost({
       })
       resizeObserver.observe(host)
 
-      socket = new WebSocket(
-        await connectorTerminalStreamUrl(connectorId, terminal.terminalId, token),
-      )
+      socket = new WebSocket(connectorTerminalStreamUrl(connectorId, terminal.terminalId, token))
       socket.onopen = () => {
         if (cancelled) return
         setStatus("open")
@@ -693,14 +690,11 @@ function isTerminalStreamMessage(value: unknown): value is TerminalStreamMessage
   return false
 }
 
-async function connectorTerminalStreamUrl(connectorId: string, terminalId: string, token: string): Promise<string> {
+function connectorTerminalStreamUrl(connectorId: string, terminalId: string, token: string): string {
   const apiBase = process.env.NEXT_PUBLIC_AGENTS_ANYWHERE_API?.replace(/\/$/, "") || ""
   const path = apiPath(`/connectors/${encodeURIComponent(connectorId)}/terminals-v2/${encodeURIComponent(terminalId)}/stream`)
-  // Same origin problem as the session streams: the Desktop shell serves the
-  // renderer from `aa-workbench://web`, which Electron refuses to open a
-  // WebSocket on. Delegate the choice rather than reading `window.location`.
-  const url = new URL(await webSocketUrl(path))
-  if (apiBase) url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+  const url = new URL(path, apiBase || window.location.origin)
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
   url.searchParams.set("token", token)
   url.searchParams.set("fromSeq", "0")
   return url.toString()

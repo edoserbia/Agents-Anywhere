@@ -740,7 +740,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
           "web-dashboard",
         )
         if (cancelled) return
-        socket = new WebSocket(await dashboardApi.dashboardWebSocketUrl(ticket.ticket))
+        socket = new WebSocket(dashboardApi.dashboardWebSocketUrl(ticket.ticket))
         socket.onmessage = (event) => {
           if (cancelled || typeof event.data !== "string") return
           try {

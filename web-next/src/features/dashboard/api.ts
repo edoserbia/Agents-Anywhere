@@ -1,5 +1,4 @@
 import { ApiClient, apiClient, apiPath } from "@/lib/api";
-import { webSocketUrl } from "@/lib/api/stream-url";
 import { shouldAuthorizeDownloadUrl } from "@/lib/api/download-auth";
 import type {
   AdminDashboardOverviewResponse,
@@ -422,14 +421,20 @@ export class DashboardApi {
     );
   }
 
-  async sessionWebSocketUrl(sessionId: string, ticket: string): Promise<string> {
+  sessionWebSocketUrl(sessionId: string, ticket: string): string {
     const path = `${apiPath(`/sessions/${encodeURIComponent(sessionId)}/ws`)}?ticket=${encodeURIComponent(ticket)}`;
-    return webSocketUrl(path);
+    if (typeof window === "undefined") return path;
+    const url = new URL(path, window.location.origin);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return url.toString();
   }
 
-  async dashboardWebSocketUrl(ticket: string): Promise<string> {
+  dashboardWebSocketUrl(ticket: string): string {
     const path = `${apiPath("/dashboard/ws")}?ticket=${encodeURIComponent(ticket)}`;
-    return webSocketUrl(path);
+    if (typeof window === "undefined") return path;
+    const url = new URL(path, window.location.origin);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return url.toString();
   }
 
   connectorFsList(
@@ -1043,5 +1048,3 @@ export class DashboardApi {
 }
 
 export const dashboardApi = new DashboardApi();
-
-export { webSocketUrl } from "@/lib/api/stream-url";

@@ -52,7 +52,6 @@ import type {
   OAuthProviderConfigUpdate,
   ServiceInfo,
 } from "@/features/auth/types"
-import { publicOrigin } from "@/lib/api/stream-url"
 import { cn } from "@/lib/utils"
 import { copyText } from "@/lib/clipboard"
 
@@ -91,6 +90,11 @@ function formatUptime(seconds: number) {
   const days = Math.floor(hours / 24)
   const remHours = hours % 24
   return remHours ? `${days}d ${remHours}h` : `${days}d`
+}
+
+function browserPublicUrl(fallback: string): string {
+  if (typeof window === "undefined") return fallback
+  return window.location.origin.replace(/\/$/, "") || fallback
 }
 
 function webOAuthRedirectUrl(publicUrl: string): string {
@@ -200,7 +204,6 @@ export function ServicePage() {
   const t = useTranslations("pages.service")
   const tCommon = useTranslations("common")
   const [serviceInfo, setServiceInfo] = React.useState<ServiceInfo | null>(null)
-  const [publishedOrigin, setPublishedOrigin] = React.useState<string | null>(null)
   const [settings, setSettings] = React.useState<InstanceSettings | null>(null)
   const [oauthDraft, setOauthDraft] = React.useState<OAuthProviderConfigUpdate>(() => oauthDraftFromConfig(null))
   const [oauthTemplate, setOauthTemplate] = React.useState<OAuthTemplateKey>("custom")
@@ -246,14 +249,6 @@ export function ServicePage() {
   }, [session?.accessToken, t])
 
   React.useEffect(() => load(), [load])
-
-  React.useEffect(() => {
-    let cancelled = false
-    void publicOrigin("").then((resolved) => {
-      if (!cancelled && resolved) setPublishedOrigin(resolved)
-    })
-    return () => { cancelled = true }
-  }, [])
 
   const copy = React.useCallback(async (key: CopyKey, value: string) => {
     setCopied(null)
@@ -347,7 +342,7 @@ export function ServicePage() {
     )
   }
 
-  const publicUrl = publishedOrigin ?? serviceInfo.endpoint
+  const publicUrl = browserPublicUrl(serviceInfo.endpoint)
 
   return (
     <ScrollArea className="@container/page h-full w-full bg-background">
