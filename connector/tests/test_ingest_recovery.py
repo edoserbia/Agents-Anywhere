@@ -478,6 +478,8 @@ def test_a_complete_snapshot_is_never_overtaken_by_the_increments_after_it():
             ingest = ConnectorIngestClient(
                 "https://server.test", token, lambda: http, lambda timeout: http
             )
+            # This test is about order, not about the coalescing window.
+            ingest._timeline_window_seconds = lambda: 0.0
             await ingest.submit_notifications([
                 {"method": "timeline.sync",
                  "params": {"sessionId": "s1", "complete": True, "items": []}},
@@ -925,14 +927,20 @@ def test_a_bypass_list_httpx_cannot_parse_does_not_stop_the_connector(monkeypatc
 def test_a_streaming_reply_does_not_send_every_revision():
     """The dominant uplink cost: a reply re-sent whole as it streams.
 
-    A runtime produces revisions as fast as it can, and each one carries the
-    message's entire text. Sending all of them is what makes a chatty session
-    ask for more uplink than a slow link has — so the newest revision of an item
-    is held for one window and the ones it supersedes are never sent at all.
+    The flush loop is started first and the revisions arrive at the cadence a
+    runtime really produces them. An earlier version of this test submitted
+    everything before starting the loop, so it passed on the per-item slot alone
+    and would not have noticed that the window was never honoured — in
+    production, where the loop is always running, thirty revisions still cost
+    thirty uploads.
+
+    Both halves matter: coalescing without progress would starve the reader, and
+    a stream that never pauses must still be sent.
     """
 
     async def run():
         sent: list[int] = []
+        revisions = 30
 
         async def token(force):
             return "token"
@@ -947,21 +955,23 @@ def test_a_streaming_reply_does_not_send_every_revision():
                 "https://server.test", token, lambda: http, lambda timeout: http
             )
             ingest._timeline_window_seconds = lambda: 0.2
-            for revision in range(1, 31):
+            flusher = asyncio.create_task(ingest.flush_loop())
+            for revision in range(1, revisions + 1):
                 await ingest.submit_notifications([{
                     "method": "timeline.itemUpsert",
                     "params": {"sessionId": "s1",
                                "item": {"id": "reply", "revision": revision}},
                 }])
-                await asyncio.sleep(0.002)
-            flusher = asyncio.create_task(ingest.flush_loop())
-            await ingest.flush_notifications()
+                await asyncio.sleep(1 / 30)
+            await ingest.flush_notifications(timeout=5)
             flusher.cancel()
             await asyncio.gather(flusher, return_exceptions=True)
 
-        # Thirty revisions crossed the wire as one, and the survivor is the last.
-        assert sum(sent) == 1
-        assert sent == [1]
+        # Progress: the reader sees updates while the reply is still streaming.
+        assert len(sent) >= 2, f"starved the reader: {sent}"
+        # Coalescing: far fewer uploads than revisions.
+        assert len(sent) < revisions / 4, f"sent nearly every revision: {sent}"
+        assert all(count == 1 for count in sent), sent
 
     asyncio.run(run())
 

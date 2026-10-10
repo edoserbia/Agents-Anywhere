@@ -269,8 +269,7 @@ class ConnectorIngestClient:
                 if method in TIMELINE_LATEST_METHODS
                 else self._latest_value
             )
-            hold.pop(key, None)
-            hold[key] = entry
+            self._hold_replace(hold, key, entry)
             self._available.set()
             return
         try:
@@ -380,11 +379,7 @@ class ConnectorIngestClient:
                 # The superseded revision is resolved: its content is contained
                 # in the newest one, which is about to take the same slot.
                 self._durable_resolved += 1
-            # Re-insert so the hold stays ordered by when each item was last
-            # touched: the front is the least recently updated, so holding the
-            # window never delays an item that is still streaming.
-            self._latest_timeline.pop(key, None)
-            self._latest_timeline[key] = entry
+            self._hold_replace(self._latest_timeline, key, entry)
             self._durable_submitted += 1
             return
         while True:
@@ -612,14 +607,13 @@ class ConnectorIngestClient:
                 if lane == "queue"
                 else self._latest_timeline[key]
             )
-            held_until = self._held_until()
-            if held_until is not None and entry["seq"] > held_until:
-                # A held entry is still inside its window. Waiting keeps the
-                # Server from applying a later increment before an earlier one,
-                # which for a wholesale snapshot would silently drop it. The
-                # wait is bounded by the window, and a busy item keeps moving to
-                # the back of the hold, so it never blocks the entries behind it
-                # for longer than that.
+            if lane == "latest" and not self._ready(entry):
+                # Still inside its coalescing window. Nothing may pass it, so
+                # the whole flush waits: a later increment overtaking an earlier
+                # one would be silently dropped when a wholesale snapshot lands.
+                # The wait is bounded by one window, and an item that keeps
+                # streaming moves to the back of the hold, so it never blocks
+                # what is behind it for longer than that.
                 break
             if self._inflight and not self._fits(entry, budget):
                 break
@@ -640,21 +634,34 @@ class ConnectorIngestClient:
             taken += 1
         return taken
 
-    def _held_until(self) -> int | None:
-        """The lowest admission order that is still inside its window.
+    def _hold_replace(self, hold: dict[str, Any], key: str, entry: dict[str, Any]) -> None:
+        """Put a newer revision in a hold slot, keeping the slot's deadline.
 
-        Anything admitted after it must wait too, or it would overtake. Only
-        windowed entries ever hold, so this is the front of the hold in
-        practice, and the bound is one window. `None` means nothing is held.
+        Re-inserting moves the entry to the back, so the hold stays ordered by
+        when each item was last touched and a busy item never delays a quiet one
+        behind it. The deadline, however, belongs to the *first* revision of the
+        window: resetting it on every revision would mean a stream that never
+        pauses is never sent, which is worse than sending too much — the reader
+        would see nothing at all until the reply stopped.
         """
 
-        deadline = time.monotonic()
-        held = [
-            entry["seq"]
-            for entry in self._latest_timeline.values()
-            if entry.get("notBefore") is not None and entry["notBefore"] > deadline
-        ]
-        return min(held) if held else None
+        live = hold.get(key)
+        if live is not None and live.get("notBefore") is not None:
+            entry["notBefore"] = live["notBefore"]
+        hold.pop(key, None)
+        hold[key] = entry
+
+    def _ready(self, entry: dict[str, Any]) -> bool:
+        """Whether a held timeline entry has waited out its coalescing window.
+
+        Without this the hold collapses revisions only while the flush loop is
+        busy: with the loop running — which is the normal case — each revision
+        was collected the moment it arrived, so a stream that produced thirty
+        revisions still cost thirty uploads.
+        """
+
+        not_before = entry.get("notBefore")
+        return not_before is None or time.monotonic() >= not_before
 
     def _fits(self, entry: dict[str, Any], budget: int) -> bool:
         return entry["size"] <= budget
