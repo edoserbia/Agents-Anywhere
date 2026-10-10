@@ -69,8 +69,16 @@ services:
   server-next:
     # Bounded so a runaway process is killed here rather than triggering a
     # host-wide OOM kill, which would take the co-located VPN down too.
-    mem_limit: 900m
-    memswap_limit: 900m
+    #
+    # 900m was measured to be too small. The kernel killed this container on
+    # `CONSTRAINT_MEMCG` at anon-rss ~730 MB every five to twelve minutes, and
+    # every kill is a 502 for every client until it comes back — 8 outages of
+    # ~42 seconds in a 30 minute window. The host has 3911 MB with 2 GB of swap
+    # and ~2868 MB available, so the ceiling was the only thing in short supply.
+    # The ingest body ceiling and the Connector's byte budget cut the spike
+    # itself; this stops the container dying while they take effect.
+    mem_limit: 1600m
+    memswap_limit: 1600m
     image: agents-anywhere-server:postgres
     restart: unless-stopped
     depends_on:
