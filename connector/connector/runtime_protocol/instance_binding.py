@@ -200,6 +200,10 @@ class RuntimeInstanceHost(RuntimeHostClient):
         self._validate_native_runtime(runtime)
         await self.base.publish_runtime_notifications(runtime, notifications, runtime_id=self.instance.runtime_id)
 
+    async def flush_runtime_notifications(self) -> None:
+        self._validate_native_runtime(self.instance.runtime_type)
+        await self.base.flush_runtime_notifications()
+
     async def session_meta_upsert(
         self,
         session_id: str,

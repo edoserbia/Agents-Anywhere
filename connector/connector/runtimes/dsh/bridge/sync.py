@@ -43,6 +43,14 @@ _DURABLE_NOTIFICATIONS = {
 }
 
 
+# How many received operations may wait for the ordered worker before the feed
+# stops acknowledging. The bridge flushes thirty batches a second and gives a
+# batch sixty seconds; anything the Connector accepts must be processed long
+# before that, so the queue is what turns "the Connector is behind" into
+# backpressure on the peer instead of unbounded memory here.
+DEFAULT_STAGING_LIMIT = 4096
+
+
 def _checkpoint(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
@@ -106,6 +114,11 @@ class SyncRelay:
         self.loaded_checkpoint: dict[str, Any] | None = None
         self.inventory_grace_seconds = inventory_grace_seconds
         self._grace_task: asyncio.Task[None] | None = None
+        self._staging: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
+            maxsize=DEFAULT_STAGING_LIMIT
+        )
+        self._staging_task: asyncio.Task[None] | None = None
+        self._staging_error: BaseException | None = None
 
     def start(self) -> None:
         self.task = asyncio.create_task(self.run(), name="dsh-event-sync")
@@ -188,8 +201,14 @@ class SyncRelay:
                 checkpoint = _checkpoint(op.get("checkpoint"))
                 if checkpoint is None:
                     raise ValueError("Invalid DSH checkpoint")
-                # All preceding history operations were synchronously ingested.
-                # The Host's periodic/final flush uses the same JSON as scanners.
+                # All preceding history operations were submitted in order, and
+                # this barrier is what makes the recorded sequence honest: the
+                # Server now holds them, so replaying from this checkpoint can
+                # never skip an item the platform never received. The Host
+                # publishes without waiting for the upload, because a feed that
+                # acknowledged its peer only after a remote round trip could not
+                # keep up with the peer's flush cadence at all.
+                await self.host.flush_runtime_notifications()
                 await self.host.sync_state_write(key, checkpoint)
         elif kind == "snapshot.begin":
             self.clear_snapshot()
@@ -373,6 +392,21 @@ class SyncRelay:
     async def consume(self) -> None:
         # Subscription replaces only this feed. Concurrent RPC requests keep
         # their connection and are never cancelled by an ingest/sync failure.
+        #
+        # Received operations are handed to one ordered worker and acknowledged
+        # as soon as they are accepted, instead of being processed inside this
+        # loop. The bridge is stop-and-wait: it will not send batch N+1 until
+        # batch N is acknowledged, so doing the upload here made the whole live
+        # stream advance at one remote round trip per batch. The bridge wants
+        # thirty batches a second; a round trip bought two. Its event buffer
+        # then overflowed, the stream failed, and every session was recalibrated
+        # — which is what users saw as activity arriving minutes late or not at
+        # all. Durability is unchanged: the worker still processes operations in
+        # order, and a checkpoint waits for its data before it is recorded.
+        self._staging_error = None
+        self._staging_task = asyncio.create_task(
+            self._drain_operations(), name="dsh-sync-operations"
+        )
         try:
             # Announce only once per instance: a replacement feed must not take
             # working sessions offline on every reconnect.
@@ -390,6 +424,8 @@ class SyncRelay:
             while True:
                 batch = await self.queue.get()
                 if batch is None:
+                    if self._staging_error is not None:
+                        raise self._staging_error
                     raise RuntimeError("The DSH sync stream needs a new subscription")
                 if batch.get("streamId") != stream_id:
                     continue
@@ -398,15 +434,67 @@ class SyncRelay:
                 if batch.get("projectionVersion") != projection_version or not isinstance(batch.get("operations"), list) or not batch["operations"]:
                     raise ValueError("Invalid DSH event batch")
                 self.loaded_checkpoint = None
+                # A checkpoint load only reads local state, and its result has
+                # to travel back inside this batch's acknowledgement, so it is
+                # served here rather than queued behind the uploads.
+                served = []
                 for operation in batch["operations"]:
-                    await self.operation(operation)
+                    if operation.get("kind") in {"checkpoint.load", "checkpoint.delete"}:
+                        await self.operation(operation)
+                        served.append(operation)
+                    else:
+                        await self._stage(operation)
                 ack = {"streamId": stream_id, "batchSeq": expected}
-                if any(op.get("kind") == "checkpoint.load" for op in batch["operations"]):
+                if any(op.get("kind") == "checkpoint.load" for op in served):
                     ack["checkpoint"] = self.loaded_checkpoint
                 await self.client.request("runtime.sync.ack", ack)
                 expected += 1
         finally:
+            await self._stop_staging()
             self.clear_snapshot()
+
+    async def _stage(self, operation: dict[str, Any]) -> None:
+        if self._staging_error is not None:
+            raise self._staging_error
+        # `put` waits when the worker is behind, which withholds the
+        # acknowledgement and lets the bridge's own timeout drive recovery.
+        await self._staging.put(operation)
+        if self._staging_error is not None:
+            raise self._staging_error
+
+    async def _drain_operations(self) -> None:
+        try:
+            while True:
+                operation = await self._staging.get()
+                try:
+                    await self.operation(operation)
+                finally:
+                    self._staging.task_done()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as error:  # noqa: BLE001 - surfaced to the feed loop
+            # The feed must not keep acknowledging batches whose operations are
+            # no longer being applied; resubscribing is the recovery.
+            self._staging_error = error
+            logger.warning(
+                "DSH sync operation failed; resubscribing for history calibration ({})",
+                type(error).__name__,
+            )
+            # `restart` wakes a feed that is waiting for its next batch. Keep
+            # the error itself so the feed reports the real cause.
+            while not self.queue.empty():
+                self.queue.get_nowait()
+            with suppress(asyncio.QueueFull):
+                self.queue.put_nowait(None)
+
+    async def _stop_staging(self) -> None:
+        task, self._staging_task = self._staging_task, None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        while not self._staging.empty():
+            self._staging.get_nowait()
+            self._staging.task_done()
 
 
 def object_bytes(value: Any) -> int:

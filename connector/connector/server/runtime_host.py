@@ -44,6 +44,7 @@ class ConnectorRuntimeHost(RuntimeHostClient):
         attachment_downloader: AttachmentDownloader,
         sync_state_store: SyncStateStore | None = None,
         ingest_notifications: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
+        flush_notifications: Callable[[], Awaitable[None]] | None = None,
         *,
         defer_payload_projection: bool = False,
     ) -> None:
@@ -53,6 +54,7 @@ class ConnectorRuntimeHost(RuntimeHostClient):
         self._sync_state_store = sync_state_store
         self._memory_sync_state: dict[str, Mapping[str, Any]] = {}
         self._ingest_notifications = ingest_notifications
+        self._flush_notifications = flush_notifications
         self._defer_payload_projection = defer_payload_projection
         self._runtime_storage = RuntimeStorageManager(sync_state_store) if isinstance(sync_state_store, JsonSyncStateStore) else None
         self._runtime_kv = None
@@ -88,6 +90,19 @@ class ConnectorRuntimeHost(RuntimeHostClient):
             params = {**notice["params"], "runtime": runtime, "runtimeId": runtime_id or runtime}
             bound.append({"method": notice["method"], "params": server_payload_without_turn_data(params)})
         await self._ingest_notifications(bound)
+
+    async def flush_runtime_notifications(self) -> None:
+        """Wait until every submitted runtime notification reached the Server.
+
+        `publish_runtime_notifications` promises storage without performing the
+        upload. A caller that is about to record "this data is safe" — a sync
+        checkpoint — must pass this barrier first, so the recorded sequence
+        never runs ahead of the data it describes.
+        """
+
+        if self._flush_notifications is None:
+            raise RuntimeError("Synchronous notification ingestion is unavailable")
+        await self._flush_notifications()
 
     @property
     def connector_id(self) -> str:

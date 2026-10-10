@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import zlib
 import hashlib
 import os
 import time
@@ -21,6 +22,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from loguru import logger
+from pydantic import ValidationError
 from starlette.requests import HTTPConnection
 
 from agent_server.core.auth import (
@@ -32,6 +34,16 @@ from agent_server.core.models import (
     ConnectorAuthResponse,
     ConnectorIngestRequest,
     ConnectorIngestResponse,
+)
+from agent_server.infra.ingest_uploads import (
+    IngestUploadConflict,
+    IngestUploadNotFound,
+    IngestUploadStore,
+    IngestUploadTooLarge,
+)
+from agent_server.infra.request_compression import (
+    REQUEST_ENCODINGS,
+    decompress_request_body,
 )
 from agent_server.deps import (
     get_attachment_service,
@@ -438,13 +450,165 @@ async def connector_ingest(
     connector_id = _access_token_connector_id(authorization)
     async with db.connector_lifecycle(connector_id):
         await _require_active_connector(authorization, db)
+        return await _apply_ingest(payload, connector_id, ingest_service)
+
+
+async def _apply_ingest(
+    payload: ConnectorIngestRequest,
+    connector_id: str,
+    ingest_service: ConnectorIngestService,
+) -> ConnectorIngestResponse:
+    """Apply one ingest payload, however it reached the Server."""
+
+    try:
+        return await ingest_service.ingest(connector_id=connector_id, payload=payload)
+    except NotificationValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+
+
+def get_ingest_uploads(request: Request) -> "IngestUploadStore":
+    return request.app.state.ingest_uploads
+
+
+@router.post("/connector/ingest/uploads")
+async def connector_ingest_upload_create(
+    authorization: str = Header(..., alias="Authorization"),
+    db: Store = Depends(get_store),
+    uploads: "IngestUploadStore" = Depends(get_ingest_uploads),
+    upload_encoding: str | None = Header(None, alias="X-Upload-Encoding"),
+) -> dict[str, Any]:
+    """Open a staged transfer for a body too large to risk in one request.
+
+    The body's encoding is named in `X-Upload-Encoding` rather than
+    `Content-Encoding`: this request has no body of its own, and
+    `Content-Encoding` describes the body it does carry — a request
+    decompression middleware is entitled to consume it.
+    """
+
+    connector_id = await _require_active_connector(authorization, db)
+    encoding = (upload_encoding or "").strip().lower() or None
+    if encoding is not None and encoding not in REQUEST_ENCODINGS:
+        raise HTTPException(status_code=415, detail="unsupported content encoding")
+    handle = await asyncio.to_thread(uploads.create, connector_id, encoding)
+    return {"uploadId": handle.upload_id, "receivedBytes": handle.received_bytes}
+
+
+@router.get("/connector/ingest/uploads/{upload_id}")
+async def connector_ingest_upload_status(
+    upload_id: str,
+    authorization: str = Header(..., alias="Authorization"),
+    db: Store = Depends(get_store),
+    uploads: "IngestUploadStore" = Depends(get_ingest_uploads),
+) -> dict[str, Any]:
+    """Report how much of this transfer the Server already holds.
+
+    A Connector whose request failed mid-body asks instead of guessing, so it
+    resumes at the last acknowledged offset.
+    """
+
+    connector_id = await _require_active_connector(authorization, db)
+    try:
+        handle = await asyncio.to_thread(uploads.received, connector_id, upload_id)
+    except IngestUploadNotFound as exc:
+        raise HTTPException(status_code=404, detail="unknown upload") from exc
+    return {"uploadId": handle.upload_id, "receivedBytes": handle.received_bytes}
+
+
+@router.put("/connector/ingest/uploads/{upload_id}")
+async def connector_ingest_upload_append(
+    upload_id: str,
+    request: Request,
+    authorization: str = Header(..., alias="Authorization"),
+    db: Store = Depends(get_store),
+    uploads: "IngestUploadStore" = Depends(get_ingest_uploads),
+    upload_offset: str = Header("0", alias="X-Upload-Offset"),
+) -> dict[str, Any]:
+    """Append one piece of a staged body."""
+
+    connector_id = await _require_active_connector(authorization, db)
+    try:
+        offset = int(upload_offset)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid upload offset") from exc
+    chunk = await request.body()
+    try:
+        handle = await asyncio.to_thread(
+            uploads.append, connector_id, upload_id, offset, chunk
+        )
+    except IngestUploadNotFound as exc:
+        raise HTTPException(status_code=404, detail="unknown upload") from exc
+    except IngestUploadConflict as exc:
+        # Tell the sender where to continue instead of making it restart.
+        raise HTTPException(
+            status_code=409, detail={"receivedBytes": exc.received_bytes}
+        ) from exc
+    except IngestUploadTooLarge as exc:
+        await asyncio.to_thread(uploads.discard, connector_id, upload_id)
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    return {"uploadId": handle.upload_id, "receivedBytes": handle.received_bytes}
+
+
+@router.delete("/connector/ingest/uploads/{upload_id}", status_code=204)
+async def connector_ingest_upload_discard(
+    upload_id: str,
+    authorization: str = Header(..., alias="Authorization"),
+    db: Store = Depends(get_store),
+    uploads: "IngestUploadStore" = Depends(get_ingest_uploads),
+) -> Response:
+    """Abandon a staged transfer without applying it."""
+
+    connector_id = await _require_active_connector(authorization, db)
+    try:
+        await asyncio.to_thread(uploads.discard, connector_id, upload_id)
+    except IngestUploadNotFound as exc:
+        raise HTTPException(status_code=404, detail="unknown upload") from exc
+    return Response(status_code=204)
+
+
+@router.post(
+    "/connector/ingest/uploads/{upload_id}/commit",
+    response_model=ConnectorIngestResponse,
+)
+async def connector_ingest_upload_commit(
+    upload_id: str,
+    authorization: str = Header(..., alias="Authorization"),
+    db: Store = Depends(get_store),
+    ingest_service: ConnectorIngestService = Depends(get_connector_ingest_service),
+    uploads: "IngestUploadStore" = Depends(get_ingest_uploads),
+) -> ConnectorIngestResponse:
+    """Apply a fully staged body exactly as `/connector/ingest` would."""
+
+    connector_id = await _require_active_connector(authorization, db)
+    try:
+        body, encoding = await asyncio.to_thread(uploads.read, connector_id, upload_id)
+    except IngestUploadNotFound as exc:
+        raise HTTPException(status_code=404, detail="unknown upload") from exc
+    await asyncio.to_thread(uploads.discard, connector_id, upload_id)
+    if encoding is not None:
         try:
-            return await ingest_service.ingest(connector_id=connector_id, payload=payload)
-        except NotificationValidationError as exc:
+            body = decompress_request_body(encoding, body)
+        except (zlib.error, ValueError) as exc:
             raise HTTPException(
-                status_code=400,
-                detail={"code": exc.code, "message": exc.message},
+                status_code=400, detail="invalid compressed upload body"
             ) from exc
+    try:
+        payload = ConnectorIngestRequest.model_validate_json(body)
+    except ValidationError:
+        # Not `exc.errors()`: those carry the raw body in their `input` field,
+        # which is bytes and cannot be serialized into an error response — so
+        # reporting the failure would itself fail, as a 500.
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_ingest_body",
+                "message": "the staged body is not a valid ingest payload",
+            },
+        ) from None
+    async with db.connector_lifecycle(connector_id):
+        return await _apply_ingest(payload, connector_id, ingest_service)
 
 
 @router.get("/connector/sessions/{session_id}/attachments/{file_id}/content")

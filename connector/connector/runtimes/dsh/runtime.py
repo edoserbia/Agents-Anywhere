@@ -21,6 +21,8 @@ from connector.runtime_protocol import (
     RuntimeUpstreamError,
     SessionMeta,
     SessionNotice,
+    SessionSourceObservation,
+    SessionSourceState,
     SessionState,
 )
 from connector.runtime_protocol.host import RuntimeHostClient
@@ -255,14 +257,33 @@ class DshRuntime(AgentRuntime):
                 external_session_id and payload.get("externalSessionId") != external_session_id
             ):
                 raise RuntimeUpstreamError("DSH source observation returned a different session")
-            # Wait for ingestion before returning session.state. The server's
-            # detail snapshot then reads the fresh source fact from its database.
-            await self.host.publish_runtime_notifications("dsh", [{
-                "method": "session.source.updated", "params": {
-                    "sessionId": session_id, "externalSessionId": payload.get("externalSessionId"),
-                    **source, "observationOrigin": "operation",
-                },
-            }])
+            # Publish the observation as the latest-value fact it is, through the
+            # typed notification path — never the durable ingest path.
+            #
+            # `publish_runtime_notifications` is synchronous by design: a
+            # checkpointed feed must not acknowledge a batch before it is stored.
+            # That path first drains the whole pending upload backlog while
+            # holding the one POST lock, and a DSH transcript is megabytes. This
+            # read is the Server's gate before it accepts a message, so waiting
+            # there spends the Server's 10s budget on someone else's upload and
+            # surfaces to users as "runtime did not report its state in time" —
+            # with the message never sent. `session.source.updated` is
+            # latest-wins, so a newer observation makes this one worthless and
+            # durability buys nothing: the WebSocket carries it in the healthy
+            # case, and the bounded queue holds the newest one otherwise.
+            await self.host.session_source_update(
+                SessionSourceObservation(
+                    session_id=session_id,
+                    external_session_id=payload.get("externalSessionId"),
+                    runtime="dsh",
+                    state=SessionSourceState(
+                        availability=source.get("availability"),
+                        reason=source.get("reason"),
+                        observed_at=source.get("observedAt"),
+                        observation_origin="operation",
+                    ),
+                )
+            )
         return state
 
     async def get_session_capabilities(

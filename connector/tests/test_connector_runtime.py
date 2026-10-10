@@ -1135,6 +1135,24 @@ def test_connector_coalesces_duplicate_timeline_upserts_within_batch() -> None:
     assert coalesced[2]["params"]["item"] == {"id": "item_1", "revision": 2}
 
 
+def test_connector_coalesces_an_older_queued_revision_after_a_newer_live_revision() -> None:
+    notifications = [
+        {
+            "method": "timeline.itemUpsert",
+            "params": {"sessionId": "sess_1", "item": {"id": "item_1", "updatedSeq": 5}},
+        },
+        {
+            "method": "timeline.itemUpsert",
+            "params": {"sessionId": "sess_1", "item": {"id": "item_1", "updatedSeq": 4}},
+        },
+    ]
+
+    coalesced = coalesce_timeline_item_upserts(notifications)
+
+    assert len(coalesced) == 1
+    assert coalesced[0]["params"]["item"]["updatedSeq"] == 5
+
+
 def test_connector_projects_inventory_capabilities_to_protocol_ids() -> None:
     payload = protocol_capabilities_from_runtime_types(
         {

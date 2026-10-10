@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import hashlib
+import json
+import time
+from collections import deque
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from typing import Any
 
 import httpx
@@ -19,6 +25,12 @@ from connector.server.urls import api_v2_url
 FLUSH_WINDOW_SECONDS = 0.02
 FLUSH_MAX = 64
 
+# How many bytes one ingest request may carry. A batch that fails is re-sent
+# whole, so an unbounded request turns one bad moment on a slow link into a
+# full restart of whatever it held. Bounding it makes every successful request
+# durable progress and every retry small.
+FLUSH_MAX_BYTES = 256 * 1024
+
 # How long a producer may wait for room in the queue before the notification is
 # dropped. The queue is drained by HTTP uploads that share the link with
 # everything else, so a large history upload can leave it full for minutes. A
@@ -27,6 +39,52 @@ FLUSH_MAX = 64
 # — the read the Server performs before it will accept a message. Blocking there
 # is what surfaced to users as "runtime did not report its state in time".
 DEFAULT_ENQUEUE_TIMEOUT_SECONDS = 2.0
+
+# How long one upload may spend establishing its connection. The upload budget
+# below is deliberately generous because a whole runtime history can take
+# minutes to push up an asymmetric link, but it is applied to every phase — so a
+# blackholed route would hold the single POST lock for that whole budget, and
+# every other producer waits behind it. Opening a connection is never
+# legitimately slow; only the body transfer is.
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
+
+# How many order-bearing notifications may wait for an upload before their
+# producer is made to wait instead. The durable lane exists so a runtime feed
+# acknowledges its peer on local receipt rather than on a remote round trip; the
+# bound is what keeps that from becoming unbounded memory while the link is
+# down. Waiting is the honest backpressure here — the producer is a feed that
+# has not acknowledged the data yet, so slowing it down loses nothing.
+DEFAULT_DURABLE_LIMIT = 8192
+
+# How long a durability barrier may wait before it reports failure. The DSH
+# bridge gives a batch 60s before it tears the stream down, so a barrier that
+# outlived that would only delay the same recovery.
+DEFAULT_DURABLE_FLUSH_TIMEOUT_SECONDS = 45.0
+
+# Bodies below this are not worth compressing: gzip costs CPU and framing bytes,
+# and the small live notifications are the ones latency depends on.
+GZIP_MIN_BYTES = 4096
+
+# How long the newest revision of a timeline entry is held before it is sent.
+# A streaming reply is re-sent whole on every revision — as fast as the runtime
+# produces them — so this window is what turns thirty uplink copies of one
+# message into a few, at the cost of that much delay before the newest text
+# appears. It applies per timeline item, and an item that keeps streaming keeps
+# moving to the back of the hold, so nothing else waits behind it.
+DEFAULT_TIMELINE_WINDOW_SECONDS = 0.4
+
+# How long a capability answer is trusted before the Server is asked again, so a
+# Server upgrade is picked up without restarting every Connector.
+INGEST_CAPABILITY_TTL_SECONDS = 600.0
+
+# Bodies above this are staged and resumed rather than risked in one request.
+# A complete timeline snapshot cannot be split — the Server replaces the whole
+# timeline with it — so a transfer interrupted at 90% has nothing to show for
+# itself unless the Server kept the bytes.
+RESUMABLE_UPLOAD_MIN_BYTES = 512 * 1024
+
+# How much of a staged body travels per request.
+RESUMABLE_UPLOAD_CHUNK_BYTES = 256 * 1024
 
 TIMELINE_SYNC = "timeline.sync"
 
@@ -38,6 +96,18 @@ TIMELINE_SYNC = "timeline.sync"
 COALESCE_LATEST_METHODS = frozenset(
     {"session.state.updated", "session.source.updated"}
 )
+
+# Coalesced methods that carry timeline content rather than a restated value.
+# Their relative order is data, so they are never allowed to overtake one
+# another; the values above are the opposite and always go first.
+TIMELINE_LATEST_METHODS = frozenset({TIMELINE_SYNC, "timeline.itemUpsert"})
+
+# Coalesced timeline methods whose newest revision is worth holding briefly.
+# A streaming reply is re-sent whole on every revision, so waiting one window
+# collapses many uplink copies into one. A complete snapshot is excluded: it is
+# a wholesale replacement, so letting an increment overtake it — which holding it
+# would allow — would drop that increment when the snapshot lands.
+WINDOWED_TIMELINE_METHODS = frozenset({"timeline.itemUpsert"})
 
 AccessTokenProvider = Callable[[bool], Awaitable[str]]
 HttpClientGetter = Callable[[], httpx.AsyncClient | None]
@@ -60,7 +130,9 @@ class ConnectorIngestClient:
         self._access_token_provider = access_token_provider
         self._http_client_getter = http_client_getter
         self._http_client_factory = http_client_factory
-        self._notify_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1024)
+        self._notify_queue: deque[dict[str, Any]] = deque()
+        self._queue_room = asyncio.Event()
+        self._queue_room.set()
         self._inflight: list[dict[str, Any]] = []
         self._retry_delay = 1.0
         self._closed: Exception | None = None
@@ -68,7 +140,72 @@ class ConnectorIngestClient:
         self._available = asyncio.Event()
         self._posting = False
         self._dropped = 0
-        self._latest: dict[str, dict[str, Any]] = {}
+        # The latest-wins hold is split by ordering domain. A value restates one
+        # fact — the newest supersedes every older one — so it never needs to
+        # wait and is always collected first. A coalesced timeline entry is part
+        # of one ordered stream and is collected strictly by admission order,
+        # because acknowledging a batch locally would otherwise let its
+        # increments overtake a complete snapshot still queued ahead of them.
+        self._latest_value: dict[str, dict[str, Any]] = {}
+        self._latest_timeline: dict[str, dict[str, Any]] = {}
+        # Every notification carries its admission order.
+        self._admission = 0
+        # Ordered, lossless lane for order-bearing notifications. Never
+        # coalesced and never dropped: the runtime feed that produced them is
+        # told they are safe, so only their upload may release that promise.
+        self._durable: deque[dict[str, Any]] = deque()
+        self._durable_inflight = 0
+        self._durable_submitted = 0
+        self._durable_resolved = 0
+        self._durable_error: Exception | None = None
+        self._durable_room = asyncio.Event()
+        self._durable_room.set()
+        self._durable_progress = asyncio.Event()
+        # Set when the timeline hold has room again.
+        self._timeline_room = asyncio.Event()
+        self._timeline_room.set()
+        # Resolved on first use from the Server's own advertisement.
+        self._encodings: frozenset[str] | None = None
+        self._capabilities: dict[str, Any] = {}
+        # Staged transfers by body digest, so a retry of the same batch resumes
+        # the transfer it already began instead of opening a new one.
+        self._staged_uploads: dict[str, str] = {}
+        self._staged_offsets: dict[str, int] = {}
+        self._encodings_checked_at = 0.0
+
+    def _admit(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        durable: bool = False,
+    ) -> dict[str, Any]:
+        """Take one notification, with its wire form and exact size.
+
+        The encoded form is kept because it is needed twice — once to decide how
+        much may travel in one request, and once to build that request — and a
+        large snapshot should not be serialized twice to answer both.
+
+        `durable` marks a notification whose producer has been promised storage,
+        so its resolution is what a durability barrier waits for.
+        """
+
+        self._admission += 1
+        body = json.dumps(
+            {"method": method, "params": params}, ensure_ascii=False
+        ).encode("utf-8")
+        entry: dict[str, Any] = {
+            "method": method,
+            "params": params,
+            "seq": self._admission,
+            "body": body,
+            "size": len(body),
+        }
+        if durable:
+            entry["durable"] = True
+        if method in WINDOWED_TIMELINE_METHODS:
+            entry["notBefore"] = time.monotonic() + self._timeline_window_seconds()
+        return entry
 
     @property
     def dropped(self) -> int:
@@ -85,16 +222,22 @@ class ConnectorIngestClient:
         return (
             self._posting
             or bool(self._inflight)
-            or bool(self._latest)
-            or not self._notify_queue.empty()
+            or bool(self._latest_value)
+            or bool(self._latest_timeline)
+            or bool(self._durable)
+            or bool(self._notify_queue)
         )
 
     def close(self, error: Exception | None = None) -> None:
         self._closed = error or RuntimeError("connector ingest is closed")
-        self._latest.clear()
+        self._latest_value.clear()
+        self._latest_timeline.clear()
         # Wake blocked producers. They check _closed again after admission.
-        while not self._notify_queue.empty():
-            self._notify_queue.get_nowait()
+        self._notify_queue.clear()
+        self._queue_room.set()
+        self._durable_room.set()
+        self._durable_progress.set()
+        self._timeline_room.set()
 
 
     async def enqueue(self, method: str, params: dict[str, Any]) -> None:
@@ -112,14 +255,22 @@ class ConnectorIngestClient:
         if self._closed is not None:
             raise self._closed
         key = _coalesce_key(method, params)
+        entry = self._admit(method, params)
         if key is not None:
-            self._latest[key] = {"method": method, "params": params}
+            # Re-insert so the hold stays ordered by admission: a replacement
+            # takes its newest position rather than the superseded one's.
+            hold = (
+                self._latest_timeline
+                if method in TIMELINE_LATEST_METHODS
+                else self._latest_value
+            )
+            hold.pop(key, None)
+            hold[key] = entry
             self._available.set()
             return
-        entry = {"method": method, "params": params}
         try:
             await asyncio.wait_for(
-                self._notify_queue.put(entry),
+                self._queue_put(entry),
                 timeout=self._enqueue_timeout_seconds(),
             )
         except TimeoutError:
@@ -129,7 +280,7 @@ class ConnectorIngestClient:
                     "connector ingest queue is full; dropped notification method={} dropped_total={} pending={}",
                     method,
                     self._dropped,
-                    self._notify_queue.qsize(),
+                    len(self._notify_queue),
                 )
             return
         self._available.set()
@@ -137,11 +288,200 @@ class ConnectorIngestClient:
             self.close(self._closed)
             raise self._closed
 
+    async def _queue_put(self, entry: dict[str, Any]) -> None:
+        while len(self._notify_queue) >= self._queue_limit():
+            self._queue_room.clear()
+            if len(self._notify_queue) < self._queue_limit():
+                break
+            await self._queue_room.wait()
+        self._notify_queue.append(entry)
+
+    def _queue_limit(self) -> int:
+        import os
+
+        configured = os.environ.get("AA_CONNECTOR_INGEST_QUEUE_LIMIT")
+        if configured:
+            try:
+                return max(1, int(configured))
+            except ValueError:
+                pass
+        return 1024
+
     async def ingest_notifications(self, notifications: list[dict[str, Any]]) -> None:
         """Send a batch synchronously, bypassing the flush queue."""
         if not notifications:
             return
-        await self.post_batch(list(notifications))
+        await self.post_batch([
+            self._admit(entry["method"], entry["params"]) for entry in notifications
+        ])
+
+    async def submit_notifications(self, notifications: list[dict[str, Any]]) -> None:
+        """Take responsibility for a batch without waiting for the upload.
+
+        The caller is a runtime feed that is about to acknowledge its own peer.
+        Waiting for a remote round trip here is what capped the DSH bridge at a
+        couple of batches per second against a peer that flushes thirty times a
+        second: the peer's event buffer filled, the stream failed, and every
+        session was recalibrated in a loop. Accepting the batch locally and
+        uploading it from the background flush loop breaks that coupling while
+        still keeping strict order — the lane is a FIFO and is drained before
+        every other source, so a complete snapshot is never overtaken by
+        incremental items that followed it.
+
+        Durability is unchanged in substance: the sequence that a caller
+        protects only advances once this data reaches the Server, which is what
+        `flush_notifications` is for.
+        """
+
+        if not notifications:
+            return
+        for entry in notifications:
+            await self._durable_admit(
+                self._admit(entry["method"], entry["params"], durable=True)
+            )
+        self._available.set()
+
+    async def _durable_admit(self, entry: dict[str, Any]) -> None:
+        """Accept one order-bearing notification.
+
+        Timeline entries go to the coalescing hold rather than the queue: a
+        streaming reply is re-sent whole on every revision, so holding the
+        newest revision of an item for a moment is what keeps a chatty runtime
+        from asking for more uplink than the link has. Everything else keeps
+        strict FIFO order in the queue, so a complete snapshot is never
+        overtaken by the increments that followed it.
+        """
+
+        key = _coalesce_key(entry["method"], entry["params"])
+        if key is not None and entry["method"] in WINDOWED_TIMELINE_METHODS:
+            # One slot per timeline item, so the hold is already small; the
+            # bound is what keeps a runtime that keeps inventing item ids from
+            # growing it without limit. Waiting, rather than dropping, is the
+            # only safe answer for data a producer was told we would store.
+            while (
+                len(self._latest_timeline) >= self._durable_limit()
+                and key not in self._latest_timeline
+            ):
+                self._raise_if_durable_failed()
+                self._timeline_room.clear()
+                if (
+                    len(self._latest_timeline) < self._durable_limit()
+                    or key in self._latest_timeline
+                ):
+                    break
+                await self._timeline_room.wait()
+            live = self._latest_timeline.get(key)
+            if live is not None and live.get("durable"):
+                # The superseded revision is resolved: its content is contained
+                # in the newest one, which is about to take the same slot.
+                self._durable_resolved += 1
+            # Re-insert so the hold stays ordered by when each item was last
+            # touched: the front is the least recently updated, so holding the
+            # window never delays an item that is still streaming.
+            self._latest_timeline.pop(key, None)
+            self._latest_timeline[key] = entry
+            self._durable_submitted += 1
+            return
+        while True:
+            self._raise_if_durable_failed()
+            if len(self._durable) < self._durable_limit():
+                break
+            self._durable_room.clear()
+            if len(self._durable) < self._durable_limit():
+                break
+            await self._durable_room.wait()
+        self._durable.append(entry)
+        self._durable_submitted += 1
+
+    def _raise_if_durable_failed(self) -> None:
+        if self._closed is not None:
+            raise self._closed
+        if self._durable_error is not None:
+            raise self._durable_error
+
+    async def flush_notifications(
+        self, timeout: float | None = None
+    ) -> None:
+        """Wait until everything submitted so far has reached the Server.
+
+        This is the durability barrier a checkpoint must pass before it is
+        allowed to record that its data is safe.
+        """
+
+        target = self._durable_submitted
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + (
+            self._durable_flush_timeout_seconds() if timeout is None else timeout
+        )
+        while self._durable_resolved < target:
+            self._raise_if_durable_failed()
+            self._durable_progress.clear()
+            if self._durable_resolved >= target:
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "connector notification durability barrier timed out"
+                )
+            try:
+                await asyncio.wait_for(self._durable_progress.wait(), remaining)
+            except TimeoutError as exc:
+                self._raise_if_durable_failed()
+                raise TimeoutError(
+                    "connector notification durability barrier timed out"
+                ) from exc
+
+    def _advance_durable(self) -> None:
+        """Record that the in-flight batch reached the Server."""
+
+        if not self._durable_inflight:
+            return
+        self._durable_resolved += self._durable_inflight
+        self._durable_inflight = 0
+        self._durable_progress.set()
+
+    def _fail_durable(self, error: Exception) -> None:
+        """The Server refused data a caller was told we would store."""
+
+        if self._durable_error is not None:
+            return
+        self._durable_error = error
+        self._durable_room.set()
+        self._durable_progress.set()
+        self._timeline_room.set()
+
+    def _timeline_window_seconds(self) -> float:
+        import os
+
+        configured = os.environ.get("AA_CONNECTOR_TIMELINE_WINDOW_SECONDS")
+        if configured:
+            try:
+                return max(0.0, float(configured))
+            except ValueError:
+                pass
+        return DEFAULT_TIMELINE_WINDOW_SECONDS
+
+    def _durable_limit(self) -> int:
+        import os
+
+        configured = os.environ.get("AA_CONNECTOR_INGEST_DURABLE_LIMIT")
+        if configured:
+            try:
+                return max(1, int(configured))
+            except ValueError:
+                pass
+        return DEFAULT_DURABLE_LIMIT
+
+    def _durable_flush_timeout_seconds(self) -> float:
+        import os
+
+        configured = os.environ.get("AA_CONNECTOR_INGEST_DURABLE_FLUSH_TIMEOUT_SECONDS")
+        if configured:
+            try:
+                return max(0.1, float(configured))
+            except ValueError:
+                pass
+        return DEFAULT_DURABLE_FLUSH_TIMEOUT_SECONDS
 
     async def flush_loop(self) -> None:
         """Keep a failed batch at the head; cancellation leaves it recoverable.
@@ -162,8 +502,16 @@ class ConnectorIngestClient:
                     try:
                         self._collect_pending()
                         await self._post_batch(self._inflight)
+                        self._advance_durable()
                         self._inflight = []
-                        if self._notify_queue.empty():
+                        # `has_pending` cannot be used here: it counts this
+                        # loop's own in-progress post, so it is never false.
+                        if (
+                            not self._durable
+                            and not self._latest_value
+                            and not self._latest_timeline
+                            and not self._notify_queue
+                        ):
                             self._available.clear()
                     finally:
                         self._posting = False
@@ -178,28 +526,128 @@ class ConnectorIngestClient:
                 continue
             except (ConnectorIngestRejectedError, httpx.HTTPStatusError) as exc:
                 logger.warning("connector ingest permanently rejected notifications={} error={}", len(self._inflight), exc)
+                # Data a caller was told we would store cannot be silently
+                # dropped: fail the durability barrier so the checkpoint that
+                # depends on it is never advanced past it.
+                self._fail_durable(exc)
+                self._durable_inflight = 0
             self._inflight = []
             attempt = 0
 
     def _collect_pending(self) -> int:
         """Move pending notifications into the in-flight batch.
 
-        Returns how many entries were taken from either source, so a caller
-        draining a known backlog can still terminate when most of what it pulled
-        collapsed into the latest-wins hold.
+        Values go first: they are what the Server shows as current, and a newer
+        one makes an older one worthless, so they never wait behind bulk
+        history. The order-bearing lanes are then collected strictly by
+        admission order, so a complete snapshot is never overtaken by the
+        increments that followed it — the ordering the old synchronous publish
+        bought by draining the whole backlog before every call, now without
+        making a live batch wait for it.
+
+        Returns how many entries were taken, so a caller draining a known
+        backlog can still terminate when most of what it pulled collapsed into
+        the latest-wins holds.
         """
 
         if self._inflight:
             return 0
         taken = 0
-        while self._latest and len(self._inflight) < FLUSH_MAX:
-            _, entry = self._latest.popitem()
-            self._inflight.append(entry)
+        budget = self._flush_bytes()
+        while self._latest_value and len(self._inflight) < FLUSH_MAX:
+            entry = self._latest_value[next(iter(self._latest_value))]
+            if self._inflight and not self._fits(entry, budget):
+                break
+            budget -= entry["size"]
+            self._inflight.append(
+                self._latest_value.pop(next(iter(self._latest_value)))
+            )
             taken += 1
-        while len(self._inflight) < FLUSH_MAX and not self._notify_queue.empty():
-            self._inflight.append(self._notify_queue.get_nowait())
+        while len(self._inflight) < FLUSH_MAX:
+            heads: list[tuple[int, str, str | None]] = []
+            if self._durable:
+                heads.append((self._durable[0]["seq"], "durable", None))
+            if self._latest_timeline:
+                key, entry = next(iter(self._latest_timeline.items()))
+                heads.append((entry["seq"], "latest", key))
+            if self._notify_queue:
+                heads.append((self._notify_queue[0]["seq"], "queue", None))
+            if not heads:
+                break
+            _, lane, key = min(heads)
+            entry = (
+                self._durable[0]
+                if lane == "durable"
+                else self._notify_queue[0]
+                if lane == "queue"
+                else self._latest_timeline[key]
+            )
+            held_until = self._held_until()
+            if held_until is not None and entry["seq"] > held_until:
+                # A held entry is still inside its window. Waiting keeps the
+                # Server from applying a later increment before an earlier one,
+                # which for a wholesale snapshot would silently drop it. The
+                # wait is bounded by the window, and a busy item keeps moving to
+                # the back of the hold, so it never blocks the entries behind it
+                # for longer than that.
+                break
+            if self._inflight and not self._fits(entry, budget):
+                break
+            budget -= entry["size"]
+            if lane == "durable":
+                self._inflight.append(self._durable.popleft())
+                if len(self._durable) < self._durable_limit():
+                    self._durable_room.set()
+            elif lane == "latest":
+                assert key is not None
+                self._inflight.append(self._latest_timeline.pop(key))
+                self._timeline_room.set()
+            else:
+                self._inflight.append(self._notify_queue.popleft())
+                self._queue_room.set()
+            if entry.get("durable"):
+                self._durable_inflight += 1
             taken += 1
         return taken
+
+    def _held_until(self) -> int | None:
+        """The lowest admission order that is still inside its window.
+
+        Anything admitted after it must wait too, or it would overtake. Only
+        windowed entries ever hold, so this is the front of the hold in
+        practice, and the bound is one window. `None` means nothing is held.
+        """
+
+        deadline = time.monotonic()
+        held = [
+            entry["seq"]
+            for entry in self._latest_timeline.values()
+            if entry.get("notBefore") is not None and entry["notBefore"] > deadline
+        ]
+        return min(held) if held else None
+
+    def _fits(self, entry: dict[str, Any], budget: int) -> bool:
+        return entry["size"] <= budget
+
+    def _flush_bytes(self) -> int:
+        """How much may travel in one request.
+
+        A failed upload is re-sent whole, so an unbounded request makes one bad
+        moment on a slow link cost everything it was carrying. Bounding it means
+        a retry only repeats a small piece and every successful request is
+        progress the Server keeps. The entry cap still applies, so ordinary
+        small notifications batch exactly as before.
+        """
+
+        import os
+
+        configured = os.environ.get("AA_CONNECTOR_INGEST_FLUSH_BYTES")
+        if configured:
+            try:
+                return max(1, int(configured))
+            except ValueError:
+                pass
+        return FLUSH_MAX_BYTES
 
     async def post_batch(self, notifications: list[dict[str, Any]]) -> None:
         async with self._post_lock:
@@ -210,13 +658,15 @@ class ConnectorIngestClient:
                 # cannot starve this synchronous snapshot indefinitely.
                 remaining = (
                     len(self._inflight)
-                    + len(self._latest)
-                    + self._notify_queue.qsize()
+                    + len(self._latest_value)
+                    + len(self._latest_timeline)
+                    + len(self._notify_queue)
                 )
                 while remaining:
                     taken = self._collect_pending()
                     if self._inflight:
                         await self._post_batch(self._inflight)
+                        self._advance_durable()
                     remaining = max(
                         0, remaining - max(taken, len(self._inflight))
                     )
@@ -230,33 +680,50 @@ class ConnectorIngestClient:
     async def _post_batch(self, notifications: list[dict[str, Any]]) -> None:
         if not notifications:
             return
-        notifications = coalesce_timeline_item_upserts(
-            [_wire_notification(entry) for entry in notifications]
-        )
+        # The entries carry method/params themselves, so the coalescer works on
+        # them directly and each survivor keeps its already-encoded wire form.
+        notifications = coalesce_timeline_item_upserts(notifications)
         if not notifications:
             return
+        body = _encode_batch(notifications)
+        raw_size = len(body)
+        encoding = await self._request_encoding(raw_size)
+        if encoding is not None:
+            body = gzip.compress(body, compresslevel=6)
+        wire_size = len(body)
+        started_at = time.monotonic()
         access_token = await self._access_token_provider(False)
         client = self._http_client_getter()
         owned = client is None
         if client is None:
             client = self._http_client_factory(60)
+        staged = False
         try:
+            staged = (
+                await self._supports_resumable_uploads()
+                and len(body) >= RESUMABLE_UPLOAD_MIN_BYTES
+            )
             try:
-                response = await self._post_ingest_batch(
-                    client, access_token, notifications
-                )
+                if staged:
+                    response = await self._post_staged_batch(
+                        client, access_token, body, encoding, _body_digest(body)
+                    )
+                else:
+                    response = await self._post_ingest_batch(
+                        client, access_token, body, encoding
+                    )
             except httpx.RequestError as exc:
                 raise ConnectorNetworkError(
                     f"backend ingest request failed: {exc}"
                 ) from exc
-            if getattr(response, "status_code", None) == 401:
+            if getattr(response, "status_code", None) == 401 and not staged:
                 logger.warning(
                     "connector ingest token rejected; refreshing access token and retrying"
                 )
                 access_token = await self._access_token_provider(True)
                 try:
                     response = await self._post_ingest_batch(
-                        client, access_token, notifications
+                        client, access_token, body, encoding
                     )
                 except httpx.RequestError as exc:
                     raise ConnectorNetworkError(
@@ -271,21 +738,270 @@ class ConnectorIngestClient:
                 raise ConnectorNetworkError(f"backend ingest temporarily unavailable: HTTP {status}")
             response.raise_for_status()
             _raise_for_rejected_notifications(response)
+        except ConnectorNetworkError:
+            # Transient: the flush loop retries this same batch, and the staged
+            # bytes are exactly what lets that retry continue instead of
+            # restarting. Only the Server's time-to-live may drop them.
+            raise
+        except BaseException:
+            # Permanent: nothing will retry this body, so release the staging
+            # rather than waiting for the sweep.
+            if staged:
+                await self._discard_staged(client, access_token, body)
+            raise
+        else:
+            if staged:
+                self._forget_staged(_body_digest(body))
         finally:
             if owned:
                 await client.aclose()
+            self._log_upload(notifications, wire_size, raw_size, encoding, started_at)
+
+    async def _supports_resumable_uploads(self) -> bool:
+        import os
+
+        configured = (
+            os.environ.get("AA_CONNECTOR_INGEST_RESUMABLE", "auto").strip().lower()
+        )
+        if configured == "off":
+            return False
+        if configured == "on":
+            return True
+        return "resumable" in await self._server_ingest_capabilities()
+
+    async def _post_staged_batch(
+        self,
+        client: httpx.AsyncClient,
+        access_token: str,
+        body: bytes,
+        encoding: str | None,
+        digest: str,
+    ) -> httpx.Response:
+        """Send a body in resumable pieces, then ask the Server to apply it.
+
+        Every piece is acknowledged with the running total, so a connection that
+        drops half way resumes from the last acknowledgement instead of sending
+        the whole snapshot again — which on the uplink this was written for is
+        the difference between a session that syncs and one that never does.
+        """
+
+        headers = {"Authorization": f"Bearer {access_token}"}
+        upload_id = self._staged_uploads.get(digest)
+        offset = 0
+        if upload_id is not None:
+            offset = await self._staged_offset(client, headers, upload_id)
+            if offset < 0:
+                # The Server no longer has it — expired, or swept — so start over.
+                upload_id = None
+        if upload_id is None:
+            created = await client.post(
+                api_v2_url(self._server_url, "/connector/ingest/uploads"),
+                headers=(
+                    # Named separately from `Content-Encoding`: this request has
+                    # no body, and that header describes the one it does carry —
+                    # which a decompressing proxy or middleware may consume.
+                    {**headers, "X-Upload-Encoding": encoding}
+                    if encoding is not None
+                    else headers
+                ),
+                timeout=self._upload_timeout(),
+            )
+            created.raise_for_status()
+            upload_id = created.json()["uploadId"]
+            offset = int(created.json().get("receivedBytes", 0))
+            self._staged_uploads[digest] = upload_id
+        while offset < len(body):
+            chunk = body[offset : offset + RESUMABLE_UPLOAD_CHUNK_BYTES]
+            response = await client.put(
+                api_v2_url(self._server_url, f"/connector/ingest/uploads/{upload_id}"),
+                headers={
+                    **headers,
+                    "X-Upload-Offset": str(offset),
+                    "Content-Type": "application/octet-stream",
+                },
+                content=chunk,
+                timeout=self._upload_timeout(),
+            )
+            if response.status_code == 409:
+                # The Server is further along than we thought; continue from
+                # what it actually holds rather than re-sending.
+                offset = int(response.json()["detail"]["receivedBytes"])
+                continue
+            response.raise_for_status()
+            offset = int(response.json()["receivedBytes"])
+            self._staged_offsets[upload_id] = offset
+        return await client.post(
+            api_v2_url(
+                self._server_url, f"/connector/ingest/uploads/{upload_id}/commit"
+            ),
+            headers=headers,
+            timeout=self._upload_timeout(),
+        )
+
+    async def _staged_offset(
+        self, client: httpx.AsyncClient, headers: dict[str, str], upload_id: str
+    ) -> int:
+        """How much the Server already holds, or -1 if it holds nothing."""
+
+        try:
+            response = await client.get(
+                api_v2_url(self._server_url, f"/connector/ingest/uploads/{upload_id}"),
+                headers=headers,
+                timeout=self._upload_timeout(),
+            )
+        except httpx.RequestError:
+            # Unreachable is not the same as missing; let the upload continue
+            # from where this Connector left off and resynchronise on the piece.
+            return self._staged_offsets.get(upload_id, 0)
+        if response.status_code == 404:
+            return -1
+        response.raise_for_status()
+        return int(response.json()["receivedBytes"])
+
+    async def _discard_staged(
+        self, client: httpx.AsyncClient, access_token: str, body: bytes
+    ) -> None:
+        digest = _body_digest(body)
+        upload_id = self._staged_uploads.pop(digest, None)
+        if upload_id is None:
+            return
+        self._staged_offsets.pop(upload_id, None)
+        with suppress(Exception):
+            await client.delete(
+                api_v2_url(self._server_url, f"/connector/ingest/uploads/{upload_id}"),
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=self._upload_timeout(),
+            )
+
+    def _forget_staged(self, digest: str) -> None:
+        upload_id = self._staged_uploads.pop(digest, None)
+        if upload_id is not None:
+            self._staged_offsets.pop(upload_id, None)
+
+    def _log_upload(
+        self,
+        notifications: list[dict[str, Any]],
+        wire_size: int,
+        raw_size: int,
+        encoding: str | None,
+        started_at: float,
+    ) -> None:
+        """Report the throughput the link actually sustains.
+
+        An asymmetric link is the binding constraint on how much history a
+        Connector can carry, and every previous diagnosis of this system had to
+        infer that from behaviour. One line per slow upload makes it observable:
+        bytes on the wire per second, how much compression bought, and how much
+        the lanes are still holding behind it.
+        """
+
+        elapsed = time.monotonic() - started_at
+        if elapsed < 1.0 and raw_size < 128 * 1024:
+            return
+        logger.info(
+            "connector ingest upload notifications={} wire_bytes={} raw_bytes={} "
+            "encoding={} elapsed_ms={:.0f} kbps={:.1f} queued={} durable={} batches={}",
+            len(notifications),
+            wire_size,
+            raw_size,
+            encoding or "identity",
+            elapsed * 1000,
+            (wire_size / 1024 / elapsed) if elapsed else 0.0,
+            len(self._notify_queue),
+            len(self._durable),
+            len(self._latest_timeline) + len(self._latest_value),
+        )
 
     async def _post_ingest_batch(
         self,
         client: httpx.AsyncClient,
         access_token: str,
-        notifications: list[dict[str, Any]],
+        body: bytes,
+        encoding: str | None = None,
     ) -> httpx.Response:
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+        if encoding is not None:
+            headers["Content-Encoding"] = encoding
         return await client.post(
             api_v2_url(self._server_url, "/connector/ingest"),
-            headers={"Authorization": f"Bearer {access_token}"},
-            json={"notifications": notifications},
-            timeout=self._upload_timeout_seconds(),
+            headers=headers,
+            content=body,
+            timeout=self._upload_timeout(),
+        )
+
+    async def _request_encoding(self, size: int) -> str | None:
+        """The encoding to send this body in, or ``None`` for plain JSON.
+
+        Only the Server can say whether it can read a compressed body, so the
+        answer comes from its health endpoint rather than from a version
+        comparison — a new Connector against an old Server must keep working,
+        and vice versa. An unreadable or silent endpoint means plain JSON, which
+        every version understands.
+        """
+
+        import os
+
+        configured = os.environ.get("AA_CONNECTOR_INGEST_GZIP", "auto").strip().lower()
+        if configured == "off":
+            return None
+        if size < GZIP_MIN_BYTES:
+            return None
+        if configured == "on":
+            return "gzip"
+        return "gzip" if "gzip" in await self._server_encodings() else None
+
+    async def _server_ingest_capabilities(self) -> dict[str, Any]:
+        await self._server_encodings()
+        return self._capabilities
+
+    async def _server_encodings(self) -> frozenset[str]:
+        now = time.monotonic()
+        if (
+            self._encodings is not None
+            and now - self._encodings_checked_at < INGEST_CAPABILITY_TTL_SECONDS
+        ):
+            return self._encodings
+        self._encodings_checked_at = now
+        client = self._http_client_getter()
+        owned = client is None
+        if client is None:
+            client = self._http_client_factory(10)
+        try:
+            response = await client.get(
+                api_v2_url(self._server_url, "/health"),
+                timeout=httpx.Timeout(10.0, connect=self._connect_timeout_seconds()),
+            )
+            payload = response.json() if response.status_code == 200 else {}
+        except Exception:  # noqa: BLE001 - discovery must never break ingest
+            # An old Server, an unreachable one, or a client that cannot answer
+            # this at all all mean the same thing: plain, whole-body uploads,
+            # which every version understands.
+            payload = {}
+        finally:
+            if owned:
+                await client.aclose()
+        ingest = payload.get("ingest") if isinstance(payload, dict) else None
+        self._capabilities = dict(ingest) if isinstance(ingest, dict) else {}
+        encodings = self._capabilities.get("encodings")
+        self._encodings = frozenset(
+            value for value in encodings if isinstance(value, str)
+        ) if isinstance(encodings, list) else frozenset()
+        return self._encodings
+
+    def _upload_timeout(self) -> httpx.Timeout:
+        """One upload's budget, with the connect phase kept short.
+
+        Read and write stay generous so a large history can still finish;
+        connect and pool are bounded so a connection that will never come up
+        fails fast instead of pinning the shared post lock.
+        """
+
+        connect = self._connect_timeout_seconds()
+        return httpx.Timeout(
+            self._upload_timeout_seconds(), connect=connect, pool=connect
         )
 
     def _upload_timeout_seconds(self) -> float:
@@ -311,6 +1027,19 @@ class ConnectorIngestClient:
                 pass
         return 900.0
 
+    def _connect_timeout_seconds(self) -> float:
+        """How long one upload may spend establishing its connection."""
+
+        import os
+
+        configured = os.environ.get("AA_CONNECTOR_INGEST_CONNECT_TIMEOUT_SECONDS")
+        if configured:
+            try:
+                return max(1.0, float(configured))
+            except ValueError:
+                pass
+        return DEFAULT_CONNECT_TIMEOUT_SECONDS
+
     def _enqueue_timeout_seconds(self) -> float:
         """How long one producer may wait for room before its notification drops."""
 
@@ -323,6 +1052,30 @@ class ConnectorIngestClient:
             except ValueError:
                 pass
         return DEFAULT_ENQUEUE_TIMEOUT_SECONDS
+
+
+def _body_digest(body: bytes) -> str:
+    return hashlib.sha256(body).hexdigest()
+
+
+def _encode_batch(notifications: list[dict[str, Any]]) -> bytes:
+    """Assemble the request body from each notification's wire form.
+
+    Every entry was serialized when it was admitted, so this is a join rather
+    than another pass over a snapshot that can be megabytes.
+    """
+
+    def wire(entry: dict[str, Any]) -> bytes:
+        body = entry.get("body")
+        if body is not None:
+            return body
+        return json.dumps(
+            {"method": entry["method"], "params": entry["params"]},
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+    joined = b",".join(wire(entry) for entry in notifications)
+    return b'{"notifications":[' + joined + b"]}"
 
 
 def _wire_notification(entry: dict[str, Any]) -> dict[str, Any]:
@@ -351,7 +1104,21 @@ def _coalesce_key(method: str, params: dict[str, Any]) -> str | None:
     if method == TIMELINE_SYNC:
         if params.get("complete") is not True:
             return None
-    elif method not in COALESCE_LATEST_METHODS:
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        return f"{method}:{session_id}"
+    if method == "timeline.itemUpsert":
+        # A streaming DSH item is a complete replacement for one stable item.
+        # Keep the newest revision per item instead of allowing a transcript
+        # stream to fill the bounded queue and drop the live tail.
+        session_id = params.get("sessionId")
+        item = params.get("item")
+        item_id = item.get("id") if isinstance(item, dict) else None
+        if not isinstance(session_id, str) or not session_id or not isinstance(item_id, str) or not item_id:
+            return None
+        return f"{method}:{session_id}:{item_id}"
+    if method not in COALESCE_LATEST_METHODS:
         return None
     session_id = params.get("sessionId")
     if not isinstance(session_id, str) or not session_id:
@@ -410,6 +1177,14 @@ def coalesce_timeline_item_upserts(
         key = (session_id, item_id)
         previous = latest_index_by_key.get(key)
         if previous is not None:
+            previous_item = notifications[previous].get("params", {}).get("item", {})
+            previous_seq = previous_item.get("updatedSeq", previous_item.get("updated_seq", 0))
+            current_seq = item.get("updatedSeq", item.get("updated_seq", 0))
+            # A latest-wins slot can be emitted before an older queued entry.
+            # Keep the greatest complete revision, not merely the last position.
+            if isinstance(previous_seq, int) and isinstance(current_seq, int) and current_seq < previous_seq:
+                dropped.add(index)
+                continue
             dropped.add(previous)
         latest_index_by_key[key] = index
     if not dropped:

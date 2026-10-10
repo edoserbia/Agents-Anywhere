@@ -56,7 +56,15 @@ def start_relay(host, notifications):
     return relay, acknowledged, acks
 
 
-def test_live_batch_uses_websocket_in_order_and_waits_for_send_before_ack(tmp_path):
+def test_live_batch_uses_websocket_in_order_without_waiting_for_the_send(tmp_path):
+    """Live events travel the WebSocket, in order, not the HTTP ingest path.
+
+    The batch is acknowledged on local receipt: the bridge is stop-and-wait, so
+    an acknowledgement that waited for the delivery would cap the whole live
+    stream at one remote round trip per batch while the bridge flushes thirty
+    times a second.
+    """
+
     async def exercise():
         client, host = backend_client(tmp_path)
         entered, release = asyncio.Event(), asyncio.Event()
@@ -76,11 +84,15 @@ def test_live_batch_uses_websocket_in_order_and_waits_for_send_before_ack(tmp_pa
         relay, acknowledged, acks = start_relay(host, notices)
         try:
             await asyncio.wait_for(entered.wait(), 1)
-            assert acks == []
-            assert len(frames) == 1
-            release.set()
+            # Acknowledged while the first frame is still being written.
             await asyncio.wait_for(acknowledged.wait(), 1)
             assert acks == [1]
+            assert len(frames) == 1
+            release.set()
+            for _ in range(200):
+                if len(frames) == len(notices):
+                    break
+                await asyncio.sleep(0.01)
             assert [frame["method"] for frame in frames] == [notice["method"] for notice in notices]
             assert all(frame["type"] == "notification" for frame in frames)
             assert all(frame["params"]["runtime"] == "dsh" for frame in frames)
@@ -115,7 +127,8 @@ def test_live_events_reuse_the_existing_http_fallback_queue(tmp_path, transport)
         ])
         try:
             await asyncio.wait_for(entered.wait(), 1)
-            assert acks == []
+            await asyncio.wait_for(acknowledged.wait(), 1)
+            assert acks == [1]
             if transport == "oversized":
                 websocket.send.assert_not_awaited()
             method, params = client._ingest.enqueue.call_args.args
@@ -123,8 +136,10 @@ def test_live_events_reuse_the_existing_http_fallback_queue(tmp_path, transport)
             assert params["runtimeId"] == "rti_dsh"
             assert params["item"]["content"] == notice["params"]["item"]["content"]
             release.set()
-            await asyncio.wait_for(acknowledged.wait(), 1)
-            assert acks == [1]
+            for _ in range(200):
+                if client._ingest.enqueue.await_count == (2 if transport == "offline" else 1):
+                    break
+                await asyncio.sleep(0.01)
             relay.client.writer.close.assert_not_called()
             client._ingest.ingest_notifications.assert_not_awaited()
             assert client._ingest.enqueue.await_count == (2 if transport == "offline" else 1)
@@ -141,6 +156,7 @@ def test_complete_snapshot_and_inventory_still_use_ingest_when_websocket_is_conn
         client, host = backend_client(tmp_path)
         websocket = SimpleNamespace(send=AsyncMock())
         client._rpc.set_connection(websocket)
+        client._ingest.submit_notifications = AsyncMock()
         relay = SyncRelay(Mock(), host)
         try:
             await relay.operation({"kind": "notifications", "notifications": [
@@ -150,12 +166,12 @@ def test_complete_snapshot_and_inventory_still_use_ingest_when_websocket_is_conn
             await relay.operation({"kind": "snapshot.begin", **identity, "throughSeq": 1,
                 "meta": {"externalSessionId": "native", "cwd": "/repo"}})
             await relay.operation({"kind": "snapshot.items", **identity, "items": [item_notification()["params"]["item"]]})
-            assert client._ingest.ingest_notifications.await_count == 1
+            assert client._ingest.submit_notifications.await_count == 1
             await relay.operation({"kind": "snapshot.commit", **identity, "throughSeq": 1, "totalItems": 1})
             await relay.operation({"kind": "notifications", "notifications": [
                 {"method": "session.inventory.complete", "params": {"syncId": "inventory"}},
             ]})
-            batches = [call.args[0] for call in client._ingest.ingest_notifications.await_args_list]
+            batches = [call.args[0] for call in client._ingest.submit_notifications.await_args_list]
             assert [[notice["method"] for notice in batch] for batch in batches] == [
                 ["session.inventory.begin"], ["session.meta.upsert", "timeline.sync"], ["session.inventory.complete"],
             ]

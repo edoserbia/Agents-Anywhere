@@ -31,8 +31,17 @@ class RuntimeHostClient(ABC):
     async def publish_runtime_notifications(
         self, runtime: str, notifications: list[dict[str, Any]], runtime_id: str | None = None
     ) -> None:
-        """Await the existing Connector ingest path, without the fallback queue."""
-        raise NotImplementedError("Synchronous notification ingestion is unavailable")
+        """Accept order-bearing notifications for upload, without awaiting it."""
+        raise NotImplementedError("Runtime notification submission is unavailable")
+
+    async def flush_runtime_notifications(self) -> None:
+        """Wait until every published notification has reached the Server.
+
+        A caller about to record that the sequence it covers is safe must pass
+        this barrier, so the record never runs ahead of the data it describes.
+        """
+
+        raise NotImplementedError("Runtime notification submission is unavailable")
 
     @property
     @abstractmethod

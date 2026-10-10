@@ -51,7 +51,12 @@ from agent_server.infra.db.migrations import (
     upgrade_database,
 )
 from agent_server.infra.fs_downloads import FsDownloadRelayManager
+from agent_server.infra.ingest_uploads import IngestUploadStore
 from agent_server.infra.redis_coordinator import RedisCoordinator
+from agent_server.infra.request_compression import (
+    REQUEST_ENCODINGS,
+    RequestDecompressionMiddleware,
+)
 from agent_server.infra.repositories.facade import Store
 from agent_server.infra.terminal_broker import TerminalBroker
 from agent_server.infra.terminal_stream_hub import TerminalStreamHub
@@ -191,11 +196,29 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # A Connector on an asymmetric link is bounded by its uplink, and a runtime
+    # timeline is verbose JSON that repeats whole messages on every revision.
+    # Added last so it runs first, before any body parsing.
+    app.add_middleware(RequestDecompressionMiddleware)
+    def ingest_upload_root() -> Path:
+        """Where partially received ingest bodies are staged.
+
+        The staged bytes are transient and swept on a time-to-live, so the
+        default sits beside the other server data rather than in the durable
+        file store.
+        """
+
+        configured = os.environ.get("AGENT_SERVER_INGEST_UPLOAD_ROOT")
+        if configured:
+            return Path(configured)
+        return Path(os.environ.get("AGENT_SERVER_DATA_DIR", "/tmp/agent-server-data")) / "ingest-uploads"
+
     should_migrate = (
         db_path is not None if migrate_database is None else migrate_database
     )
     if should_migrate:
         upgrade_database(sqlite_path=db_path)
+    app.state.ingest_uploads = IngestUploadStore(ingest_upload_root())
     app.state.store = Store(db_path)
     app.state.database_schema_version = "unknown"
     app.state.redis = RedisCoordinator(
@@ -288,8 +311,22 @@ def create_app(
 
     @app.get(f"{API_V2_PREFIX}/health")
     @app.get(f"{API_V2_PREFIX}/health/live")
-    def health() -> dict[str, str]:
-        return {"status": "ok", "version": app.version, "serverTime": utc_now()}
+    def health() -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "version": app.version,
+            "serverTime": utc_now(),
+            # A Connector may only compress an ingest body when the Server says
+            # it can read one, so an old Connector against this Server and a new
+            # Connector against an old Server both keep working.
+            "ingest": {
+                "encodings": sorted(REQUEST_ENCODINGS),
+                # Bodies above the Connector's threshold may be staged and
+                # resumed instead of restarted, which is what makes a large
+                # history survivable on a slow or flaky uplink.
+                "resumable": True,
+            },
+        }
 
     @app.get(f"{API_V2_PREFIX}/health/ready")
     async def readiness() -> JSONResponse:

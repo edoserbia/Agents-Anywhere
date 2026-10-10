@@ -12,6 +12,7 @@ import httpx
 from connector.control import ConnectorController
 from connector.core.config import ConnectorConfig
 from connector.core.json_rpc import JsonRpcStdioServer, open_stdio_server
+from connector.core.proxy_env import normalize_no_proxy
 from connector.core.runtime_owner import (
     RuntimeLease,
 )
@@ -33,6 +34,10 @@ SHELL_LIFETIME_WARNING = (
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    # Before anything builds an HTTP client: a bypass list httpx cannot parse
+    # would make client construction itself raise, and the Connector would never
+    # start. Every entry that can be used is kept.
+    normalize_no_proxy()
     configure_connector_logging(debug=bool(getattr(args, "debug", False)))
     try:
         if args.command in {"pair", "login"}:

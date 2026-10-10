@@ -12,6 +12,7 @@ from websockets.exceptions import ConnectionClosed
 
 from connector.core.config import ConnectorConfig
 from connector.core.preferences import read_local_preferences
+from connector.core.proxy_env import normalize_no_proxy
 from connector.local import create_local_ops
 from connector.logging import logger
 from connector.runtime_protocol import (
@@ -81,7 +82,13 @@ class BackendRpcClient:
             notifier=self.send_backend_notification,
             attachment_downloader=self.download_attachment,
             sync_state_store=self.sync_state_store,
-            ingest_notifications=self.ingest_notifications,
+            # Order-bearing runtime notifications are accepted locally and
+            # uploaded from the background flush loop. A feed that acknowledged
+            # its peer only after a remote round trip could not keep up with the
+            # peer's flush cadence, and the resulting buffer overflow put every
+            # session into a recalibration loop.
+            ingest_notifications=self.submit_runtime_notifications,
+            flush_notifications=self.flush_runtime_notifications,
             defer_payload_projection=True,
         )
         if agent_runtime_providers is None:
@@ -437,6 +444,18 @@ class BackendRpcClient:
     async def ingest_notifications(self, notifications: list[dict[str, Any]]) -> None:
         await self._ingest.ingest_notifications(notifications)
 
+    async def submit_runtime_notifications(
+        self, notifications: list[dict[str, Any]]
+    ) -> None:
+        """Accept order-bearing runtime notifications without a remote wait."""
+
+        await self._ingest.submit_notifications(notifications)
+
+    async def flush_runtime_notifications(self) -> None:
+        """Wait until every accepted runtime notification reached the Server."""
+
+        await self._ingest.flush_notifications()
+
     async def download_attachment(
         self, session_id: str, file_id: str
     ) -> tuple[bytes, str, str]:
@@ -512,6 +531,9 @@ class BackendRpcClient:
         return self._http_client
 
     def _new_http_client(self, timeout: httpx.Timeout | float) -> httpx.AsyncClient:
+        # A library may also be embedded rather than launched through the CLI,
+        # so the environment is normalized here too; it is idempotent.
+        normalize_no_proxy()
         return httpx.AsyncClient(
             timeout=timeout, trust_env=not is_loopback_url(self.config.server_url)
         )

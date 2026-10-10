@@ -167,18 +167,21 @@ def test_relay_failure_resubscribes_without_closing_concurrent_rpc(reject, proje
             await asyncio.sleep(0)
             relay.accept({"streamId": "stream-1", "batchSeq": 1, "projectionVersion": projection_version, "operations": [op]})
             await asyncio.wait_for(entered.wait(), 1)
-            assert not acks
+            # The batch is acknowledged on local receipt, while the upload it
+            # describes is still in flight. Waiting for the upload here is what
+            # capped the live stream at a remote round trip per batch.
+            await asyncio.wait_for(acknowledged.wait(), 1)
+            assert acks == [1]
             release.set()
             if not reject:
-                await asyncio.wait_for(acknowledged.wait(), 1)
                 relay.accept({"streamId": "stream-1", "batchSeq": 3, "projectionVersion": projection_version, "operations": [op]})
             await asyncio.wait_for(resubscribed.wait(), 1)
-            assert acks == ([] if reject else [1])
+            assert acks == [1]
             acknowledged.clear()
             relay.restart("stream-1")  # A delayed old error cannot stop the new feed.
             relay.accept({"streamId": "stream-2", "batchSeq": 1, "projectionVersion": projection_version, "operations": [op]})
             await asyncio.wait_for(acknowledged.wait(), 1)
-            assert acks == ([1] if reject else [1, 1])
+            assert acks == [1, 1]
             client.writer.close.assert_not_called()
         finally:
             await relay.close()
@@ -232,24 +235,50 @@ def test_legacy_workspace_inventory_does_not_write_projects_or_local_state():
     asyncio.run(exercise())
 
 
-def test_fresh_source_state_waits_for_ingestion_and_archive_send_returns_standard_error(tmp_path):
+def test_source_state_read_is_not_queued_behind_the_durable_ingest_path(tmp_path):
+    """The Server reads session.state before it will accept a message.
+
+    The durable ingest path drains the whole pending upload backlog under one
+    lock, so waiting on it spends the Server's 10s read budget on someone else's
+    upload and the user sees "runtime did not report its state in time" with the
+    message never sent. The observation is a latest-value fact and must travel
+    the typed notification path instead.
+    """
+
     async def exercise():
-        entered, release = asyncio.Event(), asyncio.Event()
-        async def publish(*args):
-            entered.set()
-            await release.wait()
+        published = []
+        durable = AsyncMock()
+
+        async def session_source_update(observation):
+            published.append(observation)
+
         runtime = DshRuntime(
             SimpleNamespace(values={"dshHome": str(tmp_path)}),
-            SimpleNamespace(publish_runtime_notifications=publish),
+            SimpleNamespace(
+                publish_runtime_notifications=durable,
+                session_source_update=session_source_update,
+            ),
         )
-        source = {"availability": "archived", "reason": "archived_in_dsh", "observedAt": "2026-09-07T00:00:00Z"}
-        runtime._request = AsyncMock(return_value={"runtime": "dsh", "sessionId": "session", "externalSessionId": "native",
+        source = {
+            "availability": "archived",
+            "reason": "archived_in_dsh",
+            "observedAt": "2026-09-07T00:00:00Z",
+        }
+        runtime._request = AsyncMock(return_value={
+            "runtime": "dsh", "sessionId": "session", "externalSessionId": "native",
             "status": "blocked", "selections": {}, "sourceState": source})
-        task = asyncio.create_task(runtime.get_session_state("session", "native"))
-        await asyncio.wait_for(entered.wait(), 1)
-        assert not task.done()
-        release.set()
-        assert (await task).status == "blocked"
+
+        state = await asyncio.wait_for(runtime.get_session_state("session", "native"), 1)
+        assert state.status == "blocked"
+        durable.assert_not_awaited()
+        assert [item.session_id for item in published] == ["session"]
+        assert published[0].external_session_id == "native"
+        assert published[0].runtime == "dsh"
+        assert published[0].state.availability == "archived"
+        assert published[0].state.reason == "archived_in_dsh"
+        assert published[0].state.observed_at == "2026-09-07T00:00:00Z"
+        assert published[0].state.observation_origin == "operation"
+
         runtime._request.return_value = {"ok": False, "code": "session_archived", "message": "Archived in DSH",
             "result": {"sessionId": "session", "externalSessionId": "native", "sourceState": source}}
         result = await runtime.start_turn("session", "native", "hi", client_message_id="request")

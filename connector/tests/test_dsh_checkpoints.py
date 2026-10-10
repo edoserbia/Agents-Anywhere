@@ -16,9 +16,11 @@ CHECKPOINT = {"version": 1, "projectionVersion": 2, "throughSeq": 12, "historyHa
 KEY = "dsh/sync/checkpoints/native"
 
 
-def bound_host(path, ingest, runtime_id="rti_dsh"):
+def bound_host(path, ingest, runtime_id="rti_dsh", flush=None):
     store = JsonSyncStateStore(path)
-    base = ConnectorRuntimeHost("connector", AsyncMock(), AsyncMock(), store, ingest)
+    base = ConnectorRuntimeHost(
+        "connector", AsyncMock(), AsyncMock(), store, ingest, flush
+    )
     return RuntimeInstanceHost(base, RuntimeInstanceSpec(runtime_id=runtime_id, runtime_type="dsh", name="DSH")), store
 
 
@@ -33,7 +35,16 @@ def timeline_notice():
 
 @pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("projection_version", [2, 3])
-def test_ingestion_precedes_checkpoint_and_ack_and_json_survives_restart(tmp_path, fail, projection_version):
+def test_checkpoint_waits_for_ingestion_but_the_ack_does_not(tmp_path, fail, projection_version):
+    """The bridge is stop-and-wait, so an ack that waited for the upload made
+    the whole live stream advance at one remote round trip per batch: the
+    bridge flushes thirty times a second and got two, its event buffer
+    overflowed, and every session was recalibrated in a loop.
+
+    The acknowledgement may therefore be sent on local receipt. What must not
+    move is the *checkpoint*: a replay starts from it, so it may only be
+    recorded once the Server actually holds the data it covers.
+    """
     checkpoint = {**CHECKPOINT, "projectionVersion": projection_version}
 
     async def run():
@@ -47,8 +58,13 @@ def test_ingestion_precedes_checkpoint_and_ack_and_json_survives_restart(tmp_pat
                 raise RuntimeError("ingestion rejected")
             forwarded.extend(notifications)
 
+        async def flush():
+            await release.wait()
+            if fail:
+                raise RuntimeError("ingestion rejected")
+
         path = tmp_path / "connector-state.json"
-        host, store = bound_host(path, ingest)
+        host, store = bound_host(path, ingest, flush=flush)
 
         async def request(method, params=None):
             if method == "runtime.sync.subscribe":
@@ -65,17 +81,22 @@ def test_ingestion_precedes_checkpoint_and_ack_and_json_survives_restart(tmp_pat
                 {"kind": "checkpoint.save", "externalSessionId": "native", "checkpoint": checkpoint},
             ]})
             await asyncio.wait_for(entered.wait(), 1)
+            # The upload is still blocked, yet the batch is already acknowledged
+            # and the checkpoint has not moved.
+            await asyncio.wait_for(acked.wait(), 1)
+            assert [ack["batchSeq"] for ack in acks] == [1]
             assert await host.sync_state_read(KEY) is None
             assert store.flush() is False
-            assert not acks
             release.set()
             if fail:
                 with pytest.raises(RuntimeError, match="ingestion rejected"):
                     await task
                 assert await host.sync_state_read(KEY) is None
-                assert not acks
                 return
-            await asyncio.wait_for(acked.wait(), 1)
+            for _ in range(200):
+                if forwarded and await host.sync_state_read(KEY) == checkpoint:
+                    break
+                await asyncio.sleep(0.01)
             assert forwarded[0]["params"]["runtimeId"] == "rti_dsh"
             assert await host.sync_state_read(KEY) == checkpoint
             # A crash before flush can only cause safe retransmission.
