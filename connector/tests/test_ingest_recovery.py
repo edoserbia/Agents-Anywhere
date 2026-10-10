@@ -1071,3 +1071,129 @@ def test_a_refused_batch_does_not_wedge_every_later_batch():
             await asyncio.gather(flusher, return_exceptions=True)
 
     asyncio.run(run())
+
+
+def _staging_server_that_fails_once(state: dict, requests: list, status: int):
+    """A Server that answers one staged piece with a retryable status."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        path = request.url.path
+        if path.endswith("/health"):
+            return httpx.Response(200, json={
+                "status": "ok", "ingest": {"encodings": ["gzip"], "resumable": True}})
+        if path.endswith("/connector/ingest/uploads"):
+            state["received"] = bytearray()
+            state["id"] = "u" * 24
+            return httpx.Response(200, json={"uploadId": state["id"], "receivedBytes": 0})
+        if path.endswith(f"/uploads/{state.get('id')}"):
+            if request.method == "DELETE":
+                state["discarded"] = True
+                return httpx.Response(204)
+            if request.method == "GET":
+                return httpx.Response(200, json={
+                    "uploadId": state["id"], "receivedBytes": len(state["received"])})
+            if "failed_once" not in state:
+                # A proxy having a bad moment, part way through a long transfer.
+                state["failed_once"] = True
+                return httpx.Response(status, json={"detail": "upstream unavailable"})
+            state["received"].extend(request.content)
+            return httpx.Response(200, json={
+                "uploadId": state["id"], "receivedBytes": len(state["received"])})
+        if path.endswith("/commit"):
+            state["committed"] = bytes(state["received"])
+            return httpx.Response(200, json={"accepted": 1, "rejected": [], "nextSeq": 1})
+        raise AssertionError(f"unexpected request {request.method} {path}")
+
+    return httpx.MockTransport(handler)
+
+
+def test_a_retryable_failure_does_not_delete_a_staged_transfer(monkeypatch):
+    """The staged path is for the bodies that take minutes to send.
+
+    A 502/503/429 part way through must leave the uploaded pieces alone and let
+    the retry resume, not delete them and drop the batch — which is what
+    classifying it as a refusal did, discarding everything already sent.
+    """
+
+    from connector.server import ingest as ingest_module
+
+    # Scoped, not a module-level assignment: this constant is shared.
+    monkeypatch.setattr(ingest_module, "RESUMABLE_UPLOAD_MIN_BYTES", 0)
+    state: dict = {}
+    requests: list = []
+
+    async def token(force):
+        return "token"
+
+    async def run():
+        async with httpx.AsyncClient(
+            transport=_staging_server_that_fails_once(state, requests, 503)
+        ) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            big = "y" * (ingest_module.RESUMABLE_UPLOAD_CHUNK_BYTES + 4096)
+            await ingest.submit_notifications([{
+                "method": "timeline.sync",
+                "params": {"sessionId": "s1", "complete": True,
+                           "items": [{"id": "big", "text": big}]},
+            }])
+            flusher = asyncio.create_task(ingest.flush_loop())
+            await asyncio.wait_for(ingest.flush_notifications(timeout=10), 15)
+            flusher.cancel()
+            await asyncio.gather(flusher, return_exceptions=True)
+
+    asyncio.run(run())
+
+    assert not state.get("discarded"), "a retryable status must not delete the transfer"
+    assert state.get("committed"), "the transfer must finish after the retry"
+
+
+def test_a_synchronous_snapshot_does_not_overtake_the_durable_backlog():
+    """A direct publish must drain what arrived before it.
+
+    The durable lane holds entries from the event relay. It was not counted when
+    deciding whether there was a backlog to drain, so a snapshot published
+    directly could go out first — and because `complete: true` replaces the
+    timeline wholesale on the Server, the older entries it overtook were lost.
+    """
+
+    async def run():
+        batches: list[list[str]] = []
+
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            import json
+
+            batches.append(
+                [row["method"] for row in json.loads(request.content)["notifications"]]
+            )
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            # An older complete snapshot, waiting in the durable lane. It is
+            # not windowed, so it really does sit there.
+            await ingest.submit_notifications([{
+                "method": "timeline.sync",
+                "params": {"sessionId": "s1", "complete": True, "items": []},
+            }])
+            assert len(ingest._durable) == 1, "the snapshot should be waiting"
+            # A direct publish, which must not pass it: sending the increment
+            # first would see it wiped when the snapshot replaced the timeline.
+            await ingest.post_batch([{
+                "method": "timeline.itemUpsert",
+                "params": {"sessionId": "s1", "item": {"id": "newer", "revision": 2}},
+            }])
+
+        assert [row for batch in batches for row in batch] == [
+            "timeline.sync",
+            "timeline.itemUpsert",
+        ], batches
+
+    asyncio.run(run())

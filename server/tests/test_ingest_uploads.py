@@ -114,3 +114,5 @@ def test_the_commit_route_reads_a_compressed_staged_body(tmp_path) -> None:
 
     assert encoding == "gzip"
     assert decompress_request_body(encoding, body) == BODY
+
+

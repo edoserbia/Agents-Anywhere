@@ -377,8 +377,12 @@ class ConnectorIngestClient:
             live = self._latest_timeline.get(key)
             if live is not None and live.get("durable"):
                 # The superseded revision is resolved: its content is contained
-                # in the newest one, which is about to take the same slot.
+                # in the newest one, which is about to take the same slot. That
+                # can satisfy a parked barrier, so it has to wake it — otherwise
+                # the barrier sleeps to its deadline and fails a checkpoint whose
+                # condition was already met.
                 self._durable_resolved += 1
+                self._durable_progress.set()
             self._hold_replace(self._latest_timeline, key, entry)
             self._durable_submitted += 1
             return
@@ -466,9 +470,10 @@ class ConnectorIngestClient:
 
         if self._durable_error is None:
             self._durable_error = error
-            self._durable_refused_through = max(
-                self._durable_refused_through, refused
-            )
+        # Every refusal extends the range, not only the first: a later batch
+        # refused on its own must still fail the barrier that covers it, or a
+        # checkpoint would advance over data the Server never took.
+        self._durable_refused_through = max(self._durable_refused_through, refused)
         self._durable_room.set()
         self._durable_progress.set()
         self._timeline_room.set()
@@ -698,6 +703,11 @@ class ConnectorIngestClient:
                     + len(self._latest_value)
                     + len(self._latest_timeline)
                     + len(self._notify_queue)
+                    # The durable lane holds older entries too. Leaving it out
+                    # meant a synchronous snapshot posted ahead of a backlog
+                    # that arrived before it — and a complete snapshot replaces
+                    # the timeline wholesale, so anything it overtook was lost.
+                    + len(self._durable)
                 )
                 while remaining:
                     taken = self._collect_pending()
@@ -766,7 +776,7 @@ class ConnectorIngestClient:
                     raise ConnectorNetworkError(
                         f"backend ingest retry failed: {exc}"
                     ) from exc
-                if getattr(response, "status_code", None) == 401:
+                if getattr(response, "status_code", None) == 401 and not staged:
                     raise ConnectorAuthenticationError(
                         "connector credential no longer valid"
                     )
@@ -822,6 +832,31 @@ class ConnectorIngestClient:
         the difference between a session that syncs and one that never does.
         """
 
+        async def send(
+            request: Callable[[str], Awaitable[httpx.Response]],
+        ) -> httpx.Response:
+            """One staged request, refreshing the token once if it is refused.
+
+            A staged transfer runs for minutes, so an access token can expire
+            inside it. Treating that as permanent would delete every byte already
+            sent; retrying resumes from the offset the Server reports.
+            """
+
+            nonlocal access_token
+            response = await request(access_token)
+            if getattr(response, "status_code", None) != 401:
+                return response
+            logger.warning(
+                "connector ingest token rejected during staged upload; refreshing access token"
+            )
+            access_token = await self._access_token_provider(True)
+            response = await request(access_token)
+            if getattr(response, "status_code", None) == 401:
+                raise ConnectorAuthenticationError(
+                    "connector credential no longer valid"
+                )
+            return response
+
         headers = {"Authorization": f"Bearer {access_token}"}
         upload_id = self._staged_uploads.get(digest)
         offset = 0
@@ -831,48 +866,58 @@ class ConnectorIngestClient:
                 # The Server no longer has it — expired, or swept — so start over.
                 upload_id = None
         if upload_id is None:
-            created = await client.post(
-                api_v2_url(self._server_url, "/connector/ingest/uploads"),
-                headers=(
-                    # Named separately from `Content-Encoding`: this request has
-                    # no body, and that header describes the one it does carry —
-                    # which a decompressing proxy or middleware may consume.
-                    {**headers, "X-Upload-Encoding": encoding}
-                    if encoding is not None
-                    else headers
-                ),
-                timeout=self._upload_timeout(),
+            created = await send(
+                lambda token: client.post(
+                    api_v2_url(self._server_url, "/connector/ingest/uploads"),
+                    headers=(
+                        # Named separately from `Content-Encoding`: this request
+                        # has no body, and that header describes the one it does
+                        # carry — which a decompressing proxy may consume.
+                        {**bearer(token), "X-Upload-Encoding": encoding}
+                        if encoding is not None
+                        else bearer(token)
+                    ),
+                    timeout=self._upload_timeout(),
+                )
             )
+            _raise_for_transient_status(created, "create staged upload")
             created.raise_for_status()
             upload_id = created.json()["uploadId"]
             offset = int(created.json().get("receivedBytes", 0))
             self._staged_uploads[digest] = upload_id
         while offset < len(body):
             chunk = body[offset : offset + RESUMABLE_UPLOAD_CHUNK_BYTES]
-            response = await client.put(
-                api_v2_url(self._server_url, f"/connector/ingest/uploads/{upload_id}"),
-                headers={
-                    **headers,
-                    "X-Upload-Offset": str(offset),
-                    "Content-Type": "application/octet-stream",
-                },
-                content=chunk,
-                timeout=self._upload_timeout(),
+            response = await send(
+                lambda token: client.put(
+                    api_v2_url(
+                        self._server_url, f"/connector/ingest/uploads/{upload_id}"
+                    ),
+                    headers={
+                        **bearer(token),
+                        "X-Upload-Offset": str(offset),
+                        "Content-Type": "application/octet-stream",
+                    },
+                    content=chunk,
+                    timeout=self._upload_timeout(),
+                )
             )
             if response.status_code == 409:
                 # The Server is further along than we thought; continue from
                 # what it actually holds rather than re-sending.
                 offset = int(response.json()["detail"]["receivedBytes"])
                 continue
+            _raise_for_transient_status(response, "stage upload piece")
             response.raise_for_status()
             offset = int(response.json()["receivedBytes"])
             self._staged_offsets[upload_id] = offset
-        return await client.post(
-            api_v2_url(
-                self._server_url, f"/connector/ingest/uploads/{upload_id}/commit"
-            ),
-            headers=headers,
-            timeout=self._upload_timeout(),
+        return await send(
+            lambda token: client.post(
+                api_v2_url(
+                    self._server_url, f"/connector/ingest/uploads/{upload_id}/commit"
+                ),
+                headers=bearer(token),
+                timeout=self._upload_timeout(),
+            )
         )
 
     async def _staged_offset(
@@ -1089,6 +1134,26 @@ class ConnectorIngestClient:
             except ValueError:
                 pass
         return DEFAULT_ENQUEUE_TIMEOUT_SECONDS
+
+
+def bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _raise_for_transient_status(response: Any, what: str) -> None:
+    """Treat a retryable status as a network failure, not a refusal.
+
+    The staged path is used precisely for the bodies that take minutes to send,
+    so a proxy answering 502/503/429 partway through must leave the uploaded
+    pieces alone and let the retry resume from the Server's offset. Classifying
+    it as a refusal would delete the transfer and drop the whole batch.
+    """
+
+    status = getattr(response, "status_code", 200)
+    if status in {408, 429} or status >= 500:
+        raise ConnectorNetworkError(
+            f"backend {what} temporarily unavailable: HTTP {status}"
+        )
 
 
 def _body_digest(body: bytes) -> str:

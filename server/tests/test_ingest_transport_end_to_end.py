@@ -11,6 +11,8 @@ from __future__ import annotations
 import gzip
 import json
 
+import pytest
+
 from test_backend_mvp import create_connector_and_session, make_client
 
 
@@ -202,3 +204,52 @@ def test_a_half_received_snapshot_is_never_applied(tmp_path) -> None:
 
     assert committed.status_code == 422
     assert _title(client, session_id, headers) == before
+
+
+def test_a_commit_that_fails_keeps_the_staged_bytes_for_the_retry(tmp_path) -> None:
+    """Releasing the bytes before the outcome is decided loses the transfer.
+
+    The Connector keeps its own copy precisely so a retry can resume, and on the
+    link this was written for re-sending means minutes of uplink for a body the
+    Server already holds. So a commit that fails while applying must leave the
+    upload in place, and the retry must commit that very same upload again.
+    """
+
+    from agent_server.api.connector_ingress import get_connector_ingest_service
+
+    client = make_client(tmp_path)
+    _, token, session_id, headers = create_connector_and_session(client)
+    auth = {"Authorization": f"Bearer {token}"}
+    body = json.dumps(_notification(session_id, "Retried")).encode("utf-8")
+
+    created = client.post("/connector/ingest/uploads", headers=auth)
+    assert created.status_code == 200, created.text
+    upload_id = created.json()["uploadId"]
+    put = client.put(
+        f"/connector/ingest/uploads/{upload_id}",
+        headers={**auth, "X-Upload-Offset": "0",
+                 "Content-Type": "application/octet-stream"},
+        content=body,
+    )
+    assert put.status_code == 200, put.text
+
+    class Exploding:
+        async def ingest(self, **kwargs):
+            raise RuntimeError("apply failed")
+
+    client.app.dependency_overrides[get_connector_ingest_service] = Exploding
+    # TestClient re-raises what the route raised, which is the failure itself.
+    with pytest.raises(RuntimeError, match="apply failed"):
+        client.post(f"/connector/ingest/uploads/{upload_id}/commit", headers=auth)
+    client.app.dependency_overrides.pop(get_connector_ingest_service, None)
+
+    # The bytes survived, so the same upload can be committed again — and it
+    # lands, rather than the Connector having to send it all over again.
+    assert client.get(
+        f"/connector/ingest/uploads/{upload_id}", headers=auth
+    ).status_code == 200, "the staged bytes were released before the outcome"
+    again = client.post(f"/connector/ingest/uploads/{upload_id}/commit", headers=auth)
+    assert again.status_code == 200, (
+        f"retry could not reuse the staged bytes: {again.status_code} {again.text}"
+    )
+    assert _title(client, session_id, headers) == "Retried"

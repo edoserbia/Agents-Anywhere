@@ -586,11 +586,16 @@ async def connector_ingest_upload_commit(
         body, encoding = await asyncio.to_thread(uploads.read, connector_id, upload_id)
     except IngestUploadNotFound as exc:
         raise HTTPException(status_code=404, detail="unknown upload") from exc
-    await asyncio.to_thread(uploads.discard, connector_id, upload_id)
+    # The bytes are released only once the outcome is decided. Discarding them
+    # up front would make a retryable failure lose the whole transfer: the
+    # client keeps its own copy precisely so its retry can resume, and on the
+    # link this was written for re-sending means minutes of uplink for a body
+    # that was already here.
     if encoding is not None:
         try:
             body = decompress_request_body(encoding, body)
         except (zlib.error, ValueError) as exc:
+            await asyncio.to_thread(uploads.discard, connector_id, upload_id)
             raise HTTPException(
                 status_code=400, detail="invalid compressed upload body"
             ) from exc
@@ -600,6 +605,7 @@ async def connector_ingest_upload_commit(
         # Not `exc.errors()`: those carry the raw body in their `input` field,
         # which is bytes and cannot be serialized into an error response — so
         # reporting the failure would itself fail, as a 500.
+        await asyncio.to_thread(uploads.discard, connector_id, upload_id)
         raise HTTPException(
             status_code=422,
             detail={
@@ -608,7 +614,9 @@ async def connector_ingest_upload_commit(
             },
         ) from None
     async with db.connector_lifecycle(connector_id):
-        return await _apply_ingest(payload, connector_id, ingest_service)
+        response = await _apply_ingest(payload, connector_id, ingest_service)
+    await asyncio.to_thread(uploads.discard, connector_id, upload_id)
+    return response
 
 
 @router.get("/connector/sessions/{session_id}/attachments/{file_id}/content")
