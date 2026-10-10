@@ -134,3 +134,34 @@ test("a configured API origin still wins over the shell", async () => {
     Object.defineProperty(globalThis, "window", { configurable: true, value: previous });
   }
 });
+
+test("the published address is one other people can reach", async () => {
+  const { publicOrigin } = await import("../src/lib/api/stream-url.ts");
+  const previous = globalThis.window;
+
+  // A browser publishes its own origin.
+  const browser = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "https://closex.cc/settings",
+  });
+  try {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: browser.window });
+    assert.equal(await publicOrigin("fallback"), "https://closex.cc");
+  } finally {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: previous });
+  }
+
+  // The Desktop shell publishes the Server's, never its own scheme — an
+  // `aa-workbench://` endpoint is not an address anyone else can open.
+  const shell = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "aa-workbench://web/settings",
+  });
+  try {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: shell.window });
+    shell.window.desktopWorkbench = { stream: { baseUrl: async () => "https://closex.cc" } };
+    const published = await publicOrigin("fallback");
+    assert.equal(published, "https://closex.cc");
+    assert.ok(!published.includes("aa-workbench"), published);
+  } finally {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: previous });
+  }
+});

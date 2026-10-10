@@ -46,3 +46,18 @@ export async function webSocketUrl(path: string, explicitBase?: string): Promise
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
 }
+
+/**
+ * The address other people can use to reach this deployment.
+ *
+ * Not a stream concern, but the same question: `window.location.origin` is only
+ * an address the outside world can reach in a browser. In the Desktop shell it
+ * is `aa-workbench://web`, so anything built from it — the endpoint shown on the
+ * service page, the OAuth callback derived from it — means nothing outside the
+ * shell. Falls back to `fallback` when nothing can answer.
+ */
+export async function publicOrigin(fallback: string): Promise<string> {
+  if (typeof window === "undefined") return fallback;
+  const resolved = (await streamBaseUrl()) || window.location.origin;
+  return resolved.replace(/\/$/, "") || fallback;
+}
