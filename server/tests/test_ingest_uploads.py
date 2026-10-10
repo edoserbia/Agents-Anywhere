@@ -116,3 +116,30 @@ def test_the_commit_route_reads_a_compressed_staged_body(tmp_path) -> None:
     assert decompress_request_body(encoding, body) == BODY
 
 
+
+
+def test_one_connector_cannot_hold_unbounded_staged_transfers(tmp_path) -> None:
+    """The time-to-live bounds disk only if transfers are opened slowly.
+
+    Each transfer may hold up to the per-transfer maximum, so a client that
+    keeps opening them inside the window would otherwise fill the disk. The
+    oldest goes first; a working Connector stages one body at a time, so what it
+    still needs is the newest.
+    """
+
+    store = IngestUploadStore(
+        tmp_path / "uploads", max_uploads_per_connector=3, ttl_seconds=3600.0
+    )
+    handles = [store.create("conn_1") for _ in range(5)]
+
+    live = sorted(p.stem for p in (tmp_path / "uploads").glob("*.meta"))
+    assert len(live) == 3, live
+    # The newest three survive, so an in-flight transfer is the last to go.
+    for handle in handles[-3:]:
+        assert handle.upload_id in live
+    for handle in handles[:2]:
+        with pytest.raises(IngestUploadNotFound):
+            store.read("conn_1", handle.upload_id)
+    # Another Connector is unaffected by this one's churn.
+    other = store.create("conn_2")
+    assert store.read("conn_2", other.upload_id) == (b"", None)

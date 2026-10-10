@@ -36,6 +36,11 @@ DEFAULT_MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 # How long an unfinished transfer is kept before it is swept.
 DEFAULT_UPLOAD_TTL_SECONDS = 3600.0
 
+# Live staged transfers one Connector may hold. A working Connector stages one
+# body at a time, so this is generous; it exists so the time-to-live is not the
+# only thing standing between a misbehaving client and the disk.
+DEFAULT_MAX_UPLOADS_PER_CONNECTOR = 8
+
 _UPLOAD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 
 
@@ -74,11 +79,13 @@ class IngestUploadStore:
         *,
         max_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
         ttl_seconds: float = DEFAULT_UPLOAD_TTL_SECONDS,
+        max_uploads_per_connector: int = DEFAULT_MAX_UPLOADS_PER_CONNECTOR,
         clock=time.time,
     ) -> None:
         self.root = Path(root)
         self.max_bytes = max_bytes
         self.ttl_seconds = ttl_seconds
+        self.max_uploads_per_connector = max_uploads_per_connector
         self._clock = clock
         self.root.mkdir(parents=True, exist_ok=True)
 
@@ -91,6 +98,7 @@ class IngestUploadStore:
         """
 
         self.sweep()
+        self._evict_oldest_for(connector_id)
         upload_id = secrets.token_urlsafe(24)
         self._meta_path(upload_id).write_text(
             json.dumps({
@@ -134,6 +142,30 @@ class IngestUploadStore:
     def discard(self, connector_id: str, upload_id: str) -> None:
         self._require(connector_id, upload_id)
         self._remove(upload_id)
+
+    def _evict_oldest_for(self, connector_id: str) -> int:
+        """Keep one Connector's staged transfers bounded.
+
+        The time-to-live alone bounds disk only if the rate is low: a Connector
+        that keeps opening transfers inside the window would otherwise hold as
+        many as it liked, each up to the per-transfer maximum. The oldest goes
+        first, and a working Connector stages one body at a time, so the ones it
+        still needs are the newest.
+        """
+
+        live: list[tuple[float, str]] = []
+        for meta_path in self.root.glob("*.meta"):
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if meta.get("connectorId") == connector_id:
+                live.append((float(meta.get("createdAt", 0.0)), meta_path.stem))
+        removed = 0
+        for _, upload_id in sorted(live)[: max(0, len(live) - self.max_uploads_per_connector + 1)]:
+            self._remove(upload_id)
+            removed += 1
+        return removed
 
     def sweep(self) -> int:
         """Drop staged transfers that were never finished."""
