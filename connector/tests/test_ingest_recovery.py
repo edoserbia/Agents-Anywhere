@@ -1406,6 +1406,13 @@ def test_nothing_ever_overtakes_something_admitted_before_it():
             flusher.cancel()
             await asyncio.gather(flusher, return_exceptions=True)
 
+        # The same accounting invariant, across every path this round used.
+        submitted, resolved, outstanding = ingest.durable_accounting()
+        assert outstanding == submitted - resolved, (
+            f"{outstanding} durable entries pending but "
+            f"{submitted - resolved} promises outstanding"
+        )
+
         order = {tag: number for number, tag in enumerate(admitted)}
         positions = [order[tag] for tag in seen]
         assert positions == sorted(positions), next(
@@ -1767,6 +1774,78 @@ def test_a_parked_barrier_is_told_about_its_own_refused_data():
             waiting = asyncio.create_task(ingest.flush_notifications(timeout=5))
             with pytest.raises(httpx.HTTPStatusError):
                 await asyncio.wait_for(waiting, 6)
+
+            flusher.cancel()
+            await asyncio.gather(flusher, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_the_promise_bookkeeping_never_drifts():
+    """`resolved + in_flight <= submitted`, across every path that writes it.
+
+    This state is touched from admission, coalescing, the flush loop's success
+    and failure branches, and the barrier. Every defect found in it so far was
+    that invariant breaking — a promise counted as kept while its data was still
+    unsent, or counted twice. Asserting it directly turns the next such drift
+    into an immediate failure instead of a stalled checkpoint later.
+    """
+
+    def check(ingest, where):
+        submitted, resolved, outstanding = ingest.durable_accounting()
+        assert resolved <= submitted, (
+            f"{where}: resolved={resolved} > submitted={submitted}"
+        )
+        # The one that matters: every promise still outstanding is a real entry
+        # waiting somewhere, so none can be resolved while its data is loose.
+        assert outstanding == submitted - resolved, (
+            f"{where}: {outstanding} durable entries pending but "
+            f"{submitted - resolved} promises outstanding"
+        )
+
+    async def run():
+        refuse = {"on": False}
+
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            if request.url.path.endswith("/connector/ingest") and refuse["on"]:
+                return httpx.Response(413, json={"code": "too_large"})
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            ingest._timeline_window_seconds = lambda: 0.05
+            flusher = asyncio.create_task(ingest.flush_loop())
+
+            # Durable, legacy-replacing-durable, windowed, and a refusal.
+            await ingest.submit_notifications([{
+                "method": "session.meta.upsert",
+                "params": {"sessionId": "s1", "title": "one"}}])
+            check(ingest, "after a durable submission")
+
+            await ingest.submit_notifications([{
+                "method": "timeline.itemUpsert",
+                "params": {"sessionId": "s1", "item": {"id": "x", "revision": 1}}}])
+            await ingest.enqueue(
+                "timeline.itemUpsert",
+                {"sessionId": "s1", "item": {"id": "x", "revision": 2}})
+            check(ingest, "after a legacy lane replaced a promised slot")
+
+            await asyncio.wait_for(ingest.flush_notifications(timeout=5), 6)
+            check(ingest, "after everything was delivered")
+            assert ingest.durable_accounting()[1] == ingest.durable_accounting()[0]
+
+            refuse["on"] = True
+            await ingest.submit_notifications([{
+                "method": "session.meta.upsert",
+                "params": {"sessionId": "s1", "title": "two"}}])
+            with pytest.raises(httpx.HTTPStatusError):
+                await asyncio.wait_for(ingest.flush_notifications(timeout=5), 6)
+            check(ingest, "after a refusal")
 
             flusher.cancel()
             await asyncio.gather(flusher, return_exceptions=True)

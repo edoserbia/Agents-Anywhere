@@ -458,6 +458,29 @@ class ConnectorIngestClient:
         # for data the Server never took.
         self._raise_if_refused(target)
 
+    def durable_accounting(self) -> tuple[int, int, int]:
+        """(submitted, resolved, outstanding) — the promise bookkeeping.
+
+        `outstanding` is counted from the entries themselves rather than from a
+        counter, because that is what catches the interesting mistake: a promise
+        marked resolved while its data is still sitting in a lane — or, worse,
+        while the entry that replaced it may be evicted. A counter-only check
+        balances perfectly in that case and proves nothing.
+
+        This state is written from admission, coalescing, the flush loop's
+        success and failure branches, and the barrier; every defect found in it
+        so far has been one of those paths losing track of an entry.
+        """
+
+        outstanding = sum(
+            1 for entry in self._durable if entry.get("durable")
+        ) + sum(
+            1 for entry in self._latest_timeline.values() if entry.get("durable")
+        ) + sum(
+            1 for entry in self._inflight if entry.get("durable")
+        )
+        return self._durable_submitted, self._durable_resolved, outstanding
+
     def _advance_durable(self) -> None:
         """Record that the in-flight batch reached the Server."""
 
