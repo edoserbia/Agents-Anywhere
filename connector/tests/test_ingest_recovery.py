@@ -1007,3 +1007,57 @@ def test_a_window_never_lets_a_later_change_overtake_an_earlier_one():
         assert order == ["increment", "snapshot"]
 
     asyncio.run(run())
+
+
+def test_a_refused_batch_does_not_wedge_every_later_batch():
+    """One rejected batch must not stop the whole Connector.
+
+    A permanent rejection is reachable without any bug in the runtime: a single
+    oversized item is answered with 413, and a malformed one with 422. Both used
+    to poison the client for good, so every session on that machine stopped
+    syncing until the process was restarted — the same "only a restart fixes
+    it" shape as the frozen-proxy incident.
+
+    The guarantee that must survive: a checkpoint covering refused data still
+    fails, because those notifications never reached the Server.
+    """
+
+    async def run():
+        refuse = True
+
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            if request.url.path.endswith("/connector/ingest"):
+                if refuse:
+                    return httpx.Response(413, json={"code": "too_large"})
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            flusher = asyncio.create_task(ingest.flush_loop())
+
+            await ingest.submit_notifications([{
+                "method": "session.meta.upsert",
+                "params": {"sessionId": "s1", "title": "first"},
+            }])
+            # The checkpoint covering the refused data must not pass.
+            with pytest.raises(httpx.HTTPStatusError):
+                await asyncio.wait_for(ingest.flush_notifications(timeout=3), 4)
+
+            # New data is still accepted, and a later checkpoint over it can
+            # pass: the refusal is scoped to what it covered.
+            refuse = False
+            await ingest.submit_notifications([{
+                "method": "session.meta.upsert",
+                "params": {"sessionId": "s1", "title": "second"},
+            }])
+            await asyncio.wait_for(ingest.flush_notifications(timeout=3), 4)
+
+            flusher.cancel()
+            await asyncio.gather(flusher, return_exceptions=True)
+
+    asyncio.run(run())

@@ -158,6 +158,11 @@ class ConnectorIngestClient:
         self._durable_submitted = 0
         self._durable_resolved = 0
         self._durable_error: Exception | None = None
+        # Everything submitted up to here was refused and dropped. A barrier
+        # covering any of it must fail, but data submitted after it must not be
+        # blocked: one rejected batch used to stop every session on this
+        # Connector until the process was restarted.
+        self._durable_refused_through = 0
         self._durable_room = asyncio.Event()
         self._durable_room.set()
         self._durable_progress = asyncio.Event()
@@ -362,7 +367,7 @@ class ConnectorIngestClient:
                 len(self._latest_timeline) >= self._durable_limit()
                 and key not in self._latest_timeline
             ):
-                self._raise_if_durable_failed()
+                self._raise_if_closed()
                 self._timeline_room.clear()
                 if (
                     len(self._latest_timeline) < self._durable_limit()
@@ -383,7 +388,7 @@ class ConnectorIngestClient:
             self._durable_submitted += 1
             return
         while True:
-            self._raise_if_durable_failed()
+            self._raise_if_closed()
             if len(self._durable) < self._durable_limit():
                 break
             self._durable_room.clear()
@@ -393,10 +398,19 @@ class ConnectorIngestClient:
         self._durable.append(entry)
         self._durable_submitted += 1
 
-    def _raise_if_durable_failed(self) -> None:
+    def _raise_if_closed(self) -> None:
         if self._closed is not None:
             raise self._closed
-        if self._durable_error is not None:
+
+    def _raise_if_refused(self, target: int) -> None:
+        """A barrier may not pass data the Server refused.
+
+        The refusal is tied to the submissions it covered, not to the client:
+        a checkpoint covering refused data must still fail, while a later
+        checkpoint over newer data is free to succeed.
+        """
+
+        if self._durable_error is not None and target <= self._durable_refused_through:
             raise self._durable_error
 
     async def flush_notifications(
@@ -413,11 +427,14 @@ class ConnectorIngestClient:
         deadline = loop.time() + (
             self._durable_flush_timeout_seconds() if timeout is None else timeout
         )
+        # Checked before the loop, not inside it: refused notifications are
+        # already counted as resolved, so the watermark alone would let this
+        # barrier report success for data the Server never took.
+        self._raise_if_refused(target)
         while self._durable_resolved < target:
-            self._raise_if_durable_failed()
             self._durable_progress.clear()
             if self._durable_resolved >= target:
-                return
+                break
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError(
@@ -426,10 +443,14 @@ class ConnectorIngestClient:
             try:
                 await asyncio.wait_for(self._durable_progress.wait(), remaining)
             except TimeoutError as exc:
-                self._raise_if_durable_failed()
+                self._raise_if_refused(target)
                 raise TimeoutError(
                     "connector notification durability barrier timed out"
                 ) from exc
+        # The range became resolved. Refused notifications count as resolved
+        # too, so this is the check that keeps a barrier from reporting success
+        # for data the Server never took.
+        self._raise_if_refused(target)
 
     def _advance_durable(self) -> None:
         """Record that the in-flight batch reached the Server."""
@@ -440,12 +461,19 @@ class ConnectorIngestClient:
         self._durable_inflight = 0
         self._durable_progress.set()
 
-    def _fail_durable(self, error: Exception) -> None:
-        """The Server refused data a caller was told we would store."""
+    def _fail_durable(self, error: Exception, refused: int) -> None:
+        """The Server refused data a caller was told we would store.
 
-        if self._durable_error is not None:
-            return
-        self._durable_error = error
+        Those notifications are gone, so they are counted as resolved — the
+        watermark has to be able to move again — while the refusal is recorded
+        against the range they covered so no checkpoint can claim they landed.
+        """
+
+        if self._durable_error is None:
+            self._durable_error = error
+            self._durable_refused_through = max(
+                self._durable_refused_through, refused
+            )
         self._durable_room.set()
         self._durable_progress.set()
         self._timeline_room.set()
@@ -529,8 +557,10 @@ class ConnectorIngestClient:
                 # Data a caller was told we would store cannot be silently
                 # dropped: fail the durability barrier so the checkpoint that
                 # depends on it is never advanced past it.
-                self._fail_durable(exc)
+                refused = self._durable_submitted
+                self._durable_resolved += self._durable_inflight
                 self._durable_inflight = 0
+                self._fail_durable(exc, refused)
             self._inflight = []
             attempt = 0
 
