@@ -32,8 +32,8 @@ from connector.server.dispatch import (
     ConnectorRequestSession,
 )
 from connector.server.errors import ConnectorNetworkError
-from connector.server.local_endpoint import LocalEndpoint, LocalEndpointError
 from connector.server.ingest import ConnectorIngestClient
+from connector.server.local_endpoint import LocalEndpoint, LocalEndpointError
 from connector.server.notification_coalescer import (
     TimelineItemNotificationCoalescer,
 )

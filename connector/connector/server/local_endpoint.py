@@ -129,7 +129,7 @@ class LocalEndpoint:
             # is not a drop-in for it — passing ours made every handshake fail
             # before the handler was ever reached.
             self._server = await serve(self._handle, "127.0.0.1", 0, max_size=None)
-        except OSError as exc:  # noqa: BLE001 - reported to the caller as-is
+        except OSError as exc:
             raise LocalEndpointError(f"could not bind the local endpoint: {exc}") from exc
         sockets = self._server.sockets
         if not sockets:

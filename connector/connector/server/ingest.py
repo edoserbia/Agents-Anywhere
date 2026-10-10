@@ -958,7 +958,6 @@ class ConnectorIngestClient:
                 )
             return response
 
-        headers = {"Authorization": f"Bearer {access_token}"}
         upload_id = self._staged_uploads.get(digest)
         offset = 0
         if upload_id is not None:
@@ -989,7 +988,11 @@ class ConnectorIngestClient:
         while offset < len(body):
             chunk = body[offset : offset + RESUMABLE_UPLOAD_CHUNK_BYTES]
             response = await send(
-                lambda token: client.put(
+                # Bound by value: this lambda runs inside `send`, and the retry
+                # path calls it a second time after an await. Reading the loop
+                # variables by reference would be correct only as long as
+                # nothing else advances them in between.
+                lambda token, offset=offset, chunk=chunk: client.put(
                     api_v2_url(
                         self._server_url, f"/connector/ingest/uploads/{upload_id}"
                     ),

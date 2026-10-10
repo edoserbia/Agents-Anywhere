@@ -5,16 +5,17 @@ from collections.abc import Mapping
 from contextlib import suppress
 from typing import Any
 
+from connector.logging import logger
 from connector.runtime_protocol import (
     AgentRuntime,
+    RuntimeAttachment,
     RuntimeCapabilitySet,
     RuntimeConfig,
     RuntimeIdentity,
-    RuntimeAttachment,
-    RuntimeOperationResult,
-    RuntimeModelCatalog,
-    RuntimePermissionCatalog,
     RuntimeInvalidRequestError,
+    RuntimeModelCatalog,
+    RuntimeOperationResult,
+    RuntimePermissionCatalog,
     RuntimeTimelineSnapshot,
     RuntimeUnavailableError,
     RuntimeUnsupportedError,
@@ -26,13 +27,11 @@ from connector.runtime_protocol import (
     SessionState,
 )
 from connector.runtime_protocol.host import RuntimeHostClient
-from connector.logging import logger
 from connector.runtimes.dsh import discovery, provider_config
 from connector.runtimes.dsh.attachments import staged_attachments
 from connector.runtimes.dsh.bridge import models
 from connector.runtimes.dsh.bridge.client import BridgeClient, BridgeRpcError
 from connector.runtimes.dsh.bridge.sync import RelayHealth, SyncRelay
-
 
 BRIDGE_POLL_INTERVAL_SECONDS = 5.0
 
