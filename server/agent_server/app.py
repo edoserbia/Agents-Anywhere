@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -203,15 +204,16 @@ def create_app(
     def ingest_upload_root() -> Path:
         """Where partially received ingest bodies are staged.
 
-        The staged bytes are transient and swept on a time-to-live, so the
-        default sits beside the other server data rather than in the durable
-        file store.
+        `AGENT_SERVER_INGEST_UPLOAD_ROOT` is the only knob. The default is the
+        system temporary directory, because these bytes are transient and swept
+        on a time-to-live: they should not compete for space with the durable
+        file volume, and losing them costs one retried upload.
         """
 
         configured = os.environ.get("AGENT_SERVER_INGEST_UPLOAD_ROOT")
         if configured:
             return Path(configured)
-        return Path(os.environ.get("AGENT_SERVER_DATA_DIR", "/tmp/agent-server-data")) / "ingest-uploads"
+        return Path(tempfile.gettempdir()) / "agent-server-ingest-uploads"
 
     should_migrate = (
         db_path is not None if migrate_database is None else migrate_database
