@@ -75,26 +75,50 @@ WARNING connector.runtimes.dsh.bridge.sync
 
 这与「容器被杀掉后正在重启」的签名一致。
 
-## 主机内存是超卖的（算术，不是猜测）
+## 成因已确定：容器自己的 900 MiB 上限（内核日志）
 
-| | |
-| --- | --- |
-| `postgres-next` | 700 MB |
-| `redis-next` | 256 MB |
-| `migrate-next` | 512 MB |
-| `server-next` | **900 MB** |
-| **合计上限** | **2368 MB** |
-| 主机内存 | **1900 MB**（`docs/deployment-hosts.md`） |
-| 留给 OS + Caddy + 共存 VPN + 下载页 | **−468 MB** |
+登上主机后（只读命令），结论明确：
 
-而且每个容器的 `memswap_limit` **等于** `mem_limit`，也就是**容器没有 swap**：
-到上限就是**立刻被杀**，而不是变慢。compose 文件里的注释自己写着这些上限是为了
-「让失控进程死在这里，而不是触发全机 OOM——那会连带把共存的 VPN 干掉」，
-**说明这台机器上已经发生过全机 OOM。**
+```
+$ dmesg -T | grep "Memory cgroup out of memory"
+[Sat Oct 10 15:39:12 2026] Memory cgroup out of memory: Killed process 679567 (python)
+    total-vm:1470868kB, anon-rss:733848kB
+[Sat Oct 10 15:50:13 2026] ... anon-rss:731136kB
+[Sat Oct 10 16:01:56 2026] ... anon-rss:730740kB
+[Sat Oct 10 16:08:20 2026] ... anon-rss:730740kB 附近的同一量级
+[Sat Oct 10 16:13:24 2026] ... anon-rss:727xxxkB
+[Sat Oct 10 16:19:25 2026] ... （第 6 次）
+```
 
-这两件事合起来正好解释观察到的形状：**不是变慢，是成段地消失**。
+- `constraint=CONSTRAINT_MEMCG` → **杀它的是容器自己的 cgroup 上限**，不是全机内存不足。
+- `docker inspect`：`mem_limit=943718400`（**900 MiB**）、`memswap_limit` 相同（**无 swap**）。
+- 每次都在 **anon-rss ≈ 727–734 MB** 被杀——就是撞上限。
+- `restarts=5`；postgres / redis 都是 **Up 4 days**，只有应用容器在反复重启。
 
-## 这意味着什么
+**我先前写的「主机内存超卖」是错的**，那是照着 `docs/deployment-hosts.md` 里「1.9 GB」算的，
+而主机实际是 **3911 MB + 2 GB swap**，可用 2868 MB。主机很宽裕，**是容器的上限太小**。
+那段算术已删除。
+
+## 这是一个自我强化的循环
+
+30 秒一次采样（`docker stats`），一个完整周期：
+
+```
+16:15:04  353.7MiB      16:18:41  353.9MiB
+16:15:35  462.0MiB      16:19:13  765.4MiB   ← 两分钟内冲上去
+16:16:06  462.0MiB      16:19:44  615.7MiB
+16:16:37  462.3MiB      16:20:15   77.8MiB   ← 又被打死重启
+16:17:08  354.0MiB
+```
+
+内存先在 **354↔463 MiB** 之间锯齿（GC），然后在 **约两分钟内冲到 900 以上**被杀。
+
+击杀间隔：**11.0 → 11.7 → 6.4 → 5.1 → 6.0 分钟**，而同期有 **125 次 ingest 请求 / 5 分钟**。
+
+**循环是这样闭合的**：容器被杀 → 连接器断线重连 → **把积压一次性补传** → 内存尖峰 → 再被杀。
+所以它不会自愈，只会一直转下去。这也解释了为什么「过一会儿又能用，然后又不通」。
+
+## 这意味着什么## 这意味着什么
 
 连接器上传不了事件时：
 
@@ -110,6 +134,23 @@ WARNING connector.runtimes.dsh.bridge.sync
 
 **502 的成因未确定。** 从本机只能看到代理给出的 502，看不到容器为什么不可达。可能的成因
 （未验证）：容器被 OOM 杀掉后重启、应用崩溃、主机资源耗尽、上游被临时摘除。
+
+## 建议的改动（**未执行**，等你一句话）
+
+`docker/docker-compose.postgres.yml` 里 `server-next` 的 `mem_limit: 900m` 是硬约束，
+而主机有 3911 MB（postgres 700 + redis 256 + caddy ~40 已占约 1000 MB）：
+
+```yaml
+  server-next:
+    mem_limit: 1600m        # 原 900m
+    memswap_limit: 1600m    # 保持与 mem_limit 相同（沿用「不 swap」的既有取舍）
+```
+
+这是**上限**，不是预留，所以提高它不会挤占别的服务；主机可用 2868 MB，1600 是安全的。
+改完只需 `docker compose up -d server-next`。
+
+**但它只是止血**：真正的尖峰来自「积压一次性补传」，那要靠本分支的改动
+（连接器按字节分批 + 流式窗口合并；服务端限制单请求体大小）去削。两者要一起上。
 
 ## 到主机上要跑的命令（确定成因）
 
