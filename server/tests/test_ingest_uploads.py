@@ -8,6 +8,7 @@ and re-sending it from zero is what leaves a session stuck on its first sync.
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 
@@ -143,3 +144,67 @@ def test_one_connector_cannot_hold_unbounded_staged_transfers(tmp_path) -> None:
     # Another Connector is unaffected by this one's churn.
     other = store.create("conn_2")
     assert store.read("conn_2", other.upload_id) == (b"", None)
+
+
+def test_an_oversized_body_stops_being_read_at_the_ceiling():
+    """The ceiling has to apply while reading, not after.
+
+    `await request.body()` buffers whatever arrives before the store's limit is
+    ever consulted, so a client that sends a whole snapshot in one piece —
+    rather than chunking it — could exhaust memory first and be told about the
+    limit never. The response cannot tell the two apart, so this counts the
+    pieces the reader was willing to take: the old shape consumed every one.
+    """
+
+    from agent_server.api.connector_ingress import _read_capped
+
+    async def run():
+        produced = {"pieces": 0}
+
+        async def stream():
+            for _ in range(50):
+                produced["pieces"] += 1
+                yield b"x" * 1024
+
+        assert await _read_capped(stream(), 4096) is None
+        assert produced["pieces"] < 50, (
+            f"the reader drained all {produced['pieces']} pieces before giving up"
+        )
+
+        # A body within the limit is returned whole.
+        async def small():
+            yield b"abc"
+            yield b"def"
+
+        assert await _read_capped(small(), 4096) == b"abcdef"
+
+    asyncio.run(run())
+
+
+def test_an_oversized_piece_is_refused_and_released(tmp_path) -> None:
+    """The response contract around the ceiling."""
+
+    from agent_server.infra.ingest_uploads import IngestUploadStore
+    from test_backend_mvp import create_connector_and_session, make_client
+
+    client = make_client(tmp_path)
+    _, token, _, _ = create_connector_and_session(client)
+    auth = {"Authorization": f"Bearer {token}"}
+    client.app.state.ingest_uploads = IngestUploadStore(
+        tmp_path / "uploads", max_bytes=4096
+    )
+
+    created = client.post("/connector/ingest/uploads", headers=auth)
+    upload_id = created.json()["uploadId"]
+
+    refused = client.put(
+        f"/connector/ingest/uploads/{upload_id}",
+        headers={**auth, "X-Upload-Offset": "0",
+                 "Content-Type": "application/octet-stream"},
+        content=b"x" * 20000,
+    )
+    assert refused.status_code == 413, refused.status_code
+    # The transfer is released rather than left holding the piece.
+    assert client.get(
+        f"/connector/ingest/uploads/{upload_id}", headers=auth
+    ).status_code == 404

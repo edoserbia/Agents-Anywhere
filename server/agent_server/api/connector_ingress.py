@@ -533,7 +533,18 @@ async def connector_ingest_upload_append(
         offset = int(upload_offset)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="invalid upload offset") from exc
-    chunk = await request.body()
+    # Read with the store's own ceiling applied while reading. `await
+    # request.body()` would buffer whatever arrives before the store ever sees
+    # it, so one oversized piece — which a client that does not chunk its
+    # snapshot would send — could take the process down before any limit
+    # applied.
+    chunk = await _read_capped(request.stream(), uploads.max_bytes)
+    if chunk is None:
+        await asyncio.to_thread(uploads.discard, connector_id, upload_id)
+        raise HTTPException(
+            status_code=413,
+            detail=f"staged piece exceeds {uploads.max_bytes} bytes",
+        )
     try:
         handle = await asyncio.to_thread(
             uploads.append, connector_id, upload_id, offset, chunk
@@ -566,6 +577,24 @@ async def connector_ingest_upload_discard(
     except IngestUploadNotFound as exc:
         raise HTTPException(status_code=404, detail="unknown upload") from exc
     return Response(status_code=204)
+
+
+async def _read_capped(stream, limit: int) -> bytes | None:
+    """Read a request body, giving up as soon as it passes `limit`.
+
+    `await request.body()` buffers whatever arrives before the store's own
+    ceiling is consulted, so a client that sends a whole snapshot in one piece —
+    rather than chunking it — could exhaust memory first and be told about the
+    limit never. Returns None when the body is over the limit, so the caller can
+    refuse it; the point is that it stops reading rather than draining the lot.
+    """
+
+    buffered = bytearray()
+    async for piece in stream:
+        buffered.extend(piece)
+        if len(buffered) > limit:
+            return None
+    return bytes(buffered)
 
 
 @router.post(
