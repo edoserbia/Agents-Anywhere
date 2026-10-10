@@ -45,7 +45,22 @@ DSH --> 插件 SyncFeed --loopback--> Connector SyncRelay
 
 这不是"绕过服务器"，而是把"本机产生、本机消费"的那部分流量从公网拿回来。
 
-### 2.1 Connector：新增本地数据面服务
+### 2.1 Connector：新增本地数据面服务 —— **只读部分已实现**
+
+> **进度（2026-10-10）**：Connector 侧的只读端点**已经写完并测试**，见
+> `connector/connector/server/local_endpoint.py` 与 `connector/tests/test_local_endpoint.py`
+> （12 个用例，5 项安全属性各有变异验证）。桌面端（§2.2）**还没做**。
+>
+> 实现时确认了一件让这件事小得多的事实：连接器**已经**为服务端实现了整套 `session.*`
+> 方法（`session.discover/state/notices/capabilities/commands`、`runtime.*` 目录等），
+> 所以本地端点**不是新管道**，只是在同一个 dispatcher 前面加了第二条传输。
+>
+> 与下面原始设计的差异：只读方法的名单按实际实现确定（见 `READ_ONLY_METHODS`）；
+> **不在名单里的方法按调用拒绝、不断开连接**，这样客户端可以只对那一次调用回落；
+> 端点在**公网连接之前启动、之后停止**——本地通道的意义正是公网断了它还在。
+
+原始设计如下。
+
 
 复用插件 bridge 已经验证过的模式（临时端口 + token + `0600` 描述符 + 鉴权期限）：
 
