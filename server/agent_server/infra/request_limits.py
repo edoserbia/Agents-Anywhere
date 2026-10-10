@@ -8,10 +8,18 @@ was written for the host has 1.9 GB of RAM, the application container is capped
 at 900 MB, and the container has no swap, so a spike is an immediate kill rather
 than a slow-down, and every kill is a window of 502s for every client.
 
-The ceiling here is deliberately the same 64 MiB used for a decompressed body
-and for a staged upload. A Connector built from this repository sends at most
-256 KiB per request, so it never comes near it; the cap exists for a client that
-cannot know better, and for the one that is deployed today.
+The ceiling is measured rather than guessed. Parsing a JSON body costs resident
+memory that is never given back, at roughly nine times the body size:
+
+    body  1 MiB  ->  +8 MiB rss
+    body  4 MiB  -> +30 MiB rss
+    body 16 MiB  -> +148 MiB rss      (and the next request starts from there)
+
+So a 64 MiB body would cost something like 600 MB, which on the 900 MB container
+this was written for is an immediate kill. 8 MiB costs about 70 MB and is
+thirty-two times what a Connector built from this repository sends (256 KiB per
+request, and anything larger goes through the staged path in 256 KiB pieces).
+It is still far above any single update a runtime produces.
 
 A body over the ceiling is refused with 413 rather than read. That is a
 permanent refusal as far as the Connector is concerned, which is the honest
@@ -27,7 +35,7 @@ from starlette.requests import ClientDisconnect
 
 from agent_server.core.api_namespace import api_v2_path
 
-MAX_REQUEST_BODY_BYTES = 64 * 1024 * 1024
+MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
 
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]

@@ -70,9 +70,13 @@ def test_the_ceiling_is_well_above_what_a_connector_sends(tmp_path) -> None:
 
     from agent_server.infra.request_limits import MAX_REQUEST_BODY_BYTES
 
-    # The Connector sends at most `FLUSH_MAX_BYTES` (256 KiB) per request; this
-    # is two hundred and fifty-six times that.
-    assert MAX_REQUEST_BODY_BYTES == 64 * 1024 * 1024
+    # The Connector sends at most `FLUSH_MAX_BYTES` (256 KiB) per request, and
+    # anything larger goes through the staged path; this is thirty-two times it.
+    # The ceiling is not arbitrary: resident memory grows by roughly nine times
+    # the body size and is not returned, so a generous-looking 64 MiB would cost
+    # about 600 MB — more than half of the container this protects.
+    assert MAX_REQUEST_BODY_BYTES == 8 * 1024 * 1024
+    assert MAX_REQUEST_BODY_BYTES >= 32 * 256 * 1024
 
 
 def test_another_route_is_not_capped(tmp_path) -> None:
