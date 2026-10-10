@@ -35,9 +35,13 @@ export async function streamBaseUrl(): Promise<string | null> {
   }
 }
 
-export async function webSocketUrl(path: string): Promise<string> {
+/**
+ * Build a stream URL. `explicitBase` wins when a build configured one, so an
+ * install that points the client at a fixed API origin keeps doing that.
+ */
+export async function webSocketUrl(path: string, explicitBase?: string): Promise<string> {
   if (typeof window === "undefined") return path;
-  const base = (await streamBaseUrl()) ?? window.location.origin;
+  const base = explicitBase || (await streamBaseUrl()) || window.location.origin;
   const url = new URL(path, base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();

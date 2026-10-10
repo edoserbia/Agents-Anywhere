@@ -117,3 +117,20 @@ test("the ticket is carried through and escaped", async () => {
   const url = await webSocketUrl("/api/v2/sessions/s%2F1/ws?ticket=a%2Bb%3D");
   assert.equal(url, "wss://closex.cc/api/v2/sessions/s%2F1/ws?ticket=a%2Bb%3D");
 });
+
+test("a configured API origin still wins over the shell", async () => {
+  const previous = globalThis.window;
+  const shell = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "aa-workbench://web/",
+  });
+  try {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: shell.window });
+    shell.window.desktopWorkbench = { stream: { baseUrl: async () => "https://closex.cc" } };
+    assert.equal(
+      await webSocketUrl("/api/v2/x/ws?ticket=t", "https://fixed.example"),
+      "wss://fixed.example/api/v2/x/ws?ticket=t",
+    );
+  } finally {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: previous });
+  }
+});
