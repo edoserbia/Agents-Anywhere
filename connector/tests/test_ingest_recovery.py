@@ -1392,3 +1392,65 @@ def test_nothing_ever_overtakes_something_admitted_before_it():
 
     sent = sum(asyncio.run(one_round()) for _ in range(4))
     assert sent > 0
+
+
+def test_a_long_outage_stays_bounded_and_still_drains(monkeypatch):
+    """The weak-link case the whole design is for.
+
+    While the Server is unreachable the Connector must not grow without limit
+    and must not hammer it: the lane that holds promised data is bounded, and a
+    caller that keeps producing waits for room instead of being silently
+    dropped. When the link returns, everything drains — a bounded queue that
+    never recovers would just be a slower kind of loss.
+    """
+
+    monkeypatch.setenv("AA_CONNECTOR_INGEST_DURABLE_LIMIT", "64")
+
+    async def run():
+        state = {"healthy": False, "attempts": 0, "delivered": 0}
+        peak = {"durable": 0}
+
+        async def token(force):
+            return "token"
+
+        async def transport(request):
+            if request.url.path.endswith("/connector/ingest"):
+                state["attempts"] += 1
+                if not state["healthy"]:
+                    return httpx.Response(503, json={"detail": "unavailable"})
+                state["delivered"] += len(
+                    json.loads(request.content)["notifications"]
+                )
+            return httpx.Response(200, json={"accepted": 1, "rejected": []})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            ingest = ConnectorIngestClient(
+                "https://server.test", token, lambda: http, lambda timeout: http
+            )
+            flusher = asyncio.create_task(ingest.flush_loop())
+
+            async def producer():
+                for index in range(1000):
+                    await ingest.submit_notifications([{
+                        "method": "session.meta.upsert",
+                        "params": {"sessionId": "s1", "title": f"t{index}"},
+                    }])
+                    peak["durable"] = max(peak["durable"], len(ingest._durable))
+                    if index % 50 == 0:
+                        await asyncio.sleep(0)
+
+            task = asyncio.create_task(producer())
+            await asyncio.sleep(0.4)                 # the link is down
+            during = state["attempts"]
+
+            state["healthy"] = True
+            await asyncio.wait_for(task, 30)
+            await asyncio.wait_for(ingest.flush_notifications(timeout=30), 35)
+            flusher.cancel()
+            await asyncio.gather(flusher, return_exceptions=True)
+
+        assert peak["durable"] <= 64, f"the lane grew past its bound: {peak}"
+        assert during < 100, f"it hammered the Server while it was down: {during}"
+        assert state["delivered"] >= 1000, state
+
+    asyncio.run(run())
