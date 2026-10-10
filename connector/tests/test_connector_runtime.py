@@ -3704,3 +3704,43 @@ def test_every_connection_attempt_gets_a_fresh_http_pool():
         assert len(built) == 2
 
     asyncio.run(exercise())
+
+
+def test_the_reconnect_loop_rebuilds_the_http_pool_each_attempt():
+    """The fix is only real if the loop actually calls it.
+
+    Testing the rebuild helper alone would still pass if the loop stopped using
+    it, which is exactly the state that left a Connector unable to reach the
+    backend for an hour.
+    """
+
+    async def exercise():
+        client = BackendRpcClient(
+            ConnectorConfig(
+                "https://server.test", "conn_test", "secret", reconnect_seconds=0
+            ),
+            agent_runtime_providers=(),
+        )
+        resets = []
+
+        async def reset():
+            resets.append(1)
+
+        attempts = []
+
+        async def run_once():
+            attempts.append(1)
+            if len(attempts) >= 3:
+                raise asyncio.CancelledError()
+            raise OSError("link down")
+
+        client._reset_http_client = reset
+        client.run_once = run_once
+
+        with pytest.raises(asyncio.CancelledError):
+            await client.run_forever()
+
+        assert len(attempts) == 3
+        assert len(resets) == 3, "every connection attempt must start a new pool"
+
+    asyncio.run(exercise())
