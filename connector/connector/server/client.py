@@ -32,6 +32,7 @@ from connector.server.dispatch import (
     ConnectorRequestSession,
 )
 from connector.server.errors import ConnectorNetworkError
+from connector.server.local_endpoint import LocalEndpoint, LocalEndpointError
 from connector.server.ingest import ConnectorIngestClient
 from connector.server.notification_coalescer import (
     TimelineItemNotificationCoalescer,
@@ -142,8 +143,13 @@ class BackendRpcClient:
             flush_sync_state=self._flush_sync_state,
         )
         self._runtime_sync_task: asyncio.Task[None] | None = None
+        self._local_endpoint: LocalEndpoint | None = None
 
     async def run_forever(self) -> None:
+        # Started before the Server connection and stopped after it: the whole
+        # point of the local channel is that it keeps working while the public
+        # link does not.
+        await self._start_local_endpoint()
         ingest_flush_task = asyncio.create_task(self._ingest.flush_loop())
         sync_state_flush_task = asyncio.create_task(self._sync_state_flush_loop())
         try:
@@ -245,6 +251,7 @@ class BackendRpcClient:
                 await self._flush_sync_state()
             except Exception:  # noqa: BLE001
                 logger.exception("final sync state flush failed")
+            await self._stop_local_endpoint()
             if self._http_client is not None:
                 await self._http_client.aclose()
                 self._http_client = None
@@ -526,6 +533,27 @@ class BackendRpcClient:
             pass
         except Exception:
             logger.exception("connector background task failed")
+
+    async def _start_local_endpoint(self) -> None:
+        """Offer the same methods on loopback, for a client on this machine.
+
+        A failure here is never fatal: the Server path is unaffected, and a
+        client that cannot find the descriptor simply keeps using it.
+        """
+
+        endpoint = LocalEndpoint(self._dispatcher.dispatch)
+        try:
+            await endpoint.start()
+        except LocalEndpointError as exc:
+            logger.warning("connector local endpoint unavailable error={}", exc)
+            return
+        self._local_endpoint = endpoint
+
+    async def _stop_local_endpoint(self) -> None:
+        endpoint, self._local_endpoint = self._local_endpoint, None
+        if endpoint is not None:
+            with suppress(Exception):
+                await endpoint.stop()
 
     async def _reset_http_client(self) -> None:
         """Give every connection attempt a fresh pool and fresh proxy settings.
