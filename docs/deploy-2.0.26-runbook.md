@@ -31,6 +31,28 @@ Caddy 路由）见 `docs/deployment-hosts.md`，不要照抄任何密钥到别�
 
 两者可以**分开上**：所有新能力都是服务端先声明、Connector 才使用。
 
+## 0.15 部署前必须先止血：容器内存上限
+
+`server-next` 的 `mem_limit: 900m` 在实测下不够用：内核日志显示它按
+`CONSTRAINT_MEMCG` 反复杀掉应用（anon-rss ≈ 730 MB，`restarts` 持续增长），
+每次都是一段 502。主机本身宽裕（3911 MB + 2 GB swap，可用 2868 MB）。
+
+**部署代码之前**先做这一步，否则新代码也会被同一个上限杀掉：
+
+```yaml
+  server-next:
+    mem_limit: 1600m
+    memswap_limit: 1600m
+```
+
+```bash
+docker compose up -d server-next
+docker inspect agents-anywhere-server-next-1 --format 'restarts={{.RestartCount}}'
+```
+
+判定：改完观察 30 分钟，`RestartCount` 不再增长即止血成功。
+随后再部署本分支（它把尖峰本身削掉：请求体上限 8 MiB、连接器按字节分批 + 流式合并）。
+
 ## 0.2 发布顺序：两种都安全，但建议客户端先发
 
 两个方向都在真实服务端上验过（见发布说明「兼容性」）：
