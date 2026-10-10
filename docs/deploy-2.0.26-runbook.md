@@ -3,6 +3,25 @@
 本手册只描述**这次改动**需要走的步骤。底层主机的既有事实（主机、端口、共租服务、
 Caddy 路由）见 `docs/deployment-hosts.md`，不要照抄任何密钥到别处。
 
+## 0. 先读这一条：两种发布物，缺一不可
+
+服务端镜像和桌面端**必须都更新**，只做一半会有明确的后果：
+
+- **只部署服务端**：gzip 解压、断点续传接口、健康端点能力声明生效，但 Connector 侧
+  （收到即确认、流式窗口、按字节分批、重连重建连接池）**到不了用户手上**——桌面包里自带一份
+  `../connector` 的副本（`desktop-workbench/package.json` 的 `extraResources`），运行时用的就是它。
+- **只重建桌面端**：Connector 会探测能力声明，服务端没声明就走整包明文 JSON，功能不坏但没有压缩。
+
+判定方法（部署前后各看一次）：确认正在运行的 Connector 到底加载了哪份代码——
+
+```
+"/Users/mac/Library/Application Support/Agents Anywhere/connector/.venv/bin/python3" \
+  -c "import connector.server.ingest as m; print(m.__file__)"
+```
+
+输出指向 `Agents Anywhere.app/Contents/Resources/connector/...` 就是**包内副本**（发布版），
+指向仓库路径才是开发版。2026-10-10 排查时就踩过这个：以为实机在跑改动，实际跑的是 10 月 8 日的包内副本。
+
 ## 0. 这次为什么要部署
 
 | 改动位置 | 交付方式 | 不做的后果 |
