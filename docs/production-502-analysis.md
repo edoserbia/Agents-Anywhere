@@ -153,6 +153,18 @@ $ dmesg -T | grep "Memory cgroup out of memory"
 
 复现：`server/.venv/bin/python devtools/measure_ingest_memory_cost.py`
 
+**加上限之后（同一个脚本跑出来的对照）**：
+
+```
+body  1.0 MB -> HTTP 200   rss +10 MB
+body  4.0 MB -> HTTP 200   rss +31 MB
+body 16.0 MB -> HTTP 413   rss +24 MB     ← 超限，不再解析
+body  9.0 MB -> HTTP 413   rss  +0 MB     ← 完全不再抬高
+```
+
+同一份 16 MB 请求体：**修之前 +148 MB 且不归还，修之后 +24 MB**（只缓冲到上限就停），
+稳态 **+0**。**棘轮停了。**
+
 因此本分支给 ingest 请求体加了上限，并且**默认值是按这个实测定的：8 MiB**
 （约 70 MB 成本；是仓库里连接器单次上限 256 KiB 的 32 倍，更大的走暂存分片）。
 我上一轮先写的 64 MiB 是错的——单个 64 MiB 请求体约 600 MB，**足以杀死它本想保护的容器**。

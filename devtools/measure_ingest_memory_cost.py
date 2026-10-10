@@ -85,6 +85,27 @@ with tempfile.TemporaryDirectory() as d:
             after = rss_mb(pid)
             print(f"  body {len(body)/1048576:6.1f} MB -> HTTP {resp.status_code}   rss {before:.0f} -> {after:.0f} MB "
                   f"(+{after-before:.0f})")
+        # Now the other half: a body over the ceiling must be refused without
+        # being parsed, so the floor does not move. This is the production
+        # failure mode — the deployed Connector batches by count, so it can
+        # send a body of any size, and each one raises the floor until the
+        # container is killed.
+        limit = app.state.request_body_limit
+        text = "x" * (limit + 1024 * 1024)
+        payload = {"notifications": [{"method": "timeline.itemUpsert", "params": {
+            "sessionId": sess, "externalSessionId": "thr_m",
+            "item": {"id": "oversized", "sessionId": sess, "type": "message",
+                     "role": "assistant", "status": "done", "orderSeq": 99,
+                     "revision": 1, "content": {"text": text, "format": "markdown"},
+                     "source": {"runtime": "codex"}, "contentHash": "0" * 64}}}]}
+        body = json.dumps(payload)
+        before = rss_mb(pid)
+        resp = c.post("/connector/ingest", content=body,
+                      headers={**CH, "Content-Type": "application/json"})
+        after = rss_mb(pid)
+        print(f"  body {len(body)/1048576:6.1f} MB -> HTTP {resp.status_code}   "
+              f"rss {before:.0f} -> {after:.0f} MB ({after-before:+.0f})   "
+              f"[ceiling {limit/1048576:.0f} MiB]")
         print(f"  final rss: {rss_mb(pid):.0f} MB")
     server.should_exit = True
     time.sleep(0.5)
