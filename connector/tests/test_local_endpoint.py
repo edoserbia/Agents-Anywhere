@@ -331,3 +331,56 @@ def test_an_endpoint_that_cannot_start_does_not_stop_the_connector(tmp_path, mon
         assert client._local_endpoint is None
 
     asyncio.run(run())
+
+
+def test_the_real_connector_answers_over_the_local_endpoint(tmp_path, monkeypatch) -> None:
+    """End to end through the actual client, not a stub dispatcher.
+
+    The endpoint is only useful if it reaches the same dispatcher the Server
+    calls, including that dispatcher's own validation errors — a caller has to
+    see those rather than a silent success.
+    """
+
+    from connector.core.config import ConnectorConfig
+    from connector.server.client import BackendRpcClient
+    from connector.server.local_endpoint import descriptor_path
+
+    # Its own data directory, so this never touches a running Connector's
+    # descriptor.
+    monkeypatch.setenv("AGENT_CONNECTOR_DATA_DIR", str(tmp_path))
+
+    async def run():
+        client = BackendRpcClient(
+            ConnectorConfig("https://server.invalid", "conn_test", "secret"),
+            agent_runtime_providers=(),
+        )
+        await client._start_local_endpoint()
+        try:
+            descriptor = json.loads(descriptor_path().read_text(encoding="utf-8"))
+            assert descriptor["host"] == "127.0.0.1"
+            async with await _connect(descriptor) as socket:
+                await socket.send(json.dumps({
+                    "type": "initialize", "token": descriptor["token"],
+                }))
+                assert json.loads(await socket.recv())["type"] == "initialized"
+
+                await socket.send(json.dumps({
+                    "type": "request", "id": 1,
+                    "method": "runtime.discover", "params": {},
+                }))
+                reply = json.loads(await socket.recv())
+                assert "result" in reply, reply
+                assert "runtimeTypes" in reply["result"]
+
+                # The dispatcher's own validation is passed through, not hidden.
+                await socket.send(json.dumps({
+                    "type": "request", "id": 2,
+                    "method": "session.discover", "params": {},
+                }))
+                reply = json.loads(await socket.recv())
+                assert reply["error"]["code"] == "dispatch_failed"
+        finally:
+            await client._stop_local_endpoint()
+        assert not descriptor_path().exists()
+
+    asyncio.run(run())
