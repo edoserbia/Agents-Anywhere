@@ -164,6 +164,14 @@ contextBridge.exposeInMainWorld("desktopWorkbench", {
     node: process.versions.node,
   },
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke("workbench:openExternal", url),
+  stream: {
+    /**
+     * Where live streams should connect, or null to use the renderer's own
+     * origin. The Desktop shell is not a WebSocket-capable origin, so this is
+     * not optional there.
+     */
+    baseUrl: (): Promise<string | null> => ipcRenderer.invoke("workbench:stream:baseUrl"),
+  },
   updates: {
     syncSession: (serverUrl: string | null): Promise<DesktopUpdateState | null> => ipcRenderer.invoke("workbench:updates:syncSession", serverUrl),
     getState: (): Promise<DesktopUpdateState | null> => ipcRenderer.invoke("workbench:updates:getState"),

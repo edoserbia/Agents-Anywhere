@@ -140,6 +140,20 @@ function apiOrigin(): string {
   return activeDesktopServer().serverUrl;
 }
 
+/**
+ * The origin the renderer should build streaming URLs from.
+ *
+ * Null when no Server is configured yet, which leaves the renderer on its own
+ * origin (nothing to stream from anyway).
+ */
+function streamBaseUrl(): string | null {
+  try {
+    return apiOrigin() || null;
+  } catch {
+    return null;
+  }
+}
+
 function apiNamespace(): string {
   return activeDesktopServer().apiNamespace;
 }
@@ -697,6 +711,16 @@ function registerIpcHandlers(): void {
     if (!backend) throw new Error("Desktop backend is not ready.");
     return { baseUrl: backend.origin, token: backend.token };
   });
+  ipcMain.handle("workbench:stream:baseUrl", async (event) => {
+    assertTrustedRenderer(event);
+    // The renderer runs on the `aa-workbench://` scheme, and Electron refuses to
+    // construct a WebSocket for anything that is not http/https/ws/wss — so a
+    // URL built from `window.location.origin` throws and the live stream never
+    // connects at all. Handing it the Server's own origin is what makes those
+    // streams possible.
+    return streamBaseUrl();
+  });
+
   ipcMain.handle("workbench:openExternal", async (event, url: string) => {
     assertTrustedRenderer(event);
     if (!/^https?:\/\//i.test(url)) throw new Error("Only http(s) URLs can be opened externally.");

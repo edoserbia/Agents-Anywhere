@@ -1119,7 +1119,7 @@ export function SessionDetail({
         const ticket = await dashboardApi.createWsTicket(token, createClientId("web"), sessionId)
         if (cancelled) return
         socketSubscribed = false
-        socket = new WebSocket(dashboardApi.sessionWebSocketUrl(sessionId, ticket.ticket))
+        socket = new WebSocket(await dashboardApi.sessionWebSocketUrl(sessionId, ticket.ticket))
         socket.onopen = () => {
           if (!cancelled) streamConnectedRef.current = true
         }
