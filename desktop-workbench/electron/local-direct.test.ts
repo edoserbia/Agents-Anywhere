@@ -11,11 +11,11 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { LocalDirect } from "./local-direct";
+import { LocalDeliveryUnknown, LocalDirect } from "./local-direct";
 
 const SERVER = "https://server.test";
 
-function meta(session: Record<string, unknown> = { runtime: "codex", runtimeId: "rti_1" }) {
+function meta(session: Record<string, unknown> = { runtime: "codex", runtimeId: "rti_1", takeover: true }) {
   return async () => new Response(JSON.stringify({ session }), { status: 200 });
 }
 
@@ -39,7 +39,7 @@ function make(
 const SEND = (id = "sess_1") =>
   new Request(`${SERVER}/api/v2/sessions/${id}/runtime/messages`, {
     method: "POST",
-    body: JSON.stringify({ content: "hello" }),
+    body: JSON.stringify({ content: "hello", clientMessageId: "cm_default" }),
     headers: { "content-type": "application/json" },
   });
 
@@ -243,4 +243,156 @@ test("a caller with no credential is not given one", async () => {
   const request = STATE();
   await local.handle(request, url(request));
   assert.equal(seen, null);
+});
+
+test("a send without an idempotency key goes the normal way", async () => {
+  // Without one, a retry cannot be told apart from a second send, and the
+  // Server keeps whatever the runtime produces — so the message would appear
+  // twice. The Server's own path is where that is handled.
+  const local = make({
+    callLocal: async () => {
+      throw new Error("must not be called");
+    },
+  });
+  const request = new Request(`${SERVER}/api/v2/sessions/sess_1/runtime/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content: "hello" }),
+    headers: { "content-type": "application/json" },
+  });
+  assert.equal(await local.handle(request, url(request)), null);
+});
+
+test("the idempotency key reaches the runtime", async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const local = make({
+    callLocal: async (_method, params) => {
+      seen.push(params);
+      return { turnId: "t1" };
+    },
+  });
+  const request = new Request(`${SERVER}/api/v2/sessions/sess_1/runtime/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content: "hello", clientMessageId: "cm_1" }),
+    headers: { "content-type": "application/json" },
+  });
+  assert.ok(await local.handle(request, url(request)));
+  assert.equal(seen[0].clientMessageId, "cm_1");
+});
+
+test("a write that may have been delivered is reported, never re-sent", async () => {
+  // The one case where falling back would run the user's message twice: the
+  // request reached the runtime and the reply was lost.
+  const local = make({
+    callLocal: async () => {
+      throw new LocalDeliveryUnknown("socket closed: delivered");
+    },
+  });
+  const request = new Request(`${SERVER}/api/v2/sessions/sess_1/runtime/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content: "hello", clientMessageId: "cm_2" }),
+    headers: { "content-type": "application/json" },
+  });
+  const response = await local.handle(request, url(request));
+  assert.ok(response, "expected a reported failure, not a fallback");
+  const body = (await response.json()) as { ok: boolean; error: { code: string } };
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "local_delivery_unknown");
+});
+
+test("a read that may have been delivered still falls back", async () => {
+  // Reads can be repeated, so ambiguity costs nothing there.
+  const local = make({
+    callLocal: async () => {
+      throw new LocalDeliveryUnknown("socket closed");
+    },
+  });
+  const request = STATE();
+  const response = await local.handle(request, url(request));
+  assert.ok(response);
+  const body = (await response.json()) as { ok?: boolean; error?: { code: string } };
+  // The read path builds a state response; the ambiguous error must not have
+  // leaked into it, and the caller must not have been given a fallback either.
+  assert.equal(body.error?.code, "local_delivery_unknown");
+});
+
+test("a session that is read-only is not written to locally", async () => {
+  // Takeover is the owner's decision. A local send that ignored it would be a
+  // way around the product's rules rather than a faster way through them.
+  //
+  // The assertion is that no call was *attempted*. Asserting only that the
+  // caller fell back would pass with the gate removed too, because the call
+  // would be made, fail, and fall back anyway — a test that cannot tell the
+  // difference is not evidence.
+  let attempted = false;
+  const local = make({
+    fetcher: (async () =>
+      new Response(JSON.stringify({ session: { runtime: "codex", takeover: false } }), {
+        status: 200,
+      })) as unknown as typeof fetch,
+    callLocal: async () => {
+      attempted = true;
+      return { turnId: "t1" };
+    },
+  });
+  assert.equal(await local.handle(SEND(), url(SEND())), null);
+  assert.equal(attempted, false, "a read-only session must not be written to");
+});
+
+test("an archived session is not written to locally", async () => {
+  let attempted = false;
+  const local = make({
+    fetcher: (async () =>
+      new Response(
+        JSON.stringify({ session: { runtime: "codex", takeover: true, archived: true } }),
+        { status: 200 },
+      )) as unknown as typeof fetch,
+    callLocal: async () => {
+      attempted = true;
+      return { turnId: "t1" };
+    },
+  });
+  assert.equal(await local.handle(SEND(), url(SEND())), null);
+  assert.equal(attempted, false, "an archived session must not be written to");
+});
+
+test("a writable session does reach the Connector", async () => {
+  // The control for the two above: without this, a gate that refused
+  // everything would look correct.
+  let attempted = false;
+  const local = make({
+    fetcher: (async () =>
+      new Response(JSON.stringify({ session: { runtime: "codex", takeover: true } }), {
+        status: 200,
+      })) as unknown as typeof fetch,
+    callLocal: async () => {
+      attempted = true;
+      return { turnId: "t1" };
+    },
+  });
+  assert.ok(await local.handle(SEND(), url(SEND())));
+  assert.equal(attempted, true);
+});
+
+test("a read still works on a read-only session", async () => {
+  // Read-only means read-only, not unusable.
+  const local = make({
+    fetcher: (async () =>
+      new Response(JSON.stringify({ session: { runtime: "codex", takeover: false } }), {
+        status: 200,
+      })) as unknown as typeof fetch,
+    callLocal: async () => ({ status: "idle" }),
+  });
+  const request = STATE();
+  assert.ok(await local.handle(request, url(request)));
+});
+
+test("a writable session is written to locally", async () => {
+  const local = make({
+    fetcher: (async () =>
+      new Response(JSON.stringify({ session: { runtime: "codex", takeover: true } }), {
+        status: 200,
+      })) as unknown as typeof fetch,
+    callLocal: async () => ({ turnId: "t1" }),
+  });
+  assert.ok(await local.handle(SEND(), url(SEND())));
 });

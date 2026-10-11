@@ -77,7 +77,7 @@ test("the Desktop's client talks to the real endpoint", async () => {
       descriptorPath,
       serverOrigin: () => "https://server.test",
       fetcher: (async () =>
-        new Response(JSON.stringify({ session: { runtime: "codex", runtimeId: "rti_x" } }), {
+        new Response(JSON.stringify({ session: { runtime: "codex", runtimeId: "rti_x", takeover: true } }), {
           status: 200,
         })) as unknown as typeof fetch,
     });
@@ -98,7 +98,7 @@ test("the Desktop's client talks to the real endpoint", async () => {
       "https://server.test/api/v2/sessions/sess_1/runtime/messages",
       {
         method: "POST",
-        body: JSON.stringify({ content: "hello" }),
+        body: JSON.stringify({ content: "hello", clientMessageId: "cm_wire" }),
         headers: { "content-type": "application/json" },
       },
     );
@@ -113,6 +113,7 @@ test("the Desktop's client talks to the real endpoint", async () => {
     assert.equal(sentBody.result.params.sessionId, "sess_1");
     assert.equal(sentBody.result.params.runtime, "codex");
     assert.equal(sentBody.result.params.content, "hello");
+    assert.equal(sentBody.result.params.clientMessageId, "cm_wire");
 
     // A method the endpoint does not serve must come back as a fallback, not as
     // an error the renderer would see.
@@ -120,7 +121,7 @@ test("the Desktop's client talks to the real endpoint", async () => {
       descriptorPath,
       serverOrigin: () => "https://server.test",
       fetcher: (async () =>
-        new Response(JSON.stringify({ session: { runtime: "codex" } }), { status: 200 })) as unknown as typeof fetch,
+        new Response(JSON.stringify({ session: { runtime: "codex", takeover: true } }), { status: 200 })) as unknown as typeof fetch,
       callLocal: undefined,
     });
     const timeline = new Request("https://server.test/api/v2/sessions/sess_1/timeline");

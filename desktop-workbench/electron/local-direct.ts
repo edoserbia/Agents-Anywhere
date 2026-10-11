@@ -16,11 +16,21 @@
  *    session's state from the Server. Nothing here is the only copy of anything.
  *
  * 2. **Any doubt falls back.** An unknown session, a missing descriptor, a
- *    refused write, a closed socket, a timeout — all of them return null and the
- *    caller forwards to the Server exactly as before. The Server's own pipeline
+ *    refused write, a closed socket — all of them return null and the caller
+ *    forwards to the Server exactly as before. The Server's own pipeline
  *    (ownership, takeover, queue-when-busy, capabilities, attachments) is not
  *    reproduced here, so a caller that needs it must reach the Server; falling
  *    back is how that happens.
+ *
+ * 3. **A write that may have been delivered is never sent twice.** Falling back
+ *    is safe for a read, which can be repeated, and for a write that never left
+ *    this machine. It is not safe for a write that reached the runtime and then
+ *    lost its reply: forwarding that one would run the user's message a second
+ *    time, and the Server keeps whatever the runtime produces, so the timeline
+ *    would show it twice. That case is reported to the caller instead, carrying
+ *    the same `clientMessageId` it sent, so a retry is idempotent rather than
+ *    duplicated. A local send also requires that id — without it there is
+ *    nothing to make a retry idempotent, so it goes the normal way.
  */
 
 export type LocalDirectOptions = {
@@ -48,6 +58,15 @@ type SessionRuntime = {
   runtimeId?: string;
   cwd?: string;
   externalSessionId?: string;
+  /**
+   * The Server's own gates, carried so a local write cannot walk past them.
+   *
+   * A session the owner has not taken over is read-only, and an archived one
+   * accepts nothing. Those are the owner's decisions, not transport details, so
+   * a local send that ignored them would be a way around the product's rules
+   * rather than a faster way through them.
+   */
+  writable: boolean;
   readAt: number;
 };
 
@@ -97,10 +116,16 @@ export class LocalDirect {
       };
 
       if (route.kind === "send") {
+        // The Server would refuse these; refusing them here too keeps the
+        // faster path from becoming a way around the rules.
+        if (!session.writable) return null;
         const body = (await request.clone().json()) as Record<string, unknown>;
         if (typeof body?.content !== "string") return null;
         params.content = body.content;
-        if (typeof body.clientMessageId === "string") params.clientMessageId = body.clientMessageId;
+        // No id, no local write: a retry of a send without one cannot be told
+        // apart from a second send.
+        if (typeof body.clientMessageId !== "string" || !body.clientMessageId) return null;
+        params.clientMessageId = body.clientMessageId;
         // Attachments are resolved by the Server from file ids; without that
         // resolution the local call would silently drop them, so a message that
         // carries any goes the normal way.
@@ -111,8 +136,18 @@ export class LocalDirect {
 
       const result = await this.call("session.state", params);
       return json({ state: result, serverTime: new Date(this.clock()).toISOString() });
-    } catch {
-      // Any failure at all: the Server answers this one.
+    } catch (error) {
+      // A write that reached the runtime and then lost its reply must not be
+      // forwarded: the Server would run it again and the timeline would carry
+      // it twice. Reported instead, with the caller's own idempotency key.
+      if (error instanceof LocalDeliveryUnknown) {
+        return json({
+          ok: false,
+          result: null,
+          error: { code: "local_delivery_unknown", message: error.message },
+        });
+      }
+      // Everything else: the Server answers this one.
       return null;
     }
   }
@@ -161,6 +196,8 @@ export class LocalDirect {
       cwd: typeof session?.cwd === "string" ? session.cwd : undefined,
       externalSessionId:
         typeof session?.externalSessionId === "string" ? session.externalSessionId : undefined,
+      // Absent means "not known to be writable", and the Server decides.
+      writable: session?.takeover === true && session?.archived !== true,
       readAt: this.clock(),
     };
     this.metadata.set(sessionId, entry);
@@ -200,6 +237,13 @@ function json(body: unknown): Response {
   });
 }
 
+/**
+ * The request was handed to the socket, and what became of it is unknown.
+ *
+ * Distinct from "it never went": only this case must not be retried elsewhere.
+ */
+export class LocalDeliveryUnknown extends Error {}
+
 /** One request per connection: the endpoint answers and the socket closes. */
 async function callEndpoint(
   descriptor: Descriptor,
@@ -208,13 +252,18 @@ async function callEndpoint(
 ): Promise<unknown> {
   const socket = new WebSocket(`ws://${descriptor.host}:${descriptor.port}`);
   return await new Promise((resolve, reject) => {
+    // Set once the request frame is on the wire. After that a failure is
+    // ambiguous, not a clean "did not happen".
+    let sent = false;
+    const ambiguous = (reason: string) => (error: Error) =>
+      sent ? new LocalDeliveryUnknown(`${reason}: ${error.message}`) : error;
     const timer = setTimeout(() => {
       try {
         socket.close();
       } catch {
         // already gone
       }
-      reject(new Error("local endpoint timed out"));
+      reject(ambiguous("local endpoint timed out")(new Error("timed out")));
     }, LOCAL_CALL_TIMEOUT_MS);
     const settle = (fn: () => void) => {
       clearTimeout(timer);
@@ -237,6 +286,7 @@ async function callEndpoint(
       }
       if (message.type === "initialized") {
         socket.send(JSON.stringify({ type: "request", id: 1, method, params }));
+        sent = true;
         return;
       }
       if (message.type !== "response") return;
@@ -246,7 +296,11 @@ async function callEndpoint(
       }
       settle(() => resolve(message.result));
     });
-    socket.addEventListener("error", () => settle(() => reject(new Error("local endpoint failed"))));
-    socket.addEventListener("close", () => settle(() => reject(new Error("local endpoint closed"))));
+    socket.addEventListener("error", () =>
+      settle(() => reject(ambiguous("local endpoint failed")(new Error("socket error")))),
+    );
+    socket.addEventListener("close", () =>
+      settle(() => reject(ambiguous("local endpoint closed")(new Error("socket closed")))),
+    );
   });
 }
