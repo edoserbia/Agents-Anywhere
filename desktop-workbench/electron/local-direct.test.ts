@@ -210,3 +210,37 @@ test("reset drops what it remembered", async () => {
   await local.handle(second, url(second));
   assert.equal(reads, 2);
 });
+
+test("the metadata read carries the caller's credential", async () => {
+  // Without this the read is a 401 for every signed-in user, so the channel
+  // would never engage — safe, but indistinguishable from working. Found by
+  // running the compiled module against a real signed-in Server.
+  let seen: string | null = null;
+  const local = make({
+    fetcher: (async (_input: unknown, init?: { headers?: Record<string, string> }) => {
+      seen = init?.headers?.authorization ?? null;
+      return new Response(JSON.stringify({ session: { runtime: "codex" } }), { status: 200 });
+    }) as unknown as typeof fetch,
+    callLocal: async () => ({ status: "idle" }),
+  });
+  const request = new Request(`${SERVER}/api/v2/sessions/sess_1/runtime/state`, {
+    method: "GET",
+    headers: { authorization: "Bearer user-token" },
+  });
+  assert.ok(await local.handle(request, url(request)));
+  assert.equal(seen, "Bearer user-token");
+});
+
+test("a caller with no credential is not given one", async () => {
+  let seen: string | null = "unset";
+  const local = make({
+    fetcher: (async (_input: unknown, init?: { headers?: Record<string, string> }) => {
+      seen = init?.headers?.authorization ?? null;
+      return new Response(JSON.stringify({ session: { runtime: "codex" } }), { status: 200 });
+    }) as unknown as typeof fetch,
+    callLocal: async () => ({ status: "idle" }),
+  });
+  const request = STATE();
+  await local.handle(request, url(request));
+  assert.equal(seen, null);
+});

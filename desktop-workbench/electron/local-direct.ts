@@ -86,7 +86,7 @@ export class LocalDirect {
     if (!route) return null;
     const sessionId = decodeURIComponent(route.pattern.exec(url.pathname)![1]);
     try {
-      const session = await this.sessionRuntime(sessionId);
+      const session = await this.sessionRuntime(sessionId, request.headers.get("authorization"));
       if (!session) return null;
       const params: Record<string, unknown> = {
         sessionId,
@@ -130,14 +130,25 @@ export class LocalDirect {
    * knows which runtime a session belongs to. One small read pays for it; the
    * call that the user is waiting on is the one that then goes local.
    */
-  private async sessionRuntime(sessionId: string): Promise<SessionRuntime | null> {
+  private async sessionRuntime(
+    sessionId: string,
+    authorization: string | null,
+  ): Promise<SessionRuntime | null> {
     const cached = this.metadata.get(sessionId);
     if (cached && this.clock() - cached.readAt < this.ttl) return cached;
     const origin = this.options.serverOrigin();
     if (!origin) return null;
+    // Carry the caller's own credential. Without it the read is a 401 for every
+    // signed-in user, and this channel would silently never engage — which is
+    // safe but useless, and indistinguishable from working.
     const response = await this.options.fetcher(
       `${origin}/api/v2/sessions/${encodeURIComponent(sessionId)}/meta`,
-      { headers: { accept: "application/json" } },
+      {
+        headers: {
+          accept: "application/json",
+          ...(authorization ? { authorization } : {}),
+        },
+      },
     );
     if (!response.ok) return null;
     const payload = (await response.json()) as { session?: Record<string, unknown> };
