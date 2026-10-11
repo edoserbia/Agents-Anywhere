@@ -1,8 +1,11 @@
+import type { LocalDirect } from "./local-direct";
+
 export async function proxyDesktopApi(
   request: Request,
   serverOrigin: string,
   trustedOrigins: readonly string[],
   fetcher: typeof fetch,
+  localDirect?: LocalDirect,
 ): Promise<Response> {
   const origin = request.headers.get("origin");
   if (origin && !trustedOrigins.includes(origin)) {
@@ -19,6 +22,21 @@ export async function proxyDesktopApi(
     return new Response(null, { status: 204, headers: corsHeaders });
   }
   const url = new URL(request.url);
+  if (localDirect) {
+    // The Connector on this machine may already hold the answer, which saves a
+    // public round trip. It returns null for anything it will not serve, and
+    // never throws, so a failure here is simply the Server's turn.
+    const local = await localDirect.handle(request, url);
+    if (local) {
+      const localHeaders = new Headers(local.headers);
+      corsHeaders.forEach((value, key) => localHeaders.set(key, value));
+      return new Response(local.body, {
+        status: local.status,
+        statusText: local.statusText,
+        headers: localHeaders,
+      });
+    }
+  }
   const headers = new Headers(request.headers);
   headers.delete("origin");
   headers.delete("referer");

@@ -44,11 +44,18 @@ DESCRIPTOR_VERSION = 1
 # unauthenticated connection must not be able to sit there.
 DEFAULT_AUTH_DEADLINE_SECONDS = 10.0
 
-# What a client may ask for. Everything here reads state the Connector already
-# holds; the write methods exist in the dispatcher but are deliberately absent,
-# because a local write path has to keep the Server informed and that is a
-# separate piece of work.
-READ_ONLY_METHODS = frozenset(
+# How often to make sure the descriptor still describes this endpoint.
+#
+# A second Connector that starts and stops — the desktop app spawns one, and a
+# replacement can come and go while an older process keeps running — overwrites
+# the descriptor on the way up and removes *its own* on the way down, which
+# leaves the process that is still serving with no descriptor at all. Observed on
+# a real machine: the endpoint was listening while the file was gone, so a client
+# had no way to find it. Re-writing it costs nothing and heals that.
+DESCRIPTOR_REFRESH_SECONDS = 30.0
+
+# Reads: state the Connector already holds, answered without leaving the machine.
+READ_METHODS = frozenset(
     {
         "runtime.discover",
         "runtime.capabilities",
@@ -63,6 +70,30 @@ READ_ONLY_METHODS = frozenset(
         "session.commands",
     }
 )
+
+# Writes: a message the user just typed, handed straight to the runtime that will
+# run it, so the send does not wait for a public round trip first.
+#
+# This does not make the Server optional. The Connector watches the runtime it
+# drives and uploads what it observes through the same ingest path as always, so
+# the Server — and therefore every other machine — still learns the session's
+# state. What a local send skips is the Server's *pre-send* pipeline: ownership
+# and takeover checks, the queue-when-busy path, capability checks and attachment
+# resolution. Those are not reproduced here; a caller that needs them has to use
+# the Server, which is why a refusal from this channel is a signal to fall back
+# rather than to give up.
+WRITE_METHODS = frozenset(
+    {
+        "session.send_message",
+    }
+)
+
+# Everything a client may ask for on this channel.
+SERVED_METHODS = READ_METHODS | WRITE_METHODS
+
+# Kept as the name of what this channel used to be, so an older import still
+# resolves and still means "what may be asked for here".
+READ_ONLY_METHODS = READ_METHODS
 
 Dispatcher = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
@@ -89,15 +120,18 @@ class LocalEndpoint:
         *,
         path: Path | None = None,
         auth_deadline_seconds: float = DEFAULT_AUTH_DEADLINE_SECONDS,
-        methods: frozenset[str] = READ_ONLY_METHODS,
+        methods: frozenset[str] = SERVED_METHODS,
     ) -> None:
         self._dispatch = dispatcher
-        self._path = path if path is not None else descriptor_path()
+        # Accept a plain string too: the caller that got this wrong was the one
+        # outside this repository, and a path is a path.
+        self._path = Path(path) if path is not None else descriptor_path()
         self._auth_deadline_seconds = auth_deadline_seconds
         self._methods = methods
         self._token = secrets.token_urlsafe(32)
         self._server: Server | None = None
         self._port: int | None = None
+        self._descriptor_task: asyncio.Task[None] | None = None
 
     @property
     def port(self) -> int | None:
@@ -138,10 +172,16 @@ class LocalEndpoint:
         self._port = int(sockets[0].getsockname()[1])
         descriptor = self.descriptor()
         self._write_descriptor(descriptor)
+        self._descriptor_task = asyncio.create_task(self._keep_descriptor())
         logger.info("connector local endpoint listening port={}", self._port)
         return descriptor
 
     async def stop(self) -> None:
+        task, self._descriptor_task = self._descriptor_task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         server, self._server = self._server, None
         self._port = None
         if server is not None:
@@ -232,6 +272,34 @@ class LocalEndpoint:
     async def _send(self, connection: ServerConnection, message: dict[str, Any]) -> None:
         with contextlib.suppress(websockets.exceptions.ConnectionClosed):
             await connection.send(json.dumps(message, ensure_ascii=False))
+
+    async def _keep_descriptor(self) -> None:
+        """Put the descriptor back if something took it away."""
+
+        while True:
+            await asyncio.sleep(DESCRIPTOR_REFRESH_SECONDS)
+            try:
+                if self._port is not None and not self._descriptor_is_current():
+                    self._write_descriptor(self.descriptor())
+                    logger.info(
+                        "connector local endpoint restored its descriptor port={}",
+                        self._port,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - the endpoint keeps serving
+                logger.warning("connector local endpoint could not refresh its descriptor: {}", exc)
+
+    def _descriptor_is_current(self) -> bool:
+        try:
+            current = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return (
+            isinstance(current, dict)
+            and current.get("token") == self._token
+            and current.get("port") == self._port
+        )
 
     def _write_descriptor(self, descriptor: dict[str, Any]) -> None:
         contents = json.dumps(descriptor, indent=2, ensure_ascii=False) + "\n"

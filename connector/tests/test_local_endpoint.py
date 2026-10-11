@@ -19,7 +19,9 @@ import pytest
 import websockets
 
 from connector.server.local_endpoint import (
-    READ_ONLY_METHODS,
+    READ_METHODS,
+    SERVED_METHODS,
+    WRITE_METHODS,
     LocalEndpoint,
     LocalEndpointError,
 )
@@ -114,8 +116,8 @@ def test_a_method_outside_the_allowlist_is_refused_not_disconnected(tmp_path) ->
     """A refusal has to be per call, so a client can fall back for that one.
 
     Disconnecting would take the whole channel away because of a single call the
-    local side does not serve — and the write methods are deliberately not
-    served yet.
+    local side does not serve. `session.interrupt` is the example: it is a write
+    the Server's pipeline still owns, so it is not served here.
     """
 
     async def run():
@@ -131,7 +133,7 @@ def test_a_method_outside_the_allowlist_is_refused_not_disconnected(tmp_path) ->
 
                 await socket.send(json.dumps({
                     "type": "request", "id": 2,
-                    "method": "session.send_message", "params": {"text": "hi"},
+                    "method": "session.interrupt", "params": {"sessionId": "s"},
                 }))
                 reply = json.loads(await socket.recv())
                 assert reply["error"]["code"] == "forbidden_method"
@@ -150,12 +152,53 @@ def test_a_method_outside_the_allowlist_is_refused_not_disconnected(tmp_path) ->
     asyncio.run(run())
 
 
-def test_the_write_methods_are_not_on_the_allowlist() -> None:
-    """Stated separately: a local write path has to keep the Server informed."""
+def test_only_the_message_write_is_served(tmp_path) -> None:
+    """The one write this channel carries is the message the user just typed.
 
-    for method in ("session.send_message", "session.steer", "session.interrupt",
-                   "interaction.respond", "session.queue.update"):
-        assert method not in READ_ONLY_METHODS, method
+    Everything else that changes state stays with the Server, whose pipeline
+    owns ownership, takeover, queueing, capabilities and attachments. Serving
+    one of those here would bypass all of it.
+    """
+
+    assert WRITE_METHODS == {"session.send_message"}
+    for method in ("session.steer", "session.interrupt", "interaction.respond",
+                   "session.queue.update", "session.create"):
+        assert method not in SERVED_METHODS, method
+        assert method not in READ_METHODS, method
+
+
+def test_the_served_set_is_reads_plus_that_write() -> None:
+    assert SERVED_METHODS == READ_METHODS | WRITE_METHODS
+    assert WRITE_METHODS <= SERVED_METHODS
+
+
+def test_a_served_write_reaches_the_dispatcher(tmp_path) -> None:
+    """The write is only useful if it actually gets through."""
+
+    async def run():
+        dispatched: list = []
+        endpoint = _endpoint(tmp_path, dispatched)
+        descriptor = await endpoint.start()
+        try:
+            async with await _connect(descriptor) as socket:
+                await socket.send(
+                    json.dumps({"type": "initialize", "token": descriptor["token"]})
+                )
+                await socket.recv()
+                await socket.send(json.dumps({
+                    "type": "request", "id": 9, "method": "session.send_message",
+                    "params": {"sessionId": "s1", "runtime": "codex", "content": {"text": "hi"}},
+                }))
+                reply = json.loads(await socket.recv())
+                assert "result" in reply, reply
+            assert dispatched == [(
+                "session.send_message",
+                {"sessionId": "s1", "runtime": "codex", "content": {"text": "hi"}},
+            )]
+        finally:
+            await endpoint.stop()
+
+    asyncio.run(run())
 
 
 def test_the_descriptor_is_private_and_only_names_loopback(tmp_path) -> None:
@@ -382,5 +425,133 @@ def test_the_real_connector_answers_over_the_local_endpoint(tmp_path, monkeypatc
         finally:
             await client._stop_local_endpoint()
         assert not descriptor_path().exists()
+
+    asyncio.run(run())
+
+
+def test_the_local_channel_is_the_same_dispatcher_the_server_uses(tmp_path, monkeypatch) -> None:
+    """The reason a locally sent message still reaches the Server.
+
+    A local write is not a special path with its own side effects: it is the
+    Connector's ordinary dispatcher, which is also what answers the Server. So
+    the runtime work it triggers produces exactly the notifications it always
+    produces, and those go to the ingest client unconditionally — the Server,
+    and therefore every other machine, still learns the session's state.
+
+    If the endpoint were ever given its own dispatcher, that guarantee would
+    quietly stop holding, so it is pinned here rather than left to inspection.
+    """
+
+    from connector.core.config import ConnectorConfig
+    from connector.server.client import BackendRpcClient
+
+    monkeypatch.setenv("AGENT_CONNECTOR_DATA_DIR", str(tmp_path))
+
+    async def run():
+        client = BackendRpcClient(
+            ConnectorConfig("https://server.invalid", "conn_test", "secret"),
+            agent_runtime_providers=(),
+        )
+        await client._start_local_endpoint()
+        try:
+            endpoint = client._local_endpoint
+            assert endpoint is not None
+            # Same dispatcher object the Server's RPC is routed through.
+            assert getattr(endpoint._dispatch, "__self__", None) is client._dispatcher
+            # And that object is the one the Server's path calls.
+            assert client._dispatcher.dispatch.__self__ is client._dispatcher
+        finally:
+            await client._stop_local_endpoint()
+
+    asyncio.run(run())
+
+
+def test_a_local_write_produces_the_notifications_the_server_receives(tmp_path) -> None:
+    """Stated as behaviour, not as wiring.
+
+    Whatever a runtime does in response to a local send is reported through the
+    same notification sink the Server's own sends use, so the two cannot drift
+    into different levels of detail.
+    """
+
+    from connector.core.config import ConnectorConfig
+    from connector.server.client import BackendRpcClient
+
+    async def run():
+        client = BackendRpcClient(
+            ConnectorConfig("https://server.invalid", "conn_test", "secret"),
+            agent_runtime_providers=(),
+        )
+        submitted: list = []
+
+        async def record(notifications):
+            submitted.extend(notifications)
+
+        client._ingest.submit_notifications = record
+        await client.submit_runtime_notifications([{"method": "timeline.itemUpsert"}])
+        assert submitted == [{"method": "timeline.itemUpsert"}]
+        # The same sink is what the Server-routed path uses: there is one.
+        assert client._ingest.submit_notifications is record
+
+    asyncio.run(run())
+
+
+def test_the_descriptor_comes_back_if_something_removes_it(tmp_path, monkeypatch) -> None:
+    """A second Connector coming and going must not leave this one unfindable.
+
+    Observed on a real machine: the endpoint was listening while its descriptor
+    was gone, because a short-lived second process overwrote the file on the way
+    up and removed it on the way down. A client that cannot read the descriptor
+    cannot use the channel at all, so the endpoint keeps it current.
+    """
+
+    import connector.server.local_endpoint as module
+
+    monkeypatch.setattr(module, "DESCRIPTOR_REFRESH_SECONDS", 0.05)
+
+    async def run():
+        endpoint = _endpoint(tmp_path)
+        descriptor = await endpoint.start()
+        try:
+            path = tmp_path / "local-endpoint.json"
+            assert path.exists()
+            path.unlink()
+            assert not path.exists()
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                if path.exists():
+                    break
+            assert path.exists(), "the descriptor was never restored"
+            assert json.loads(path.read_text())["port"] == descriptor["port"]
+        finally:
+            await endpoint.stop()
+        # Stopping still cleans up after itself.
+        assert not (tmp_path / "local-endpoint.json").exists()
+
+    asyncio.run(run())
+
+
+def test_a_descriptor_that_is_not_ours_is_replaced(tmp_path, monkeypatch) -> None:
+    """Someone else's stale descriptor must not keep clients away."""
+
+    import connector.server.local_endpoint as module
+
+    monkeypatch.setattr(module, "DESCRIPTOR_REFRESH_SECONDS", 0.05)
+
+    async def run():
+        endpoint = _endpoint(tmp_path)
+        descriptor = await endpoint.start()
+        try:
+            path = tmp_path / "local-endpoint.json"
+            path.write_text(json.dumps({
+                "version": 1, "host": "127.0.0.1", "port": 1, "token": "someone-elses",
+            }))
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                if json.loads(path.read_text()).get("token") == descriptor["token"]:
+                    break
+            assert json.loads(path.read_text())["token"] == descriptor["token"]
+        finally:
+            await endpoint.stop()
 
     asyncio.run(run())

@@ -40,6 +40,7 @@ import { DesktopBackendClient } from "./backend-client";
 import { windowMaterialOptions } from "./window-material";
 import config from "../config.json";
 import { proxyDesktopApi } from "./api-proxy";
+import { LocalDirect } from "./local-direct";
 import {
   checkDesktopServer,
   DesktopServerError,
@@ -146,6 +147,28 @@ function apiOrigin(): string {
  * Null when no Server is configured yet, which leaves the renderer on its own
  * origin (nothing to stream from anyway).
  */
+/**
+ * The local-direct channel, or undefined when it cannot be used at all.
+ *
+ * Built once: it caches the descriptor and each session's runtime, and the
+ * renderer makes these calls repeatedly.
+ */
+let localDirectChannel: LocalDirect | null | undefined;
+
+function localDirect(): LocalDirect | undefined {
+  if (localDirectChannel === undefined) {
+    localDirectChannel = new LocalDirect({
+      descriptorPath: path.join(
+        process.env.AGENT_CONNECTOR_DATA_DIR?.trim() || path.join(app.getPath("home"), ".agents-anywhere"),
+        "local-endpoint.json",
+      ),
+      serverOrigin: streamBaseUrl,
+      fetcher: (input, init) => net.fetch(String(input), init),
+    });
+  }
+  return localDirectChannel ?? undefined;
+}
+
 function streamBaseUrl(): string | null {
   try {
     return apiOrigin() || null;
@@ -300,6 +323,7 @@ function registerStaticWebProtocol(): void {
         apiOrigin(),
         [`${WEB_PROTOCOL}://${WEB_HOST}`, ...(devOrigin ? [devOrigin] : [])],
         (input, init) => net.fetch(String(input), init),
+        localDirect(),
       );
     }
 
