@@ -3,10 +3,8 @@ from __future__ import annotations
 import pytest
 
 from connector.server.runtime_rpc_params import (
-    RuntimeProjectCreateParams,
-    runtime_attachments,
-)
     CommandExecuteParams,
+    RuntimeProjectCreateParams,
     runtime_attachments,
 )
 

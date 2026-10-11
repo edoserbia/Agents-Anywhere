@@ -190,7 +190,6 @@ export function SessionComposer({
     !isStopping &&
     !isWaitingApproval &&
     !isBlocked
-  const canUseSendMessage = capabilityIsUsable(effectiveCapabilities, CAPABILITY.sendMessage, runtimeScope)
   const canUseCommands = capabilityIsUsable(effectiveCapabilities, CAPABILITY.commands, runtimeScope)
   const canUseInterrupt = capabilityIsUsable(effectiveCapabilities, CAPABILITY.interrupt, runtimeScope)
   const interruptCapability = findCapability(effectiveCapabilities, CAPABILITY.interrupt, runtimeScope)
@@ -475,6 +474,18 @@ export function SessionComposer({
     ? commandSuggestions[Math.min(activeCommandIndex, commandSuggestions.length - 1)]
     : null
   React.useEffect(() => { setActiveCommandIndex(0) }, [commandQuery])
+  const canSubmitCommand = mode.kind === "command" && !commandPending && connectorOnline
+  const canSubmitMessage =
+    canSend &&
+    session.takeover &&
+    hasInput &&
+    attachmentsReady &&
+    (attachments.length === 0 || canUseAttachments) && mode.kind === "message"
+  // Keep the primary action available for queue submissions during a turn.
+  const canQueueWhileRunning = queuesWhileRunning && (canSubmitCommand || canSubmitMessage)
+  const showInterrupt =
+    !creatingSession && canUseInterrupt && activeSessionCanInterrupt && !canQueueWhileRunning
+
   const showInterruptAction = showInterrupt && mode.kind === "message" && !showCommandMenu
   React.useEffect(() => {
     onCommandQueryChange(commandQuery)
@@ -491,17 +502,6 @@ export function SessionComposer({
       ? tSession(`commandReason_${command.disabledReason}`)
       : command.disabledReason || tSession("commandUnavailable")
   }
-  const canSubmitCommand = mode.kind === "command" && !commandPending && connectorOnline
-  const canSubmitMessage =
-    canSend &&
-    session.takeover &&
-    hasInput &&
-    attachmentsReady &&
-    (attachments.length === 0 || canUseAttachments) && mode.kind === "message"
-  // Keep the primary action available for queue submissions during a turn.
-  const canQueueWhileRunning = queuesWhileRunning && (canSubmitCommand || canSubmitMessage)
-  const showInterrupt =
-    !creatingSession && canUseInterrupt && activeSessionCanInterrupt && !canQueueWhileRunning
   const concurrentWriter = runtimeState?.error?.code === "DSH_CONCURRENT_WRITER_DETECTED"
   const updateValue = React.useCallback((nextValue: string) => {
     valueRef.current = nextValue
