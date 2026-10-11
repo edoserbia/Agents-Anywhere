@@ -159,7 +159,7 @@ class EmailAccountRepositoryMixin:
         self, *, email: str, purpose: str, user_id: str = ""
     ) -> str:
         email = normalize_email(email)
-        if purpose not in {"register", "bind"} or (purpose == "bind" and not user_id):
+        if purpose not in {"register", "bind", "reset"} or (purpose == "bind" and not user_id):
             raise ValueError("invalid email verification purpose")
         now = int(time.time())
         scope = _scope(email, purpose, user_id)
@@ -440,6 +440,44 @@ class EmailAccountRepositoryMixin:
         if not valid_code:
             raise EmailVerificationError("invalid or expired verification code")
         return await self.get_user(user_id)
+
+    async def reset_password_with_code(
+        self,
+        *,
+        email: str,
+        verification_code: str | None,
+        password: str | None = None,
+        password_hash: str | None = None,
+    ) -> None:
+        email = normalize_email(email)
+        stored_password = password_hash or (
+            hash_password(password) if password else None
+        )
+        if not stored_password:
+            raise ValueError("password is required")
+        async with self._engine.begin() as conn:
+            valid_code = await self._consume_email_code(
+                conn,
+                email=email,
+                purpose="reset",
+                user_id="",
+                code=verification_code,
+            )
+            if valid_code:
+                now = utc_now()
+                # Receiving the code proves ownership of the address.
+                result = await conn.execute(
+                    update(users_t)
+                    .where(users_t.c.email == email, users_t.c.disabled == 0)
+                    .values(
+                        password_hash=stored_password,
+                        email_verified_at=func.coalesce(users_t.c.email_verified_at, now),
+                        updated_at=now,
+                    )
+                )
+                valid_code = result.rowcount == 1
+        if not valid_code:
+            raise EmailVerificationError("invalid or expired verification code")
 
     async def update_user_display_name(
         self, user_id: str, display_name: str

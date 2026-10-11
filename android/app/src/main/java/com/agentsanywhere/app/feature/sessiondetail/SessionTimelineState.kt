@@ -57,7 +57,6 @@ data class TimelineMessage(
     val sourceItemType: String? = null,
     val sourceReplacedBy: String? = null,
     val optimistic: Boolean = false,
-    val retryAction: RuntimeMessageAction? = null,
     val errorMessage: String? = null,
 )
 

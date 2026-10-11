@@ -114,7 +114,7 @@ def test_initially_offline_runtime_recovers_through_supervisor(monkeypatch):
             endpoints.append(online)
             if not online:
                 raise FileNotFoundError("Bridge not started yet")
-            return endpoint
+            return [endpoint]
 
         client = SimpleNamespace(
             connected=True,
@@ -150,7 +150,7 @@ def test_initially_offline_runtime_recovers_through_supervisor(monkeypatch):
         supervisor = RuntimeSupervisor(
             (DshProvider(prober=offline_probe),), host, status_sink
         )
-        monkeypatch.setattr(runtime_module.discovery, "load_endpoint", load_endpoint)
+        monkeypatch.setattr(runtime_module.discovery, "load_endpoints", load_endpoint)
         monkeypatch.setattr(runtime_module, "BridgeClient", make_client)
         monkeypatch.setattr(runtime_module, "SyncRelay", lambda *args, **kwargs: relay)
         monkeypatch.setattr(runtime_module, "BRIDGE_POLL_INTERVAL_SECONDS", 0.001)
@@ -213,7 +213,7 @@ def test_initially_offline_runtime_can_be_stopped(monkeypatch):
         def load_endpoint(values):
             raise FileNotFoundError("offline")
 
-        monkeypatch.setattr(runtime_module.discovery, "load_endpoint", load_endpoint)
+        monkeypatch.setattr(runtime_module.discovery, "load_endpoints", load_endpoint)
         from connector.runtime_protocol.host import RuntimeHostClient
         class Host(RuntimeHostClient):
             @property

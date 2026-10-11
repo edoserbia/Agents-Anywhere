@@ -32,6 +32,16 @@ Runtime types and runtime instances carry different facts; Web must not mix them
   the connector's reason, not as a fault.
 - `starting` and `stopping` are real states. Web shows the transition instead of
   jumping from stopped straight to running.
+- `instancePolicy` and `maxInstances` limit simultaneously running instances.
+  Saved configurations do not hide an otherwise addable runtime type. The
+  Connector checks capacity when starting, and Server returns HTTP 409 with
+  `runtime_conflict` when the limit is reached. Stopping an instance releases
+  its running slot without deleting its configuration.
+- Quick setup (onboarding and the post-pairing dialog) lists configured
+  instances and addable types together, and its quick add reuses an existing
+  configured instance. It therefore omits types that already have a configured
+  instance, so each type appears once. Additional named instances are created
+  from the device page, which keeps the rule above.
 
 ## New session
 
@@ -133,6 +143,24 @@ POST /sessions/{id}/runtime/commands
 Command execution returns a normal RPC result. If the runtime changes timeline, state, selection, or notices, those changes arrive through normal runtime events.
 
 If command catalog lookup or execution fails, Web must show an error and must not send the `/xxx` input as a normal message.
+
+Selecting a command with arguments inserts an editable draft; explicit submission
+preserves the full `raw` input. A command's `metadata.ui` selects native execution
+or a supported model/reasoning/permission selector. Commands without that metadata
+retain legacy single-line execution in idle/error states. Multiline input is
+allowed only when advertised. Attachments stay in the draft.
+
+Web distinguishes accepted, completed and unknown execution results, displays
+native text and treats `ok: false` as a failure even with HTTP 200. Failures and
+uncertain outcomes preserve input; unknown outcomes are never retried
+automatically. Late responses cannot clear newer drafts or change another
+session, including when the user leaves and revisits the original session.
+
+Refetch the catalog on session changes, command-menu reopening, reconnect,
+runtime status/availability changes and `session.commands` catalog revision
+changes. Hide a previous session's catalog immediately during navigation. Command
+availability still requires effective capabilities, an online writable session
+and the command's native status restrictions.
 
 ## Session RuntimeLive UI
 

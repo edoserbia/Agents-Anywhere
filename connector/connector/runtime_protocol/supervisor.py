@@ -158,16 +158,6 @@ class RuntimeSupervisor:
                     )
                 return self._entries[instance.runtime_id]
 
-            current_count = sum(
-                entry.runtime_type == instance.runtime_type
-                for entry in self._entries.values()
-            )
-            maximum = _provider_max_instances(provider)
-            if maximum is not None and current_count >= maximum:
-                raise RuntimeConflictError(
-                    f"runtime type {instance.runtime_type!r} allows at most "
-                    f"{maximum} configured instance(s)"
-                )
             entry = RuntimeSupervisorEntry(instance=instance, provider=provider)
             self._entries[instance.runtime_id] = entry
             self._locks[instance.runtime_id] = asyncio.Lock()
@@ -191,8 +181,9 @@ class RuntimeSupervisor:
                 config = config_with_revision(config, revision)
                 validate_provider_config_type(entry.provider, config)
                 claims = _provider_resource_claims(entry.provider, config)
-                async with self._resource_lock:
-                    self.ensure_resources_available(resolved, claims)
+                if entry.runtime is not None:
+                    async with self._resource_lock:
+                        self.ensure_resources_available(resolved, claims)
             except Exception as exc:
                 await self._set_entry(
                     resolved.runtime_id,
@@ -262,6 +253,7 @@ class RuntimeSupervisor:
             assert current_runtime is not None
             return current_runtime
 
+        self._ensure_running_capacity(instance, entry.provider)
         was_running = entry.status == "running" and entry.runtime is not None
         await self._set_entry(instance.runtime_id, status="validating", error=None)
         try:
@@ -375,6 +367,25 @@ class RuntimeSupervisor:
         lock = self._locks[runtime_id]
         async with lock, self._resource_lock:
             await self._stop_locked(runtime_id)
+
+    def _ensure_running_capacity(
+        self, instance: RuntimeInstanceSpec, provider: RuntimeProvider
+    ) -> None:
+        # Called under _resource_lock, which serializes starts and stops. A
+        # retained runtime still occupies a slot when stopping/cleanup failed;
+        # an error status alone does not prove the process has exited.
+        maximum = _provider_max_instances(provider)
+        running_count = sum(
+            entry.runtime_id != instance.runtime_id
+            and entry.runtime_type == instance.runtime_type
+            and entry.runtime is not None
+            for entry in self._entries.values()
+        )
+        if maximum is not None and running_count >= maximum:
+            raise RuntimeConflictError(
+                f"runtime type {instance.runtime_type!r} allows at most "
+                f"{maximum} running instance(s)"
+            )
 
     async def report_status(
         self,

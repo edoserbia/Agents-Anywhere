@@ -11,16 +11,23 @@ from typing import Any
 
 import pytest
 
+from connector.core import runtime_owner
 from connector.runtime_protocol import (
     RuntimeConfig,
     RuntimeInvalidRequestError,
     RuntimeUnavailableError,
     RuntimeUpstreamError,
 )
+from connector.runtime_protocol.filesystem import (
+    canonical_path,
+    filesystem_resource_key,
+)
+from connector.runtimes.dsh import provider_config
 from connector.runtimes.dsh.discovery import (
     BridgeEndpoint,
     DshDiscovery,
     discover,
+    load_endpoints,
     probe,
 )
 from connector.runtimes.dsh.provider import DshProvider
@@ -312,9 +319,120 @@ def test_dsh_questions_forward_existing_notices_and_answers_without_reinterpreta
     asyncio.run(run())
 
 
+def test_endpoint_lives_in_aa_home_while_session_identity_keeps_the_legacy_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "env-dsh"))
+    home = tmp_path / "custom-dsh"
+    config = asyncio.run(DshProvider().validate_config({"dshHome": str(home)}))
+
+    assert provider_config.endpoint_path() == Path(
+        canonical_path(runtime_owner.system_home() / ".agents-anywhere/dsh-bridge/endpoint.json")
+    )
+    endpoint_claim = next(claim for claim in DshProvider().resource_claims(config) if claim.kind == "dsh_bridge_endpoint")
+    assert endpoint_claim.key == filesystem_resource_key(provider_config.endpoint_path())
+    # Session namespaces hash this key; it must match the pre-move endpoint location.
+    assert DshProvider().session_source_key(config).key == filesystem_resource_key(
+        home / "agents-anywhere" / "bridge" / "endpoint.json"
+    )
+
+
+def _write_endpoint(path: Path, port: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": 1, "host": "127.0.0.1", "port": port, "pid": os.getpid(), "token": "token"}))
+
+
+def test_endpoints_prefer_the_aa_home_and_fall_back_to_the_legacy_dsh_home(tmp_path: Path) -> None:
+    values = {"dshHome": str(tmp_path / "dsh")}
+    current = provider_config.endpoint_path()
+    legacy = provider_config.legacy_endpoint_path(values)
+
+    with pytest.raises(FileNotFoundError):
+        load_endpoints(values)
+
+    # An older plugin only publishes under DSH_HOME.
+    _write_endpoint(legacy, 1111)
+    assert [endpoint.port for endpoint in load_endpoints(values)] == [1111]
+
+    _write_endpoint(current, 2222)
+    assert [endpoint.path for endpoint in load_endpoints(values)] == [current, legacy]
+
+    # A malformed fixed endpoint does not hide the legacy one.
+    current.write_text("{}")
+    assert [endpoint.path for endpoint in load_endpoints(values)] == [legacy]
+
+    # With nothing usable, the malformed record is the reported cause.
+    legacy.unlink()
+    with pytest.raises(ValueError):
+        load_endpoints(values)
+
+
+def test_probe_skips_a_stale_fixed_endpoint_for_a_live_legacy_one(tmp_path: Path, monkeypatch) -> None:
+    from connector.runtimes.dsh import discovery
+
+    values = {"dshHome": str(tmp_path / "dsh")}
+    _write_endpoint(provider_config.endpoint_path(), 1)
+    _write_endpoint(provider_config.legacy_endpoint_path(values), 2222)
+
+    async def fake_probe(endpoint, _values):
+        live = endpoint.port == 2222
+        return DshDiscovery(live, live, endpoint if live else None, reason=None if live else f"stale {endpoint.port}")
+
+    monkeypatch.setattr(discovery, "_probe_endpoint", fake_probe)
+    result = asyncio.run(discovery.probe(values))
+    assert result.available
+    assert result.endpoint.port == 2222
+
+    # When both fail, the fixed endpoint's reason is reported.
+    _write_endpoint(provider_config.legacy_endpoint_path(values), 3)
+    assert asyncio.run(discovery.probe(values)).reason == "stale 1"
+
+
+def test_runtime_connects_to_the_legacy_endpoint_when_the_fixed_one_is_stale(tmp_path: Path, monkeypatch) -> None:
+    from connector.runtimes.dsh import runtime as runtime_module
+
+    values = {"dshHome": str(tmp_path / "dsh")}
+    _write_endpoint(provider_config.endpoint_path(), 1)
+    _write_endpoint(provider_config.legacy_endpoint_path(values), 2222)
+    attempts: list[int] = []
+    closed: list[int] = []
+
+    class Client:
+        def __init__(self, endpoint, **_kwargs):
+            self.endpoint = endpoint
+
+        async def start(self):
+            attempts.append(self.endpoint.port)
+            if self.endpoint.port == 1:
+                raise ConnectionError("stale")
+            return {"identity": {"runtime": "dsh", "protocolVersion": "1.0"}}
+
+        async def close(self):
+            closed.append(self.endpoint.port)
+
+    monkeypatch.setattr(runtime_module, "BridgeClient", Client)
+
+    async def run() -> None:
+        runtime = DshRuntime(RuntimeConfig("dsh", 1, values), _Host())
+        normalized = provider_config.normalized_config_values(values)
+        client, _ = await runtime._connect(load_endpoints(values), normalized)
+        assert client.endpoint.port == 2222
+        assert attempts == [1, 2222]
+        assert closed == [1]
+
+        # With no live endpoint the first failure is raised.
+        attempts.clear()
+        _write_endpoint(provider_config.legacy_endpoint_path(values), 1)
+        with pytest.raises(ConnectionError):
+            await runtime._connect(load_endpoints(values), normalized)
+        assert attempts == [1, 1]
+
+    asyncio.run(run())
+
+
 def test_offline_endpoint_can_be_configured_for_background_recovery(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("DSH_HOME", str(tmp_path))
-    path = tmp_path / "agents-anywhere/bridge/endpoint.json"
+    path = provider_config.endpoint_path()
     path.parent.mkdir(parents=True)
 
     async def run() -> None:
@@ -395,7 +513,7 @@ def test_initial_catalog_error_does_not_close_other_runtime_requests(monkeypatch
             "identity": {"runtime": "dsh", "runtimeVersion": "test", "protocolVersion": "1.0"},
             "features": {"syncMode": "polling"},
         }))
-        monkeypatch.setattr(runtime_module.discovery, "load_endpoint", lambda _values: None)
+        monkeypatch.setattr(runtime_module.discovery, "load_endpoints", lambda _values: [None])
         monkeypatch.setattr(runtime_module, "BridgeClient", lambda **_kwargs: client)
         host = SimpleNamespace(
             connector_id="test", runtime_capabilities_update=AsyncMock(),

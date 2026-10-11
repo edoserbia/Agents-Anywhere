@@ -8,7 +8,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
-import { nativeRuntime } from '../fixtures/native-runtime.js'
+import { bridgePath, nativeRuntime } from '../fixtures/native-runtime.js'
 import { corruptHistory } from '../fixtures/corrupt-history.js'
 import { mountAgents, TextAdapter, initialSelections } from '../fixtures/agent-runtime.js'
 import { SyncFeed, SYNC_FLUSH_MS, type SyncBatch, type SyncOperation } from '../../src/host/dsh-runtime/sync.js'
@@ -249,7 +249,7 @@ test('startup and reconnect exclude persisted drafts and import messages sent th
       const detach = ctx.sessions.enter(session)
       ctx.sessions.announce(session)
       if (id !== 'persisted-draft') session.append('turn/start', { turn: 1 })
-      if (id === 'injected-only') session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin: 'context' }, content: [{ type: 'text', text: 'context without a user' }] }), { surfaceOp: 'append' })
+      if (id === 'injected-only') session.append('user/message', createUserMessage({ source: { kind: 'system-prompt' }, content: [{ type: 'text', text: 'context without a user' }] }), { surfaceOp: 'append' })
       if (id !== 'persisted-draft') session.append('turn/end', { turn: 1, reason: { kind: 'interrupted' } })
       await ctx.sessions.flush(session)
       detach()
@@ -277,10 +277,13 @@ test('startup and reconnect exclude persisted drafts and import messages sent th
     await until(() => !!adapter.release, 'native model is running')
     await until(() => stream.ops().some(op => op.kind === 'snapshot.commit' && op.sessionId === sessionId('test', handle!.agent.id)), 'native first message is synchronized live')
     assert.deepEqual(stream.errors, [])
+    // Disconnect before the turn's tail events reach the first feed. Whether that
+    // feed has already checkpointed the tail is a timing accident; closing here
+    // keeps the replacement feed's decision deterministic.
+    stream.feed.close()
     adapter.release!()
     await handle.agent.whenIdle()
     await fixture.ctx.sessions.flush(handle.agent.session)
-    stream.feed.close()
     stream = follow(native)
     await until(() => notifications(stream.ops()).some(n => n.method === 'session.inventory.complete'), 'reconnected inventory')
     for (const id of drafts) assert.ok(!imported().includes(sessionId('test', id)), `${id} must not be imported on reconnect`)
@@ -333,7 +336,7 @@ test('fresh detail and send checks distinguish archives from persisted and blank
   const native = fixture.ctx.agentsAnywhereRuntime.native
   let endpoint: { port: number, host: string, token: string } | undefined
   for (let attempt = 0; attempt < 100; attempt++) {
-    try { endpoint = JSON.parse(await readFile(join(home, 'agents-anywhere/bridge/endpoint.json'), 'utf8')); break }
+    try { endpoint = JSON.parse(await readFile(bridgePath(home, 'endpoint.json'), 'utf8')); break }
     catch { await delay(10) }
   }
   assert.ok(endpoint, 'published runtime endpoint')
@@ -529,7 +532,7 @@ test('checkpoint mismatches and active turns recalibrate only the affected sessi
   const complete = () => notifications(stream.ops()).some(n => n.method === 'session.inventory.complete')
   try {
     await until(complete, 'initial checkpoints')
-    for (const mutation of [{ historyHash: '0'.repeat(64) }, { projectionVersion: 99 }, { settled: false }]) {
+    for (const mutation of [{ historyHash: '0'.repeat(64) }, { projectionVersion: 2 }, { projectionVersion: 99 }, { settled: false }]) {
       stream.feed.close()
       checkpoints.set('native-main', { ...checkpoints.get('native-main') as object, ...mutation })
       stream = follow(native, checkpoints)

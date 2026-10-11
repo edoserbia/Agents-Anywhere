@@ -15,14 +15,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 
 from loguru import logger
-from contextlib import suppress
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 
 from agent_server.infra.event_preparation import EventPreparationPool
 from agent_server.infra.redis_coordinator import RedisCoordinator
 from agent_server.infra.shared_message import SharedMessage
 
+MAX_LIVE_MESSAGE_BYTES = 1024 * 1024
 
 def timeline_envelope_message(
     *,
@@ -54,8 +57,6 @@ class TimelineBroker:
         coordinator: RedisCoordinator | None = None,
         *,
         dashboard_debounce_seconds: float = 0.0,
-        listen_retry_seconds: float = 1.0,
-        listen_retry_max_seconds: float = 30.0,
         event_workers: int = 0,
         event_threshold_bytes: int = 256 * 1024,
         event_queue_items: int = 32,
@@ -67,10 +68,10 @@ class TimelineBroker:
         self._dashboard_pending: dict[str, dict] = {}
         self._dashboard_tasks: dict[str, asyncio.Task[None]] = {}
         self._dashboard_debounce_seconds = dashboard_debounce_seconds
-        self._listen_retry_seconds = listen_retry_seconds
-        self._listen_retry_max_seconds = listen_retry_max_seconds
         self._lock = asyncio.Lock()
         self._pubsub = None
+        self.connection_lost = asyncio.Event()
+        self._subscription_ready = False
         self._listener_task: asyncio.Task[None] | None = None
         self._preparation_tasks: set[asyncio.Task] = set()
         self._event_pool = EventPreparationPool(
@@ -88,25 +89,42 @@ class TimelineBroker:
             self._listen(), name="redis-timeline-listener"
         )
 
+    @property
+    def recovery_signal(self) -> asyncio.Event | None:
+        return self.connection_lost if self._coordinator.distributed else None
+
+    @property
+    def healthy(self) -> bool:
+        return not self._coordinator.distributed or (
+            self._subscription_ready
+            and self._listener_task is not None
+            and not self._listener_task.done()
+        )
+
     async def _subscribe(self) -> None:
         self._pubsub = self._coordinator.client.pubsub()
         await self._pubsub.psubscribe(
             self._coordinator.channel("timeline", "*"),
             self._coordinator.channel("dashboard", "*"),
         )
+        # A transparent redis-py reconnect can lose events without telling
+        # sockets to recover. Let our supervisor own retries instead.
+        self._pubsub.connection.retry = Retry(NoBackoff(), 0)
+        acknowledged = 0
+        async with asyncio.timeout(10):
+            while acknowledged < 2:
+                event = await self._pubsub.get_message(timeout=1)
+                if event and event.get("type") == "psubscribe":
+                    acknowledged += 1
+        self.connection_lost = asyncio.Event()
+        self._subscription_ready = True
 
-    async def _resubscribe(self) -> None:
-        """Drop a dead pubsub connection and open a fresh subscription."""
-
-        pubsub, self._pubsub = self._pubsub, None
-        if pubsub is not None:
-            try:
-                await pubsub.aclose()
-            except Exception:  # noqa: BLE001 - it is already broken
-                pass
-        await self._subscribe()
+    def _invalidate_subscription(self) -> None:
+        self._subscription_ready = False
+        self.connection_lost.set()
 
     async def close(self) -> None:
+        self._invalidate_subscription()
         tasks = [*self._dashboard_tasks.values(), *self._preparation_tasks]
         if self._listener_task is not None:
             self._listener_task.cancel()
@@ -132,6 +150,15 @@ class TimelineBroker:
 
     async def publish_message(self, session_id: str, message: str) -> None:
         """Publish a pre-encoded envelope so callers can reuse a serialization."""
+
+        # The complete projection is already retained by the write buffer.
+        # Keep oversized bodies out of global Pub/Sub; clients read them through
+        # the existing fenced recovery API instead.
+        if len(message) >= MAX_LIVE_MESSAGE_BYTES // 4 and len(message.encode("utf-8")) > MAX_LIVE_MESSAGE_BYTES:
+            payload = json.loads(message)
+            next_seq = payload.get("nextSeq")
+            if isinstance(next_seq, int) and next_seq > 0:
+                message = json.dumps({"sessionId": session_id, "nextSeq": next_seq, "refetch": True})
 
         if self._coordinator.distributed:
             lock_name = f"session-revision:{session_id}"
@@ -210,52 +237,47 @@ class TimelineBroker:
             self._fan_out_queues(queues, message)
 
     async def _listen(self) -> None:
-        timeline_prefix = self._coordinator.channel("timeline", "")
-        dashboard_prefix = self._coordinator.channel("dashboard", "")
-        delay = self._listen_retry_seconds
+        delay = 1.0
         while True:
             try:
                 if self._pubsub is None:
                     await self._subscribe()
-                async for event in self._pubsub.listen():
-                    delay = self._listen_retry_seconds
-                    if event.get("type") != "pmessage":
-                        continue
-                    channel = self._as_text(event.get("channel"))
-                    message = self._as_text(event.get("data"))
-                    if channel.startswith(timeline_prefix):
-                        await self._fan_out(
-                            self._subs, channel[len(timeline_prefix) :], message
-                        )
-                    elif channel.startswith(dashboard_prefix):
-                        await self._fan_out(
-                            self._dashboard_subs,
-                            channel[len(dashboard_prefix) :],
-                            message,
-                        )
-                # `listen()` returning means the connection is finished.
-                raise RuntimeError("Redis pubsub stream ended")
+                    logger.info("Redis timeline subscription restored")
+                await self._listen_once()
+                raise ConnectionError("Redis timeline subscription ended")
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - the listener must outlive it
-                # A subscription that dies with its connection takes every live
-                # update with it: publishers keep publishing into a channel
-                # nobody reads, and every client keeps the snapshot it loaded
-                # and never sees another change. Seen in production — the
-                # subscription was gone and clients were frozen until the
-                # process was restarted.
-                logger.warning(
-                    "timeline broker listener lost Redis, resubscribing in {}s: {}",
-                    delay, exc,
-                )
-                try:
-                    await self._resubscribe()
-                except Exception as resubscribe_exc:  # noqa: BLE001
-                    logger.warning(
-                        "timeline broker could not resubscribe: {}", resubscribe_exc
-                    )
+            except Exception as exc:  # noqa: BLE001 - supervise the long-lived delivery task
+                self._invalidate_subscription()
+                # Do not log payloads or credentials from exception messages.
+                logger.warning("Redis timeline subscription lost ({}); retry in {}s",
+                               type(exc).__name__, delay)
+                if self._pubsub is not None:
+                    with suppress(Exception):
+                        await self._pubsub.aclose()
+                    self._pubsub = None
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, self._listen_retry_max_seconds)
+                delay = min(delay * 2, 30.0)
+
+    async def _listen_once(self) -> None:
+        assert self._pubsub is not None
+        timeline_prefix = self._coordinator.channel("timeline", "")
+        dashboard_prefix = self._coordinator.channel("dashboard", "")
+        async for event in self._pubsub.listen():
+            if event.get("type") != "pmessage":
+                continue
+            channel = self._as_text(event.get("channel"))
+            message = self._as_text(event.get("data"))
+            if channel.startswith(timeline_prefix):
+                await self._fan_out(
+                    self._subs, channel[len(timeline_prefix) :], message
+                )
+            elif channel.startswith(dashboard_prefix):
+                await self._fan_out(
+                    self._dashboard_subs,
+                    channel[len(dashboard_prefix) :],
+                    message,
+                )
 
     async def _fan_out(
         self,

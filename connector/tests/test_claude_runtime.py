@@ -24,6 +24,11 @@ from connector.runtimes.claude.domain.pending_messages import (
 )
 from connector.runtimes.claude.domain.session import ClaudeExecution, stable_session_id
 from connector.runtimes.claude.runtime import ClaudeRuntime
+from connector.runtimes.claude.sdk.connection import (
+    LEGACY_RECONCILE_PROMPT,
+    RECONCILE_DONE_MARKER,
+    RECONCILE_PROMPT,
+)
 
 
 @pytest.mark.parametrize(
@@ -1608,6 +1613,78 @@ def test_claude_runtime_history_drops_synthetic_control_messages() -> None:
     asyncio.run(_test_claude_runtime_history_drops_synthetic_control_messages())
 
 
+def test_claude_maintenance_stays_hidden_after_history_reload_and_delta() -> None:
+    asyncio.run(_test_claude_maintenance_stays_hidden_after_history_reload_and_delta())
+
+
+async def _test_claude_maintenance_stays_hidden_after_history_reload_and_delta() -> None:
+    native_id = "claude_maintenance_history"
+
+    def entry(role: str, uuid: str, content: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            type=role,
+            uuid=uuid,
+            session_id=native_id,
+            message={"role": role, "content": content},
+        )
+
+    sdk = _HistorySdk(messages={native_id: [entry("user", "human_1", "hello")]})
+    host = _RecordingHost()
+    runtime = _runtime(host=host, sdk=sdk)
+    await runtime.sync_session_timeline("sess_maintenance", native_id)
+    host.timeline_syncs.clear()
+    sdk.messages[native_id].extend(
+        [
+            entry("user", "maintenance_request", RECONCILE_PROMPT),
+            entry("assistant", "maintenance_tool", [{
+                "type": "tool_use", "id": "cron_list_1", "name": "CronList", "input": {},
+            }]),
+            entry("user", "maintenance_result", [{
+                "type": "tool_result", "tool_use_id": "cron_list_1", "content": "one job",
+            }]),
+            entry("assistant", "maintenance_answer", [{
+                "type": "text", "text": RECONCILE_DONE_MARKER,
+            }]),
+            entry("user", "human_2", "next real question"),
+            entry("assistant", "answer_2", "real answer"),
+        ]
+    )
+
+    await runtime.sync_session_timeline("sess_maintenance", native_id)
+    incremental = host.timeline_syncs[-1]["items"]
+    snapshot = await runtime.get_session_snapshot("sess_maintenance", native_id)
+    assert [item.content.get("text") for item in incremental if item.type == "message"] == [
+        "next real question", "real answer",
+    ]
+    assert not any(item.type == "tool" for item in incremental)
+    assert [item.content.get("text") for item in snapshot.items if item.type == "message"] == [
+        "hello", "next real question", "real answer",
+    ]
+    assert not any(item.type == "tool" for item in snapshot.items)
+
+
+def test_claude_maintenance_history_preserves_unmarked_scheduled_reply() -> None:
+    from connector.runtimes.claude.sessions.reader import _without_maintenance_messages
+
+    def entry(role: str, uuid: str, content: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            type=role, uuid=uuid, message={"role": role, "content": content},
+        )
+
+    scheduled = entry("assistant", "scheduled_reply", "reminder fired")
+    messages = (
+        entry("user", "old_maintenance", LEGACY_RECONCILE_PROMPT),
+        entry("assistant", "cron_call", [{
+            "type": "tool_use", "id": "cron", "name": "CronList", "input": {},
+        }]),
+        entry("user", "cron_result", [{
+            "type": "tool_result", "tool_use_id": "cron", "content": "[]",
+        }]),
+        scheduled,
+    )
+    assert _without_maintenance_messages(messages) == (scheduled,)
+
+
 async def _test_claude_runtime_history_drops_synthetic_control_messages() -> None:
     host = _RecordingHost()
     external_session_id = "claude_history_controls"
@@ -2042,6 +2119,187 @@ async def _test_claude_runtime_rejects_unknown_model_selection() -> None:
 
     assert result.ok is False
     assert result.code == "claude_invalid_selection"
+
+
+def test_claude_runtime_lists_models_reported_by_claude_code() -> None:
+    asyncio.run(_test_claude_runtime_lists_models_reported_by_claude_code())
+
+
+async def _test_claude_runtime_lists_models_reported_by_claude_code() -> None:
+    discovery = _DiscoveryClientType(server_info={"models": _CLI_MODELS})
+    runtime = _runtime(
+        sdk=_default_sdk(ClaudeSDKClient=discovery),
+        config=RuntimeConfig(
+            runtime="claude",
+            revision=1,
+            values={
+                "environment": {"EXAMPLE": "1"},
+                "executablePath": "/opt/claude/bin/claude",
+                "customModels": [
+                    {"modelId": "claude-local-test", "displayName": "Local Test"}
+                ],
+            },
+        ),
+    )
+
+    catalog = await runtime.list_model_catalog()
+
+    assert [model.id for model in catalog.models] == [
+        "default",
+        "opus[1m]",
+        "claude-fable-5-1",
+        "haiku",
+        "claude-local-test",
+    ]
+    assert catalog.revision == 1004
+    default = catalog.models[0]
+    assert default.title == "Default (recommended)"
+    assert default.description == "Opus 5.5 with 1M context"
+    assert default.metadata["source"] == "claude-code.initialize"
+    assert default.metadata["resolvedModel"] == "claude-opus-5-5[1m]"
+    assert default.metadata["supportsFastMode"] is True
+    assert [item.id for item in default.reasoning_items] == ["low", "high", "max"]
+    assert default.reasoning_items[1].title == "High"
+    assert catalog.models[3].reasoning_items == ()
+    assert catalog.models[4].metadata["custom"] is True
+
+    await runtime.list_model_catalog(query="haiku")
+    assert discovery.created == 1
+    options = discovery.instances[0].options
+    assert options.kwargs["cli_path"] == "/opt/claude/bin/claude"
+    assert options.kwargs["env"] == {"EXAMPLE": "1"}
+    assert "model" not in options.kwargs
+    assert discovery.instances[0].connected is True
+    assert discovery.instances[0].disconnected is True
+    assert discovery.instances[0].queries == []
+
+
+def test_claude_runtime_default_cli_model_omits_model_flag() -> None:
+    asyncio.run(_test_claude_runtime_default_cli_model_omits_model_flag())
+
+
+async def _test_claude_runtime_default_cli_model_omits_model_flag() -> None:
+    client = _FakeClaudeClient(
+        messages=[SimpleNamespace(type="result", session_id="claude_default")]
+    )
+    runtime = _runtime(
+        client=client,
+        sdk=_default_sdk(
+            ClaudeSDKClient=_DiscoveryClientType(server_info={"models": _CLI_MODELS})
+        ),
+    )
+    default = (await runtime.list_model_catalog(query="default")).models[0]
+    effort = next(item for item in default.reasoning_items if item.id == "max")
+
+    result = await runtime.start_turn(
+        "sess_default",
+        "claude_default",
+        "use default",
+        selections={"model": effort.selection_id},
+    )
+    task = runtime._sessions["sess_default"].active_task
+    assert result.ok is True
+    assert task is not None
+    await task
+
+    assert "model" not in client.options.kwargs
+    assert client.options.kwargs["effort"] == "max"
+
+
+def test_claude_runtime_resolves_cli_selection_before_first_catalog_read() -> None:
+    asyncio.run(_test_claude_runtime_resolves_cli_selection_before_first_catalog_read())
+
+
+async def _test_claude_runtime_resolves_cli_selection_before_first_catalog_read() -> (
+    None
+):
+    # A session keeps its CLI selection across a Connector restart, when the
+    # fresh runtime has not read the CLI list yet.
+    listed = await _runtime(
+        sdk=_default_sdk(
+            ClaudeSDKClient=_DiscoveryClientType(server_info={"models": _CLI_MODELS})
+        )
+    ).list_model_catalog(query="opus")
+    selection_id = listed.models[0].selection_id
+
+    client = _FakeClaudeClient(
+        messages=[SimpleNamespace(type="result", session_id="claude_restart")]
+    )
+    discovery = _DiscoveryClientType(server_info={"models": _CLI_MODELS})
+    runtime = _runtime(client=client, sdk=_default_sdk(ClaudeSDKClient=discovery))
+
+    result = await runtime.start_turn(
+        "sess_restart",
+        "claude_restart",
+        "resume",
+        selections={"model": selection_id},
+    )
+    task = runtime._sessions["sess_restart"].active_task
+    assert result.ok is True
+    assert task is not None
+    await task
+
+    assert discovery.created == 1
+    assert client.options.kwargs["model"] == "opus[1m]"
+
+
+def test_claude_runtime_keeps_static_selections_with_cli_catalog() -> None:
+    asyncio.run(_test_claude_runtime_keeps_static_selections_with_cli_catalog())
+
+
+async def _test_claude_runtime_keeps_static_selections_with_cli_catalog() -> None:
+    static_model = (
+        await _runtime().list_model_catalog(query="claude-opus-4-8")
+    ).models[0]
+    client = _FakeClaudeClient(
+        messages=[SimpleNamespace(type="result", session_id="claude_static")]
+    )
+    discovery = _DiscoveryClientType(server_info={"models": _CLI_MODELS})
+    runtime = _runtime(client=client, sdk=_default_sdk(ClaudeSDKClient=discovery))
+
+    catalog = await runtime.list_model_catalog()
+    assert "claude-opus-4-8" not in [model.id for model in catalog.models]
+
+    result = await runtime.start_turn(
+        "sess_static",
+        "claude_static",
+        "keep static",
+        selections={"model": static_model.selection_id},
+    )
+    task = runtime._sessions["sess_static"].active_task
+    assert result.ok is True
+    assert task is not None
+    await task
+
+    assert client.options.kwargs["model"] == "claude-opus-4-8"
+    assert discovery.created == 1
+
+
+def test_claude_runtime_falls_back_to_static_models_when_discovery_fails() -> None:
+    asyncio.run(_test_claude_runtime_falls_back_to_static_models_when_discovery_fails())
+
+
+async def _test_claude_runtime_falls_back_to_static_models_when_discovery_fails() -> (
+    None
+):
+    discovery = _DiscoveryClientType(connect_error=RuntimeError("claude missing"))
+    runtime = _runtime(sdk=_default_sdk(ClaudeSDKClient=discovery))
+
+    first = await runtime.list_model_catalog()
+    second = await runtime.list_model_catalog()
+    unknown = await runtime.start_turn(
+        "sess_unknown",
+        None,
+        "hello",
+        selections={"model": "sel_model_missing"},
+    )
+
+    assert first.models[0].id == "claude-fable-5"
+    assert first.models[0].metadata["source"] == "claude-code.static-models"
+    assert second.models == first.models
+    assert unknown.ok is False
+    assert unknown.code == "claude_invalid_selection"
+    assert discovery.created == 1
 
 
 def test_claude_runtime_rejects_unknown_permission_selection() -> None:
@@ -3470,7 +3728,7 @@ def _runtime_with_client_factory(
     )
 
 
-def _default_sdk() -> Any:
+def _default_sdk(**overrides: Any) -> Any:
     return SimpleNamespace(
         __version__="1.0",
         ClaudeAgentOptions=_FakeOptions,
@@ -3479,14 +3737,93 @@ def _default_sdk() -> Any:
         list_sessions=lambda **_: [],
         get_session_info=lambda **_: None,
         get_session_messages=lambda **_: [],
+        **overrides,
     )
 
 
-def _config() -> RuntimeConfig:
+# Shape of the `models` entry in Claude Code's initialize response.
+_CLI_MODELS: list[dict[str, Any]] = [
+    {
+        "value": "default",
+        "resolvedModel": "claude-opus-5-5[1m]",
+        "displayName": "Default (recommended)",
+        "description": "Opus 5.5 with 1M context",
+        "supportsEffort": True,
+        "supportedEffortLevels": ["low", "high", "max"],
+        "supportsFastMode": True,
+    },
+    {
+        "value": "opus[1m]",
+        "resolvedModel": "claude-opus-5-5[1m]",
+        "displayName": "Opus (1M context)",
+        "description": "Opus 5.5 with 1M context",
+        "supportsEffort": True,
+        "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+        "value": "claude-fable-5-1",
+        "resolvedModel": "claude-fable-5-1",
+        "displayName": "Fable",
+        "description": "Fable 5.1",
+        "supportsEffort": True,
+        "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+        "value": "haiku",
+        "resolvedModel": "claude-haiku-4-5-20251001",
+        "displayName": "Haiku",
+        "description": "Haiku 4.5",
+    },
+]
+
+
+class _DiscoveryClientType:
+    """Stands in for `claude_agent_sdk.ClaudeSDKClient` during model discovery."""
+
+    def __init__(
+        self,
+        *,
+        server_info: dict[str, Any] | None = None,
+        connect_error: Exception | None = None,
+    ) -> None:
+        self.server_info = server_info
+        self.connect_error = connect_error
+        self.instances: list[_FakeClaudeClient] = []
+
+    @property
+    def created(self) -> int:
+        return len(self.instances)
+
+    def __call__(self, options: Any) -> _FakeClaudeClient:
+        owner = self
+        client = _FakeClaudeClient()
+        client.options = options
+
+        async def connect() -> None:
+            if owner.connect_error is not None:
+                raise owner.connect_error
+            client.connected = True
+
+        async def get_server_info() -> dict[str, Any] | None:
+            return owner.server_info
+
+        client.connect = connect  # type: ignore[method-assign]
+        client.get_server_info = get_server_info  # type: ignore[attr-defined]
+        self.instances.append(client)
+        return client
+
+
+def _config(*, idle_timeout_seconds: float | None = None) -> RuntimeConfig:
     return RuntimeConfig(
         runtime="claude",
         revision=1,
-        values={"environment": {}},
+        values={
+            "environment": {},
+            **(
+                {"idleTimeoutSeconds": idle_timeout_seconds}
+                if idle_timeout_seconds is not None else {}
+            ),
+        },
     )
 
 
@@ -3628,6 +3965,1266 @@ class _FakeHookMatcher:
     def __init__(self, matcher: Any, hooks: list[Any]) -> None:
         self.matcher = matcher
         self.hooks = hooks
+
+
+class _ScheduledClaudeClient(_FakeClaudeClient):
+    def __init__(self, native_id: str = "native_timer") -> None:
+        super().__init__()
+        self.native_id = native_id
+        self.incoming: asyncio.Queue[Any] = asyncio.Queue()
+        self.owner = None
+
+    async def connect(self) -> None:
+        await super().connect()
+        self.owner = asyncio.current_task()
+
+    async def disconnect(self) -> None:
+        assert asyncio.current_task() is self.owner
+        await super().disconnect()
+
+    async def tool_result(self, name: str, response: dict[str, Any]) -> None:
+        hook = self.options.kwargs["hooks"]["PostToolUse"][0].hooks[0]
+        await hook({"tool_name": name, "tool_response": response}, None, None)
+
+    async def query(self, prompt: str) -> None:
+        if not isinstance(prompt, str):
+            async for message in prompt:
+                prompt = message["message"]["content"]
+                await self.incoming.put(
+                    UserMessage(uuid=message["uuid"], content=prompt)
+                )
+        await super().query(prompt)
+        if prompt == "schedule":
+            await self.tool_result("CronCreate", {"id": "timer_1", "recurring": False})
+        elif prompt == "cancel":
+            await self.tool_result("CronDelete", {"id": "timer_1"})
+        if prompt != "wait":
+            await self.reply(f"reply:{prompt}")
+
+    async def reply(self, text: str) -> None:
+        await self.incoming.put(
+            AssistantMessage(
+                uuid=f"assistant_{text}",
+                session_id=self.native_id,
+                content=[{"type": "text", "text": text}],
+            )
+        )
+        await self.incoming.put(
+            SimpleNamespace(type="result", session_id=self.native_id)
+        )
+
+    async def receive_messages(self):
+        while True:
+            message = await self.incoming.get()
+            if isinstance(message, Exception):
+                raise message
+            yield message
+
+    async def interrupt(self) -> None:
+        await super().interrupt()
+        await self.incoming.put(
+            SimpleNamespace(
+                type="result",
+                session_id="native_timer",
+                terminal_reason="aborted_streaming",
+            )
+        )
+
+
+class _ReconcileClaudeClient(_ScheduledClaudeClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.jobs: list[dict[str, Any]] = []
+        self.check_error = False
+        self.hold_check = False
+
+    async def query(self, prompt):
+        if isinstance(prompt, str):
+            await super().query(prompt)
+            return
+        async for message in prompt:
+            content = message["message"]["content"]
+            await self.incoming.put(UserMessage(uuid=message["uuid"], content=content))
+        if content != RECONCILE_PROMPT:
+            await super().query(content)
+            return
+        self.queries.append(content)
+
+        async def check():
+            if self.hold_check:
+                return
+            hook = self.options.kwargs["hooks"]["PreToolUse"][0].hooks[0]
+            allowed = await hook({"tool_name": "CronList"})
+            assert allowed["hookSpecificOutput"]["permissionDecision"] == "allow"
+            denied = await hook({"tool_name": "Bash"})
+            assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+            await self.tool_result("CronList", {"jobs": self.jobs})
+            await self.incoming.put(SimpleNamespace(
+                type="result", session_id=self.native_id, is_error=self.check_error,
+            ))
+
+        await self.incoming.put(check)
+
+    async def receive_messages(self):
+        async for message in super().receive_messages():
+            if callable(message):
+                await message()
+            else:
+                yield message
+
+
+@pytest.mark.parametrize(
+    ("jobs", "check_error", "closes"),
+    [([], False, True), ([{"id": "future_timer"}], False, False),
+     ([{"id": "recurring_timer"}], False, False),
+     ([{"bad": "missing id"}], False, False), ([], True, False)],
+)
+def test_claude_reconciles_after_scheduled_reply_without_visible_maintenance(
+    jobs, check_error, closes,
+) -> None:
+    async def run():
+        client = _ReconcileClaudeClient()
+        client.jobs, client.check_error = jobs, check_error
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(
+            client=client, sdk=sdk, host=host,
+            config=_config(idle_timeout_seconds=0),
+        )
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            assert RECONCILE_PROMPT not in client.queries
+            await client.reply("reminder delivered")
+            await _wait_until(lambda: len(host.session_turn_ends) == 2)
+            await _wait_until(lambda: runtime._sessions["timer"].execution is None)
+            if closes:
+                await _wait_until(lambda: client.disconnected)
+            assert client.disconnected is closes
+            assert client.queries.count(RECONCILE_PROMPT) == 1
+            assert len([i for i in host.timeline_item_upserts if i.role == "user"]) == 1
+            assert not any(RECONCILE_PROMPT in str(i.content) for i in host.timeline_item_upserts)
+            saved = host.sync_states["claude/scheduled/sessions"]["sessions"]
+            assert ("timer" not in saved) is closes
+            if not closes:
+                expected = {"timer_1"} if check_error or jobs == [{"bad": "missing id"}] else {jobs[0]["id"]}
+                assert runtime._turns.runner.connections["timer"].task_ids == expected
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_stop_during_maintenance_preserves_pending_tasks() -> None:
+    async def run():
+        client = _ReconcileClaudeClient()
+        client.hold_check = True
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        host = _RecordingHost()
+        runtime = _runtime(client=client, sdk=sdk, host=host)
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            await client.reply("reminder delivered")
+            await _wait_until(lambda: RECONCILE_PROMPT in client.queries)
+            await asyncio.wait_for(runtime.stop(), 2)
+            assert client.disconnected
+            assert runtime._sessions["timer"].execution is None
+            assert host.sync_states["claude/scheduled/sessions"]["sessions"]["timer"]["taskIds"] == ["timer_1"]
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_scheduled_reply_racing_user_submission_keeps_turn_ownership() -> None:
+    class RacingClient(_ScheduledClaudeClient):
+        async def query(self, prompt):
+            if not isinstance(prompt, str):
+                await self.reply("scheduled first")
+            await super().query(prompt)
+
+    async def run():
+        client = RacingClient()
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(client=client, sdk=sdk, host=host)
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            human = await runtime.start_turn("timer", "native_timer", "hello")
+            task = runtime._sessions["timer"].active_task
+            await asyncio.wait_for(task, 2)
+            human_id = human.result["turnId"]
+            replies = {
+                i.content.get("text"): i.turn_id
+                for i in host.timeline_item_upserts
+                if i.role == "assistant"
+            }
+            assert replies["reply:hello"] == human_id
+            assert replies["scheduled first"] != human_id
+            assert [e["turn_id"] for e in host.session_turn_ends][-2:] == [
+                replies["scheduled first"],
+                human_id,
+            ]
+            assert len([i for i in host.timeline_item_upserts if i.role == "user"]) == 2
+            assert runtime._sessions["timer"].execution is None
+            assert runtime._sessions["timer"].queued_execution is None
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stop_runtime", [False, True])
+def test_claude_stop_clears_both_executions_during_scheduled_collision(
+    stop_runtime: bool,
+) -> None:
+    class RacingClient(_ScheduledClaudeClient):
+        async def query(self, prompt):
+            if not isinstance(prompt, str):
+                await self.incoming.put(
+                    AssistantMessage(
+                        uuid="scheduled_partial",
+                        session_id=self.native_id,
+                        content=[{"type": "text", "text": "scheduled work"}],
+                    )
+                )
+                await asyncio.Event().wait()
+            await super().query(prompt)
+
+    async def run():
+        client = RacingClient()
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(client=client, sdk=sdk, host=host)
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            human = await runtime.start_turn("timer", "native_timer", "hello")
+            session = runtime._sessions["timer"]
+            await _wait_until(lambda: session.queued_execution is not None)
+            active, queued = session.execution, session.queued_execution
+            if stop_runtime:
+                await asyncio.wait_for(runtime.stop(), 2)
+            else:
+                await asyncio.wait_for(runtime.interrupt_session("timer"), 2)
+            assert active.finished.is_set() and queued.finished.is_set()
+            assert active.task.done() and queued.task.done()
+            assert session.execution is None and session.queued_execution is None
+            assert client.disconnected
+            assert not runtime._turns.runner.connections
+            assert (
+                len(
+                    [
+                        e
+                        for e in host.session_turn_ends
+                        if e["turn_id"] == human.result["turnId"]
+                    ]
+                )
+                == 1
+            )
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_collision_approval_belongs_to_scheduled_execution() -> None:
+    class RacingClient(_ScheduledClaudeClient):
+        submitted = None
+
+        async def query(self, prompt):
+            if not isinstance(prompt, str):
+                async for message in prompt:
+                    self.submitted = message
+                await self.incoming.put(
+                    AssistantMessage(
+                        uuid="scheduled_tool_message",
+                        session_id=self.native_id,
+                        content=[
+                            {
+                                "type": "tool_use",
+                                "id": "scheduled_tool",
+                                "name": "Bash",
+                                "input": {"command": "ls"},
+                            }
+                        ],
+                    )
+                )
+                return
+            await super().query(prompt)
+
+    async def run():
+        client = RacingClient()
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(client=client, sdk=sdk, host=host)
+        approval_task = None
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            human = await runtime.start_turn("timer", "native_timer", "hello")
+            human_task = runtime._sessions["timer"].active_task
+            session = runtime._sessions["timer"]
+            await _wait_until(lambda: session.queued_execution is not None)
+            scheduled_id = session.active_turn_id
+            approval_task = asyncio.create_task(
+                client.options.kwargs["can_use_tool"](
+                    "Bash",
+                    {"command": "ls"},
+                    SimpleNamespace(tool_use_id="scheduled_tool"),
+                )
+            )
+            await _wait_until(lambda: bool(host.notice_upserts))
+            assert host.notice_upserts[-1].source["turnId"] == scheduled_id
+            assert host.session_state_updates[-1]["status"] == "waiting_approval"
+            await runtime.respond_interaction(
+                "timer", host.notice_upserts[-1].notice_id, "approve"
+            )
+            assert (await approval_task).behavior == "allow"
+            await client.reply("scheduled approved")
+            await client.incoming.put(
+                UserMessage(uuid=client.submitted["uuid"], content="hello")
+            )
+            await client.reply("human reply")
+            await asyncio.wait_for(human_task, 2)
+            assert host.session_turn_ends[-1]["turn_id"] == human.result["turnId"]
+        finally:
+            await runtime.stop()
+            if approval_task is not None:
+                await asyncio.gather(approval_task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_claude_schedule_save_failure_reports_error_and_closes_transport() -> None:
+    class FailingHost(_RecordingHost):
+        async def sync_state_write(self, key, value):
+            if key == "claude/scheduled/sessions":
+                raise OSError("cannot save connection registry")
+            return await super().sync_state_write(key, value)
+
+    async def run():
+        client = _ScheduledClaudeClient()
+        host = FailingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(client=client, sdk=sdk, host=host)
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await asyncio.wait_for(runtime._sessions["timer"].active_task, 2)
+            assert client.disconnected
+            assert not runtime._turns.runner.connections
+            assert host.session_turn_ends[-1]["outcome"] == "failed"
+            assert (
+                host.session_state_updates[-1]["error"]["code"]
+                == "claude_schedule_save_failed"
+            )
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_retained_query_failure_without_user_echo_does_not_hang() -> None:
+    class FailingClient(_ScheduledClaudeClient):
+        async def query(self, prompt):
+            if not isinstance(prompt, str):
+                await self.incoming.put(
+                    SimpleNamespace(
+                        type="result",
+                        is_error=True,
+                        errors=["authentication failed"],
+                        session_id=self.native_id,
+                    )
+                )
+                return
+            await super().query(prompt)
+
+    async def run():
+        client = FailingClient()
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(client=client, sdk=sdk, host=host)
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            human = await runtime.start_turn("timer", "native_timer", "hello")
+            await asyncio.wait_for(runtime._sessions["timer"].active_task, 2)
+            assert host.session_turn_ends[-1]["turn_id"] == human.result["turnId"]
+            assert host.session_turn_ends[-1]["outcome"] == "failed"
+            assert client.disconnected
+            assert runtime._sessions["timer"].queued_execution is None
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_scheduled_connection_reuses_client_and_projects_separate_turn() -> None:
+    async def run():
+        client = _ScheduledClaudeClient()
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(
+            client=client, sdk=sdk, host=host,
+            config=_config(idle_timeout_seconds=0),
+        )
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            assert not client.disconnected
+            assert runtime._sessions["timer"].execution is None
+            assert host.session_state_updates[-1]["status"] == "idle"
+
+            await runtime.start_turn("timer", "native_timer", "hello")
+            await runtime._sessions["timer"].active_task
+            assert client.queries == ["schedule", "hello"]
+            assert not client.disconnected
+
+            await client.reply("time to sleep")
+            async with asyncio.timeout(2):
+                while len(host.session_turn_ends) < 3:
+                    await asyncio.sleep(0)
+            assert len({e["turn_id"] for e in host.session_turn_ends}) == 3
+            assert any(
+                i.role == "assistant" and i.content.get("text") == "time to sleep"
+                for i in host.timeline_item_upserts
+            )
+            assert len([i for i in host.timeline_item_upserts if i.role == "user"]) == 2
+
+            await runtime.start_turn("timer", "native_timer", "cancel")
+            await runtime._sessions["timer"].active_task
+            await _wait_until(lambda: client.disconnected)
+            assert not runtime._turns.runner.connections
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_regular_session_reuses_process_until_idle_timeout() -> None:
+    async def run():
+        client = _ScheduledClaudeClient("native_regular")
+        runtime = _runtime(
+            client=client,
+            config=_config(idle_timeout_seconds=0.08),
+        )
+        try:
+            await runtime.start_turn("regular", None, "hello")
+            await runtime._sessions["regular"].active_task
+            assert not client.disconnected
+            assert runtime._turns.runner.connections["regular"].client is client
+
+            await asyncio.sleep(0.05)
+            await runtime.start_turn("regular", "native_regular", "again")
+            await runtime._sessions["regular"].active_task
+            assert client.queries == ["hello", "again"]
+            assert not client.disconnected
+            await asyncio.sleep(0.05)
+            assert not client.disconnected  # The new turn reset the idle clock.
+            await asyncio.wait_for(_wait_for_disconnection(client), 1)
+            assert "regular" not in runtime._turns.runner.connections
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_idle_reclaim_does_not_interrupt_new_turn() -> None:
+    async def run():
+        client = _ScheduledClaudeClient("native_race")
+        runtime = _runtime(
+            client=client,
+            config=_config(idle_timeout_seconds=0.03),
+        )
+        try:
+            await runtime.start_turn("race", None, "hello")
+            await runtime._sessions["race"].active_task
+            await asyncio.sleep(0.01)
+            await runtime.start_turn("race", "native_race", "wait")
+            await _wait_until(lambda: "wait" in client.queries)
+            await asyncio.sleep(0.05)
+            assert not client.disconnected
+            assert runtime._sessions["race"].execution is not None
+            await client.reply("finished")
+            await runtime._sessions["race"].active_task
+            await asyncio.wait_for(_wait_for_disconnection(client), 1)
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_reclaimed_session_resumes_with_new_process() -> None:
+    async def run():
+        first = _ScheduledClaudeClient("native_resume")
+        second = _ScheduledClaudeClient("native_resume")
+        clients = iter([first, second])
+
+        def factory(_sdk, options):
+            client = next(clients)
+            client.options = options
+            return client
+
+        runtime = ClaudeRuntime(
+            config=_config(idle_timeout_seconds=0.02),
+            host=_RecordingHost(), sdk_loader=_default_sdk, client_factory=factory,
+        )
+        try:
+            await runtime.start_turn("resume", None, "hello")
+            await runtime._sessions["resume"].active_task
+            await asyncio.wait_for(_wait_for_disconnection(first), 1)
+
+            await runtime.start_turn("resume", "native_resume", "again")
+            await runtime._sessions["resume"].active_task
+            assert second.connected and not second.disconnected
+            assert second.options.kwargs["resume"] == "native_resume"
+            assert first.queries == ["hello"]
+            assert second.queries == ["again"]
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_distinct_active_sessions_keep_distinct_clients() -> None:
+    async def run():
+        clients = iter([
+            _ScheduledClaudeClient("native_a"),
+            _ScheduledClaudeClient("native_b"),
+        ])
+
+        def factory(_sdk, options):
+            client = next(clients)
+            client.options = options
+            return client
+
+        runtime = ClaudeRuntime(
+            config=_config(idle_timeout_seconds=0.08),
+            host=_RecordingHost(), sdk_loader=_default_sdk, client_factory=factory,
+        )
+        try:
+            for session_id in ("a", "b"):
+                await runtime.start_turn(session_id, None, "hello")
+                await runtime._sessions[session_id].active_task
+            connections = runtime._turns.runner.connections
+            assert connections["a"].client is not connections["b"].client
+            assert not connections["a"].client.disconnected
+            assert not connections["b"].client.disconnected
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_scheduled_wakeup_outlives_idle_timeout() -> None:
+    async def run():
+        client = _ScheduledClaudeClient()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(
+            client=client, sdk=sdk,
+            config=_config(idle_timeout_seconds=0.02),
+        )
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            await asyncio.sleep(0.05)
+            assert not client.disconnected
+            await runtime.start_turn("timer", "native_timer", "cancel")
+            await runtime._sessions["timer"].active_task
+            await asyncio.wait_for(_wait_for_disconnection(client), 1)
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_reconciliation_waits_for_background_work() -> None:
+    async def run():
+        client = _ReconcileClaudeClient()
+        client.jobs = []
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(
+            client=client, sdk=sdk,
+            config=_config(idle_timeout_seconds=0.02),
+        )
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            await client.incoming.put(SystemMessage(
+                subtype="task_started", task_id="background_1",
+                data={"task_id": "background_1"},
+            ))
+            await _wait_until(lambda: bool(
+                runtime._turns.runner.connections["timer"].background.active_ids
+            ))
+            await client.reply("scheduled reply")
+            await _wait_until(lambda: len(runtime._turns.runner.connections) == 1)
+            await _wait_until(lambda: runtime._sessions["timer"].execution is None)
+            assert RECONCILE_PROMPT not in client.queries
+            hook = client.options.kwargs["hooks"]["PreToolUse"][0].hooks[0]
+            assert "hookSpecificOutput" not in await hook({"tool_name": "Bash"})
+            await asyncio.sleep(0.05)
+            assert not client.disconnected
+
+            await client.incoming.put(SystemMessage(
+                subtype="task_updated", task_id="background_1",
+                patch={"status": "completed"}, data={"task_id": "background_1"},
+            ))
+            async with asyncio.timeout(1):
+                while RECONCILE_PROMPT not in client.queries:
+                    await asyncio.sleep(0.005)
+            await asyncio.wait_for(_wait_for_disconnection(client), 1)
+            assert "timer" not in runtime._turns.runner.connections
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_stop_during_deferred_reconciliation() -> None:
+    async def run():
+        client = _ReconcileClaudeClient()
+        client.hold_check = True
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(client=client, sdk=sdk)
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            await client.incoming.put(SystemMessage(
+                subtype="task_started", task_id="background_1",
+                data={"task_id": "background_1"},
+            ))
+            await _wait_until(lambda: bool(
+                runtime._turns.runner.connections["timer"].background.active_ids
+            ))
+            await client.reply("scheduled reply")
+            await _wait_until(lambda: runtime._sessions["timer"].execution is None)
+            await client.incoming.put(SystemMessage(
+                subtype="task_updated", task_id="background_1",
+                patch={"status": "completed"}, data={"task_id": "background_1"},
+            ))
+            await _wait_until(lambda: RECONCILE_PROMPT in client.queries)
+            await asyncio.wait_for(runtime.stop(), 2)
+            assert client.disconnected
+            assert not runtime._turns.runner.connections
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+async def _begin_deferred_reconciliation(runtime, client) -> None:
+    await runtime.start_turn("timer", None, "schedule")
+    await runtime._sessions["timer"].active_task
+    connection = runtime._turns.runner.connections["timer"]
+    await client.incoming.put(SystemMessage(
+        subtype="task_started", task_id="background_1",
+        data={"task_id": "background_1"},
+    ))
+    await _wait_until(lambda: bool(connection.background.active_ids))
+    await client.reply("first scheduled reply")
+    await _wait_until(lambda: runtime._sessions["timer"].execution is None)
+    await client.incoming.put(SystemMessage(
+        subtype="task_updated", task_id="background_1",
+        patch={"status": "completed"}, data={"task_id": "background_1"},
+    ))
+
+
+def test_claude_deferred_reconciliation_drains_scheduled_reply_before_echo() -> None:
+    class CollisionClient(_ReconcileClaudeClient):
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                return await super().query(prompt)
+            messages = [message async for message in prompt]
+            if messages[0]["message"]["content"] == RECONCILE_PROMPT:
+                await self.reply("second scheduled reply")
+
+            async def replay():
+                for message in messages:
+                    yield message
+
+            await super().query(replay())
+
+    async def run():
+        client = CollisionClient()
+        client.jobs = [{"id": "timer_1"}]
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(client=client, sdk=sdk, host=host)
+        try:
+            await _begin_deferred_reconciliation(runtime, client)
+            await _wait_until(lambda: RECONCILE_PROMPT in client.queries)
+            connection = runtime._turns.runner.connections["timer"]
+            await asyncio.wait_for(asyncio.shield(connection.background_done_task), 1)
+            await _wait_until(lambda: len(host.session_turn_ends) == 3)
+            replies = {
+                item.content.get("text"): item.turn_id
+                for item in host.timeline_item_upserts if item.role == "assistant"
+            }
+            assert replies["first scheduled reply"] != replies["second scheduled reply"]
+            assert all(end["outcome"] == "completed" for end in host.session_turn_ends)
+            assert client.queries.count(RECONCILE_PROMPT) == 1
+            assert not client.interrupted
+            assert not any(RECONCILE_PROMPT in str(i.content) for i in host.timeline_item_upserts)
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+class _GatedReconcileClaudeClient(_ReconcileClaudeClient):
+    def __init__(self, outcome="success") -> None:
+        super().__init__()
+        self.outcome = outcome
+        self.check_started = asyncio.Event()
+        self.release_check = asyncio.Event()
+        self.jobs = [{"id": "timer_1"}]
+
+    async def query(self, prompt):
+        if isinstance(prompt, str):
+            return await super().query(prompt)
+        messages = [message async for message in prompt]
+        if messages[0]["message"]["content"] == RECONCILE_PROMPT:
+            self.check_started.set()
+            await self.release_check.wait()
+            if self.outcome == "exception":
+                raise RuntimeError("maintenance query failed")
+
+        async def replay():
+            for message in messages:
+                yield message
+
+        await super().query(replay())
+
+
+@pytest.mark.parametrize("outcome", ["success", "exception", "timeout"])
+def test_claude_user_turn_during_deferred_reconciliation_keeps_response_owner(
+    outcome, monkeypatch,
+) -> None:
+    if outcome == "timeout":
+        # Preserve the real timeout behavior while avoiding a 30-second test.
+        timeout = asyncio.timeout
+        monkeypatch.setattr(
+            asyncio, "timeout", lambda delay: timeout(0.2 if delay == 30 else delay),
+        )
+
+    async def run():
+        client = _GatedReconcileClaudeClient(outcome)
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(client=client, sdk=sdk, host=host)
+        try:
+            await _begin_deferred_reconciliation(runtime, client)
+            await asyncio.wait_for(client.check_started.wait(), 1)
+            human = await asyncio.wait_for(
+                runtime.start_turn("timer", "native_timer", "hello"), 0.1,
+            )
+            assert human.ok
+            task = runtime._sessions["timer"].active_task
+            if outcome != "timeout":
+                client.release_check.set()
+            await asyncio.wait_for(task, 1)
+            replies = {
+                item.content.get("text"): item.turn_id
+                for item in host.timeline_item_upserts if item.role == "assistant"
+            }
+            assert replies["reply:hello"] == human.result["turnId"]
+            assert host.session_turn_ends[-1]["turn_id"] == human.result["turnId"]
+            assert host.session_turn_ends[-1]["outcome"] == "completed"
+            assert runtime._sessions["timer"].queued_execution is None
+            connection = runtime._turns.runner.connections["timer"]
+            assert not connection.reconciling
+            await _wait_until(lambda: connection.current is None)
+            assert connection.pending is None
+            assert not any(RECONCILE_PROMPT in str(i.content) for i in host.timeline_item_upserts)
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stop", [False, True])
+def test_claude_user_waiting_for_deferred_reconciliation_can_be_interrupted(stop) -> None:
+    async def run():
+        client = _GatedReconcileClaudeClient()
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(client=client, sdk=sdk, host=host)
+        try:
+            await _begin_deferred_reconciliation(runtime, client)
+            await asyncio.wait_for(client.check_started.wait(), 1)
+            human = await asyncio.wait_for(
+                runtime.start_turn("timer", "native_timer", "hello"), 0.1,
+            )
+            await asyncio.sleep(0)
+            connection = runtime._turns.runner.connections["timer"]
+            if stop:
+                await asyncio.wait_for(runtime.stop(), 1)
+                assert not runtime._turns.runner.connections
+                assert client.disconnected
+            else:
+                await asyncio.wait_for(runtime.interrupt_session("timer"), 1)
+                assert not connection.background_done_task.done()
+                assert not client.interrupted
+                client.release_check.set()
+                await asyncio.wait_for(asyncio.shield(connection.background_done_task), 1)
+                await _wait_until(lambda: connection.current is None)
+                assert connection.pending is None
+                assert not client.disconnected
+            assert "hello" not in client.queries
+            assert runtime._sessions["timer"].execution is None
+            assert runtime._sessions["timer"].queued_execution is None
+            assert host.session_turn_ends[-1]["turn_id"] == human.result["turnId"]
+            assert host.session_turn_ends[-1]["outcome"] == "interrupted"
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_deferred_timeout_closes_transport_without_interrupting_other_reply(
+    monkeypatch,
+) -> None:
+    timeout = asyncio.timeout
+    monkeypatch.setattr(
+        asyncio, "timeout", lambda delay: timeout(0.1 if delay == 30 else delay),
+    )
+
+    class CollisionClient(_GatedReconcileClaudeClient):
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                return await super().query(prompt)
+            messages = [message async for message in prompt]
+            if messages[0]["message"]["content"] == RECONCILE_PROMPT:
+                await self.incoming.put(AssistantMessage(
+                    uuid="second_scheduled_reply", session_id=self.native_id,
+                    content=[{"type": "text", "text": "scheduled work still running"}],
+                ))
+
+            async def replay():
+                for message in messages:
+                    yield message
+
+            await super().query(replay())
+
+    async def run():
+        client = CollisionClient()
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(client=client, sdk=sdk, host=host)
+        try:
+            await _begin_deferred_reconciliation(runtime, client)
+            await asyncio.wait_for(client.check_started.wait(), 1)
+            connection = runtime._turns.runner.connections["timer"]
+            maintenance = connection.background_done_task
+            await _wait_until(lambda: runtime._sessions["timer"].execution is not None)
+            await asyncio.wait_for(asyncio.shield(maintenance), 1)
+            await _wait_until(lambda: len(host.session_turn_ends) == 3)
+            assert client.disconnected
+            assert not client.interrupted
+            assert host.session_turn_ends[-1]["outcome"] == "failed"
+            assert not runtime._turns.runner.connections
+            assert runtime._sessions["timer"].execution is None
+            assert connection.current is None
+            assert connection.pending is None
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_user_reconnects_when_maintenance_shutdown_does_not_finish(monkeypatch) -> None:
+    from connector.runtimes.claude.sdk import connection as connection_module
+
+    timeout = asyncio.timeout
+    monkeypatch.setattr(
+        asyncio, "timeout", lambda delay: timeout(0.1 if delay == 30 else delay),
+    )
+    monkeypatch.setattr(connection_module, "CONNECTION_CLOSE_TIMEOUT_SECONDS", 0.05, raising=False)
+
+    class SlowDisconnectClient(_GatedReconcileClaudeClient):
+        def __init__(self):
+            super().__init__()
+            self.disconnect_started = asyncio.Event()
+            self.release_disconnect = asyncio.Event()
+
+        async def disconnect(self):
+            self.disconnect_started.set()
+            await self.release_disconnect.wait()
+            await super().disconnect()
+
+    async def run():
+        first = SlowDisconnectClient()
+        second = _ScheduledClaudeClient()
+        clients = iter([first, second])
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        host = _RecordingHost()
+
+        def factory(_sdk, options):
+            client = next(clients)
+            client.options = options
+            return client
+
+        runtime = ClaudeRuntime(
+            config=_config(), host=host, sdk_loader=lambda: sdk, client_factory=factory,
+        )
+        connection = None
+        try:
+            await _begin_deferred_reconciliation(runtime, first)
+            await asyncio.wait_for(first.check_started.wait(), 1)
+            connection = runtime._turns.runner.connections["timer"]
+            human = await runtime.start_turn("timer", "native_timer", "hello")
+            await asyncio.wait_for(runtime._sessions["timer"].active_task, 1)
+            assert human.ok
+            assert first.disconnect_started.is_set()
+            assert not first.disconnected
+            assert second.connected
+            assert second.queries == ["hello"]
+            assert host.session_turn_ends[-1]["turn_id"] == human.result["turnId"]
+            assert host.session_turn_ends[-1]["outcome"] == "completed"
+            assert connection.current is None
+            assert connection.pending is None
+            assert runtime._turns.runner.connections["timer"].task_ids == {"timer_1"}
+            await connection.close()
+            assert not connection.task.done()
+            assert not first.disconnected
+            first.release_disconnect.set()
+            await asyncio.wait_for(asyncio.gather(connection.task, return_exceptions=True), 1)
+            saved = host.sync_states["claude/scheduled/sessions"]["sessions"]["timer"]
+            assert saved["taskIds"] == ["timer_1"]
+            assert runtime._turns.runner.connections["timer"].client is second
+        finally:
+            first.release_disconnect.set()
+            if connection is not None:
+                await asyncio.wait_for(asyncio.gather(connection.task, return_exceptions=True), 1)
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("ownership_lost", ["stopping", "replacement"])
+def test_claude_deferred_reconciliation_does_not_save_after_ownership_changes(
+    ownership_lost,
+) -> None:
+    async def run():
+        client = _GatedReconcileClaudeClient()
+        client.jobs = []
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(client=client, sdk=sdk, host=host)
+        connection = None
+        try:
+            await _begin_deferred_reconciliation(runtime, client)
+            await asyncio.wait_for(client.check_started.wait(), 1)
+            session = runtime._sessions["timer"]
+            runner = runtime._turns.runner
+            connection = runner.connections["timer"]
+            maintenance = connection.background_done_task
+            await asyncio.wait_for(session.execution_lock.acquire(), 0.1)
+            try:
+                client.release_check.set()
+                await _wait_until(lambda: not connection.reconciling)
+                if ownership_lost == "stopping":
+                    runner.stopping = True
+                else:
+                    # Model a connection replacement while the old maintenance
+                    # waits to reacquire the session's ownership lock.
+                    runner.connections["timer"] = object()
+            finally:
+                session.execution_lock.release()
+            await asyncio.wait_for(asyncio.shield(maintenance), 1)
+            saved = host.sync_states["claude/scheduled/sessions"]["sessions"]["timer"]
+            assert saved["taskIds"] == ["timer_1"]
+        finally:
+            if connection is not None:
+                runtime._turns.runner.connections["timer"] = connection
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("terminal", ["task_updated", "task_notification"])
+def test_claude_background_work_outlives_reply_then_allows_reclaim(terminal: str) -> None:
+    class BackgroundClient(_ScheduledClaudeClient):
+        async def query(self, prompt):
+            if prompt == "start background":
+                await self.incoming.put(SystemMessage(
+                    subtype="task_started", task_id="bg_1", data={"task_id": "bg_1"},
+                ))
+            await super().query(prompt)
+
+    async def run():
+        client = BackgroundClient("native_background")
+        runtime = _runtime(
+            client=client,
+            config=_config(idle_timeout_seconds=0.02),
+        )
+        try:
+            await runtime.start_turn("background", None, "start background")
+            await runtime._sessions["background"].active_task
+            connection = runtime._turns.runner.connections["background"]
+            assert connection.background.active_ids == {"bg_1"}
+            await asyncio.sleep(0.05)
+            assert not client.disconnected
+
+            await client.incoming.put(SystemMessage(
+                subtype=terminal, task_id="bg_1", status="completed",
+                patch={"status": "killed"}, data={"task_id": "bg_1"},
+            ))
+            await asyncio.wait_for(_wait_for_disconnection(client), 1)
+            assert not connection.background.active_ids
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+async def _wait_for_disconnection(client: _FakeClaudeClient) -> None:
+    while not client.disconnected:
+        await asyncio.sleep(0.005)
+
+
+def test_claude_scheduled_connection_survives_interrupt_and_closes_on_stop() -> None:
+    async def run():
+        client = _ScheduledClaudeClient()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        runtime = _runtime(client=client, sdk=sdk)
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            await runtime.start_turn("timer", "native_timer", "wait")
+            async with asyncio.timeout(2):
+                while "wait" not in client.queries:
+                    await asyncio.sleep(0)
+            await runtime.interrupt_session("timer")
+            assert client.interrupted
+            assert not client.disconnected
+            await runtime.start_turn("timer", "native_timer", "hello")
+            await asyncio.wait_for(runtime._sessions["timer"].active_task, 2)
+        finally:
+            await runtime.stop()
+        assert client.disconnected
+        assert not runtime._turns.runner.connections
+
+    asyncio.run(run())
+
+
+def test_claude_idle_scheduled_connection_failure_is_visible() -> None:
+    async def run():
+        client = _ScheduledClaudeClient()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        host = _RecordingHost()
+        runtime = _runtime(client=client, sdk=sdk, host=host)
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            await client.incoming.put(RuntimeError("connection lost"))
+            async with asyncio.timeout(2):
+                while host.session_state_updates[-1]["status"] != "error":
+                    await asyncio.sleep(0)
+            assert client.disconnected
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_scheduled_approval_uses_new_turn_and_keeps_waiting_state() -> None:
+    async def run():
+        client = _ScheduledClaudeClient()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        host = _RecordingHost()
+        runtime = _runtime(client=client, sdk=sdk, host=host)
+        approval_task = None
+        try:
+            original = await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            approval_task = asyncio.create_task(
+                client.options.kwargs["can_use_tool"](
+                    "Bash",
+                    {"command": "ls"},
+                    SimpleNamespace(tool_use_id="scheduled_tool"),
+                )
+            )
+            await _wait_until(lambda: bool(host.notice_upserts))
+            await asyncio.sleep(0)
+            execution = runtime._sessions["timer"].execution
+            assert execution.turn_id != original.result["turnId"]
+            assert host.session_state_updates[-1]["status"] == "waiting_approval"
+            rejected = await runtime.start_turn("timer", "native_timer", "hello")
+            assert not rejected.ok
+            await runtime.respond_interaction(
+                "timer", host.notice_upserts[0].notice_id, "approve"
+            )
+            assert (await approval_task).behavior == "allow"
+            await client.reply("scheduled work completed")
+            await execution.task
+            assert host.session_turn_ends[-1]["turn_id"] == execution.turn_id
+        finally:
+            await runtime.stop()
+            if approval_task is not None:
+                await asyncio.gather(approval_task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_claude_scheduled_connection_refreshes_permission_without_user_prompt() -> None:
+    async def run():
+        first, second = _ScheduledClaudeClient(), _ScheduledClaudeClient()
+        clients = iter([first, second])
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        host = _RecordingHost()
+
+        def factory(_sdk, options):
+            client = next(clients)
+            client.options = options
+            return client
+
+        runtime = ClaudeRuntime(
+            config=_config(), host=host, sdk_loader=lambda: sdk, client_factory=factory
+        )
+        try:
+            await runtime.start_turn("timer", None, "schedule")
+            await runtime._sessions["timer"].active_task
+            permission = (
+                await runtime.list_permission_catalog(query="plan")
+            ).permissions[0]
+            result = await runtime.update_session_selections(
+                "timer",
+                "native_timer",
+                {"permission": permission.selection_id},
+            )
+            assert result.ok
+            assert first.disconnected
+            assert second.connected
+            assert second.options.kwargs["permission_mode"] == "plan"
+            assert second.options.kwargs["resume"] == "native_timer"
+            assert second.queries == []
+            assert runtime._turns.runner.connections["timer"].retained
+            await second.reply("resumed reminder")
+            await _wait_until(lambda: len(host.session_turn_ends) == 2)
+            assert host.session_turn_ends[-1]["outcome"] == "completed"
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_restart_resumes_only_registered_scheduled_sessions() -> None:
+    async def run():
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        first = _runtime(client=_ScheduledClaudeClient(), sdk=sdk, host=host)
+        await first.start_turn("timer", None, "schedule", cwd="/project")
+        await first._sessions["timer"].active_task
+        await first.stop()
+
+        def no_history_scan(**_kwargs):
+            raise AssertionError("Startup must not open unrelated native conversations")
+
+        sdk.list_sessions = no_history_scan
+        client = _ScheduledClaudeClient()
+        second = _runtime(client=client, sdk=sdk, host=host)
+        try:
+            await second.start()
+            await second.start()
+            assert client.connected
+            assert client.queries == []
+            assert client.options.kwargs["resume"] == "native_timer"
+            assert client.options.kwargs["cwd"] == "/project"
+            assert second._turns.runner.connections["timer"].retained
+            await client.reply("restored reminder")
+            await _wait_until(lambda: len(host.session_turn_ends) == 2)
+            assert host.session_turn_ends[-1]["session_id"] == "timer"
+        finally:
+            await second.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_cancelled_schedule_does_not_reopen_on_restart() -> None:
+    async def run():
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        first = _runtime(client=_ScheduledClaudeClient(), sdk=sdk, host=host)
+        for content in ("schedule", "cancel"):
+            await first.start_turn("timer", None, content)
+            await first._sessions["timer"].active_task
+        await first.stop()
+        client = _ScheduledClaudeClient()
+        second = _runtime(client=client, sdk=sdk, host=host)
+        await second.start()
+        assert not client.connected
+        assert not second._turns.runner.connections
+        await second.stop()
+
+    asyncio.run(run())
+
+
+def test_claude_same_project_connections_keep_distinct_session_ownership() -> None:
+    async def run():
+        host = _RecordingHost()
+        sdk = _default_sdk()
+        sdk.HookMatcher = _FakeHookMatcher
+        clients = [
+            _ScheduledClaudeClient("native_a"),
+            _ScheduledClaudeClient("native_b"),
+        ]
+        factory_clients = iter(clients)
+
+        def factory(_sdk, options):
+            client = next(factory_clients)
+            client.options = options
+            return client
+
+        runtime = ClaudeRuntime(
+            config=_config(), host=host, sdk_loader=lambda: sdk, client_factory=factory
+        )
+        try:
+            for session_id in ("aa_a", "aa_b"):
+                await runtime.start_turn(
+                    session_id, None, "schedule", cwd="/same-project"
+                )
+                await runtime._sessions[session_id].active_task
+            await clients[1].reply("reminder b")
+            await clients[0].reply("reminder a")
+            await _wait_until(lambda: len(host.session_turn_ends) == 4)
+            reminders = {
+                item.content.get("text"): item.session_id
+                for item in host.timeline_item_upserts
+                if item.role == "assistant"
+            }
+            assert reminders["reminder a"] == "aa_a"
+            assert reminders["reminder b"] == "aa_b"
+        finally:
+            await runtime.stop()
+
+    asyncio.run(run())
 
 
 class _HistorySdk:

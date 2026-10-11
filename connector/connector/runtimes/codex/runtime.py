@@ -32,7 +32,6 @@ from connector.runtimes.codex.domain.capabilities import (
     codex_runtime_capabilities,
     codex_session_capabilities,
 )
-from connector.runtimes.codex.domain.commands import list_codex_commands
 from connector.runtimes.codex.domain.notices import CodexNoticeRegistry
 from connector.runtimes.codex.domain.pending_messages import (
     PendingClientMessageRegistry,
@@ -364,13 +363,7 @@ class CodexRuntime(AgentRuntime):
         query: str | None = None,
         limit: int = 50,
     ) -> tuple[RuntimeCommand, ...]:
-        _ = session_id
-        return list_codex_commands(
-            external_session_id=external_session_id,
-            client_available=self.client is not None,
-            query=query,
-            limit=limit,
-        )
+        return self._turns.commands.catalog(session_id, external_session_id, query, limit)
 
     async def execute_command(
         self,

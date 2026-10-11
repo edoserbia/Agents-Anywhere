@@ -174,6 +174,7 @@ def test_relay_failure_resubscribes_without_closing_concurrent_rpc(reject, proje
             assert acks == [1]
             release.set()
             if not reject:
+                await asyncio.wait_for(acknowledged.wait(), 1)
                 relay.accept({"streamId": "stream-1", "batchSeq": 3, "projectionVersion": projection_version, "operations": [op]})
             await asyncio.wait_for(resubscribed.wait(), 1)
             assert acks == [1]

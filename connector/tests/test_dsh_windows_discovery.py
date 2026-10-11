@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from connector.runtimes.dsh import discovery
+from connector.runtimes.dsh import discovery, provider_config
 
 
 @pytest.mark.parametrize("valid_token", [True, False])
@@ -56,7 +56,7 @@ def test_windows_discovery_authenticates_without_signalling_process(
 
         server = await asyncio.start_server(handle, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
-        endpoint = tmp_path / "agents-anywhere/bridge/endpoint.json"
+        endpoint = provider_config.endpoint_path()
         endpoint.parent.mkdir(parents=True)
         endpoint.write_text(
             json.dumps(

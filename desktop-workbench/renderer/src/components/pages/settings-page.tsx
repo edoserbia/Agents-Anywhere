@@ -142,6 +142,11 @@ const PYPI_MIRROR_OPTIONS = [
   { id: "huawei", url: "https://repo.huaweicloud.com/repository/pypi/simple", labelKey: "desktopPypiHuawei" },
 ] as const
 
+const PYTHON_MIRROR_OPTIONS = [
+  { id: "default", url: "", labelKey: "desktopPythonMirrorDefault" },
+  { id: "npmmirror", url: "https://registry.npmmirror.com/-/binary/python-build-standalone", labelKey: "desktopPythonMirrorNpmmirror" },
+] as const
+
 function AccountTab({
   me,
   token,
@@ -316,7 +321,9 @@ function DesktopTab() {
   })
   const [advancedDraft, setAdvancedDraft] = React.useState({
     uvPath: "",
+    pythonPath: "",
     uvPypiIndexUrl: "",
+    uvPythonInstallMirror: "",
   })
   const connectorId = binding?.connectorId ?? state?.connectorId ?? null
   const serverUrl = binding?.serverUrl || state?.serverUrl || null
@@ -328,6 +335,8 @@ function DesktopTab() {
   const connectorIsRunning = Boolean(!needsReconnect && (state?.running || state?.status === "running"))
   const selectedPypiMirror = PYPI_MIRROR_OPTIONS.find((option) => option.url === advancedDraft.uvPypiIndexUrl)
     ?? PYPI_MIRROR_OPTIONS[0]
+  const selectedPythonMirror = PYTHON_MIRROR_OPTIONS.find((option) => option.url === advancedDraft.uvPythonInstallMirror)
+    ?? PYTHON_MIRROR_OPTIONS[0]
   const statusKey = needsReconnect
     ? "desktopDisconnected"
     : provisionError || connectionStatus === "error"
@@ -345,9 +354,11 @@ function DesktopTab() {
   React.useEffect(() => {
     setAdvancedDraft({
       uvPath: state?.uvPath ?? "",
+      pythonPath: state?.pythonPath ?? "",
       uvPypiIndexUrl: state?.uvPypiIndexUrl ?? "",
+      uvPythonInstallMirror: state?.uvPythonInstallMirror ?? "",
     })
-  }, [state?.uvPath, state?.uvPypiIndexUrl])
+  }, [state?.uvPath, state?.pythonPath, state?.uvPypiIndexUrl, state?.uvPythonInstallMirror])
 
   const loadConnectorConfig = React.useCallback(async () => {
     const bridge = getDesktopWorkbenchBridge()
@@ -500,7 +511,7 @@ function DesktopTab() {
         </div>
         <Separator />
         <FieldGroup className="gap-0 px-6 py-5">
-          <Field>
+          <Field className="pb-4">
             <span className="text-sm font-medium">{t("desktopUvPath")}</span>
             <Input
               value={advancedDraft.uvPath}
@@ -513,6 +524,20 @@ function DesktopTab() {
           <div className="flex min-w-0 items-center gap-4 border-t border-border py-4">
             <span className="w-36 shrink-0 text-sm text-muted-foreground">{t("desktopResolvedUvPath")}</span>
             <span className="code-mono min-w-0 truncate text-sm">{state?.resolvedUvPath || t("desktopUvNotFound")}</span>
+          </div>
+          <Field className="border-t border-border py-4">
+            <span className="text-sm font-medium">{t("desktopPythonPath")}</span>
+            <Input
+              value={advancedDraft.pythonPath}
+              placeholder={state?.resolvedPythonPath || t("desktopPythonPathAuto")}
+              onChange={(event) => setAdvancedDraft((current) => ({ ...current, pythonPath: event.currentTarget.value }))}
+              onBlur={(event) => void saveSettings({ pythonPath: event.currentTarget.value })}
+            />
+            <span className="text-xs text-muted-foreground">{t("desktopPythonPathDescription")}</span>
+          </Field>
+          <div className="flex min-w-0 items-center gap-4 border-t border-border py-4">
+            <span className="w-36 shrink-0 text-sm text-muted-foreground">{t("desktopResolvedPythonPath")}</span>
+            <span className="code-mono min-w-0 truncate text-sm">{state?.resolvedPythonPath || t("desktopPythonChosenByUv")}</span>
           </div>
           <Field orientation="horizontal" className="border-t border-border py-4">
             <FieldContent>
@@ -542,6 +567,37 @@ function DesktopTab() {
               </SelectContent>
             </Select>
           </Field>
+          {/* uv only downloads Python when no bundled or saved interpreter is available. */}
+          {state?.resolvedPythonPath ? null : (
+            <Field orientation="horizontal" className="border-t border-border py-4">
+              <FieldContent>
+                <span className="text-sm font-medium">{t("desktopUvPythonInstallMirror")}</span>
+                <span className="text-xs text-muted-foreground">{t("desktopUvPythonInstallMirrorDescription")}</span>
+              </FieldContent>
+              <Select
+                value={selectedPythonMirror.url || "default"}
+                onValueChange={(value) => {
+                  const uvPythonInstallMirror = value === "default" ? "" : value
+                  setAdvancedDraft((current) => ({ ...current, uvPythonInstallMirror }))
+                  void saveSettings({ uvPythonInstallMirror })
+                }}
+                disabled={busy}
+              >
+                <SelectTrigger className="min-w-44">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent align="end">
+                  <SelectGroup>
+                    {PYTHON_MIRROR_OPTIONS.map((option) => (
+                      <SelectItem key={option.id} value={option.url || "default"}>
+                        {t(option.labelKey)}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
         </FieldGroup>
       </section>
 
@@ -1323,7 +1379,7 @@ const themes: { id: AppearanceMode; labelKey: string; descKey: string }[] = [
 function AppearanceTab() {
   const t = useTranslations("pages.settings")
   const { theme, setTheme } = useTheme()
-  const { sidebarShowsSessions, setSidebarShowsSessions } = useWorkspace()
+  const { sidebarShowsSessions, setSidebarShowsSessions, sidebarCompactSessions, setSidebarCompactSessions } = useWorkspace()
   const selected: AppearanceMode = theme === "light" || theme === "dark" ? theme : "auto"
 
   const handleThemeChange = (value: string) => {
@@ -1367,6 +1423,20 @@ function AppearanceTab() {
               id="settings-sidebar-shows-sessions"
               checked={sidebarShowsSessions}
               onCheckedChange={setSidebarShowsSessions}
+            />
+          </Field>
+          <Field orientation="horizontal" data-disabled={!sidebarShowsSessions || undefined}>
+            <FieldContent>
+              <FieldLabel htmlFor="settings-sidebar-compact-sessions">
+                {t("desktopSidebarCompactSessions")}
+              </FieldLabel>
+              <FieldDescription>{t("desktopSidebarCompactSessionsDescription")}</FieldDescription>
+            </FieldContent>
+            <Switch
+              id="settings-sidebar-compact-sessions"
+              checked={sidebarCompactSessions}
+              disabled={!sidebarShowsSessions}
+              onCheckedChange={setSidebarCompactSessions}
             />
           </Field>
         </FieldGroup>

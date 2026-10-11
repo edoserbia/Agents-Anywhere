@@ -1125,9 +1125,114 @@ def test_unversioned_runtime_schema_is_classified_by_actual_columns(
     )
 
 
-def test_current_schema_version_is_v2_38() -> None:
-    assert CURRENT_SCHEMA_REVISION == "v2_38"
-    assert CURRENT_SCHEMA_VERSION == "2.38"
+def test_current_schema_version_is_v2_44() -> None:
+    assert CURRENT_SCHEMA_REVISION == "v2_44"
+    assert CURRENT_SCHEMA_VERSION == "2.44"
+
+
+def test_v2_41_drops_the_sidebar_order_table(tmp_path) -> None:
+    path = tmp_path / "sidebar-order.sqlite3"
+    url = _sqlite_url(path)
+    upgrade_database(db_url=url, revision="v2_40")
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        assert inspect(engine).has_table("user_sidebar_orders")
+    finally:
+        engine.dispose()
+
+    upgrade_database(db_url=url)
+    upgrade_database(db_url=url)
+
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        assert not inspect(engine).has_table("user_sidebar_orders")
+    finally:
+        engine.dispose()
+
+
+def test_v2_40_removes_auto_archive_and_restores_swept_sessions(tmp_path) -> None:
+    path = tmp_path / "session-auto-archive.sqlite3"
+    url = _sqlite_url(path)
+    upgrade_database(db_url=url, revision="v2_39")
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        with engine.begin() as connection:
+            required = [
+                (row[1], row[2])
+                for row in connection.execute(text("PRAGMA table_info(sessions)"))
+                if row[3] and row[4] is None and row[1] not in {"id", "archived", "auto_archived"}
+            ]
+            for session_id, auto_archived in (("swept", 1), ("by-user", 0)):
+                values = {
+                    name: 0 if "INT" in kind.upper() else "x" for name, kind in required
+                }
+                values.update(
+                    id=session_id,
+                    archived=1,
+                    archived_at="2026-01-01T00:00:00Z",
+                    auto_archived=auto_archived,
+                )
+                names = ", ".join(values)
+                params = ", ".join(f":{name}" for name in values)
+                connection.execute(
+                    text(f"INSERT INTO sessions ({names}) VALUES ({params})"), values
+                )
+    finally:
+        engine.dispose()
+
+    upgrade_database(db_url=url, revision="v2_40")
+    upgrade_database(db_url=url)
+
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        inspector = inspect(engine)
+        columns = {column["name"] for column in inspector.get_columns("sessions")}
+        indexes = {index["name"] for index in inspector.get_indexes("sessions")}
+        with engine.connect() as connection:
+            archived = dict(
+                connection.execute(text("SELECT id, archived FROM sessions")).all()
+            )
+    finally:
+        engine.dispose()
+
+    assert not {"auto_archived", "auto_archived_at"} & columns
+    assert "idx_sessions_auto_archive" not in indexes
+    assert archived == {"swept": 0, "by-user": 1}
+
+
+def test_v2_37_adds_session_title_source(tmp_path) -> None:
+    path = tmp_path / "session-title-source.sqlite3"
+    url = _sqlite_url(path)
+    upgrade_database(db_url=url, revision="v2_36")
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        before = {column["name"] for column in inspect(engine).get_columns("sessions")}
+        assert "title_source" not in before
+        upgrade_database(db_url=url)
+        upgrade_database(db_url=url)
+        after = {column["name"] for column in inspect(engine).get_columns("sessions")}
+    finally:
+        engine.dispose()
+
+    assert "title_source" in after
+
+
+def test_v2_36_adds_retired_runtime_identity_storage(tmp_path) -> None:
+    path = tmp_path / "retired-runtimes.sqlite3"
+    url = _sqlite_url(path)
+    upgrade_database(db_url=url, revision="v2_35")
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        assert "retired_device_runtimes" not in inspect(engine).get_table_names()
+        upgrade_database(db_url=url)
+        upgrade_database(db_url=url)
+        schema = inspect(engine)
+        assert schema.get_pk_constraint("retired_device_runtimes")["constrained_columns"] == ["connector_id", "runtime_id"]
+        foreign_key = schema.get_foreign_keys("retired_device_runtimes")[0]
+        assert foreign_key["referred_table"] == "connectors"
+        assert foreign_key["options"]["ondelete"] == "CASCADE"
+    finally:
+        engine.dispose()
 
 
 def test_retiring_releases_preserves_history(tmp_path) -> None:

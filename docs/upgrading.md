@@ -2,7 +2,7 @@
 
 ## 先区分三个版本
 
-本次产品与客户端版本为 **2.0.0**；当前源码中的数据库 revision 为 **`v2_35`**，schema version 为 **`2.35`**；Connector 包仍有独立版本号。不要用这些数字互相推断兼容性。
+本次产品版本为 **2.0.3**；当前源码中的数据库 revision 为 **`v2_41`**，schema version 为 **`2.41`**。各端的 PATCH 版本可以不同，数据库 revision 独立编号，不能用来推断兼容性，见[版本号规则](versioning.md)。
 
 `main` 现在承载 v2。本文所说的 **v1 / 旧主线** 指主线切换前的实现，源代码提交为 `6c47e419`，不再指当前 `main`。早期 [main-to-v2 文档](migrations/main-to-v2/README.md)保留作历史参考。
 
@@ -20,9 +20,9 @@
    uv run python -m agent_server.infra.db.migrations current --verbose
    ```
 
-   以上命令使用该环境的 `AGENT_SERVER_DB_URL`。当前目标应为 `v2_35`；以后升级时，以待部署源码的 `CURRENT_SCHEMA_REVISION` 为准。
+   以上命令使用该环境的 `AGENT_SERVER_DB_URL`。当前目标应为 `v2_41`；以后升级时，以待部署源码的 `CURRENT_SCHEMA_REVISION` 为准。
 4. 启动同一版本的 Server/Web，检查 `/api/v2/health/ready`，再恢复入口流量和 Connector。验证账号登录、设备连接、会话恢复、消息、审批、文件和终端。
-5. 使用 [2.0.0 下载入口](../README.md#下载与入口)升级客户端。当前安装包没有可用的应用内下载地址，需手动分发。
+5. 使用 [2.0.3 下载入口](../README.md#下载与入口)升级客户端。当前安装包没有可用的应用内下载地址，需手动分发。
 
 Compose 的 `migrate-next` 会在新 Server 前执行迁移，但不会停止另一个 Compose 项目、旧容器或外部写入者。部署者需要先停止旧写入进程。不要把代码分支切换当成数据库迁移。
 

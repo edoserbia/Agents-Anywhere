@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from conftest import ApiV2TestClient as TestClient, make_test_client
-from sqlalchemy import insert
+from sqlalchemy import insert, update
 
 from agent_server.app import create_app
 from runtime_fixtures import seed_runtime_inventory
 from agent_server.core.models import TimelineItemIn
 from agent_server.infra.db import dashboard_daily_metrics as dashboard_daily_metrics_t
+from agent_server.infra.db import sessions as sessions_t
+from agent_server.infra.db import timeline_items as timeline_items_t
 
 
 def make_client(tmp_path) -> TestClient:
@@ -201,6 +203,57 @@ def test_admin_dashboard_overview_builds_daily_snapshot(tmp_path):
     }
     assert len(body["series"]) == 1
     assert body["series"][0]["activeUsers"] == 2
+
+
+def test_admin_dashboard_summary_covers_whole_range(tmp_path):
+    client = make_client(tmp_path)
+    store = client.app.state.store
+    admin_headers = asyncio.run(seed_dashboard_activity(client))
+    current = today()
+    yesterday = (date.fromisoformat(current) - timedelta(days=1)).isoformat()
+
+    async def spread_over_two_days() -> None:
+        # Sessions were created long before the range; only messages make them active.
+        # Yesterday: admin cm_admin_1 + bob cm_bob_1. Today: admin cm_admin_2.
+        async with store.engine.begin() as conn:
+            await conn.execute(update(sessions_t).values(created_at="2020-01-01T00:00:00Z"))
+            await conn.execute(
+                update(timeline_items_t)
+                .where(timeline_items_t.c.id.in_(["tl_msg_cm_admin_1", "tl_msg_cm_bob_1"]))
+                .values(item_time=f"{yesterday}T04:00:00Z")
+            )
+
+    asyncio.run(spread_over_two_days())
+
+    response = client.get(
+        "/admin/dashboard/overview",
+        headers=admin_headers,
+        params={"from": yesterday, "to": current},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    series = {point["date"]: point for point in body["series"]}
+    assert series[yesterday]["totalMessages"] == 2
+    assert series[yesterday]["activeSessions"] == 2
+    assert series[current]["totalMessages"] == 1
+    assert series[current]["activeSessions"] == 1
+
+    summary = body["summary"]
+    assert summary["totalMessages"] == 3
+    # sess_admin_codex is active on both days but counted once.
+    assert summary["activeSessions"] == 2
+    assert summary["activeUsers"] == 2
+    assert summary["newUsers"] == 2
+    assert summary["totalUsers"] == 2
+    assert summary["dau"] == round(sum(point["dau"] for point in body["series"]) / 2)
+    assert summary["avgMessagesPerActiveUser"] == 1.5
+    assert summary["avgActiveSessionsPerActiveUser"] == 1.0
+    assert {item["key"]: item["value"] for item in body["sessionAgentBreakdown"]} == {
+        "codex": 1.0,
+        "claude": 1.0,
+        "dsh": 0.0,
+    }
 
 
 def test_admin_dashboard_ignores_connector_history_for_usage_metrics(tmp_path):

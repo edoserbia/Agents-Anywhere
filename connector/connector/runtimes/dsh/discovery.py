@@ -31,7 +31,7 @@ class DshDiscovery:
 
 def _static_metadata(values: dict[str, Any]) -> dict[str, Any]:
     return {
-        "endpoint": str(provider_config.endpoint_path(values)),
+        "endpoint": str(provider_config.endpoint_path()),
         "storageMode": "dsh-native",
         "sameSessionWriterLimit": 1,
         "crossProcessWriterExclusion": False,
@@ -59,14 +59,20 @@ async def probe(values: dict[str, Any]) -> DshDiscovery:
     """Authenticate against a running DSH bridge. Configuration/start only."""
 
     try:
-        endpoint = load_endpoint(values)
-    except (OSError, ValueError, json.JSONDecodeError):
+        endpoints = load_endpoints(values)
+    except (OSError, ValueError):
         return DshDiscovery(
             False,
             False,
             None,
             reason="请启动 DSH，并启用手机连接插件。",
         )
+    # A stale fixed endpoint must not hide a live one published by an older plugin.
+    results = [await _probe_endpoint(endpoint, values) for endpoint in endpoints]
+    return next((result for result in results if result.available), results[0])
+
+
+async def _probe_endpoint(endpoint: BridgeEndpoint, values: dict[str, Any]) -> DshDiscovery:
     # Windows os.kill(pid, 0) is not a process-existence probe: it uses
     # TerminateProcess. On Windows rely on the authenticated handshake below.
     if os.name != "nt" and not _process_exists(endpoint.pid):
@@ -120,8 +126,31 @@ async def probe(values: dict[str, Any]) -> DshDiscovery:
     )
 
 
+def load_endpoints(values: dict[str, Any]) -> list[BridgeEndpoint]:
+    """Readable endpoints in connection order: the fixed location, then DSH_HOME.
+
+    Older plugins only publish under DSH_HOME. Callers try each in turn, so a
+    missing, invalid or stale fixed endpoint never blocks the legacy one.
+    """
+    endpoints: list[BridgeEndpoint] = []
+    errors: list[Exception] = []
+    paths = (provider_config.endpoint_path(), provider_config.legacy_endpoint_path(values))
+    for path in dict.fromkeys(paths):
+        try:
+            endpoints.append(read_endpoint(path))
+        except (OSError, ValueError) as exc:
+            errors.append(exc)
+    if not endpoints:
+        # A malformed record explains more than a missing one.
+        raise next((error for error in errors if not isinstance(error, FileNotFoundError)), errors[0])
+    return endpoints
+
+
 def load_endpoint(values: dict[str, Any]) -> BridgeEndpoint:
-    path = provider_config.endpoint_path(values)
+    return load_endpoints(values)[0]
+
+
+def read_endpoint(path: Path) -> BridgeEndpoint:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or raw.get("version") != 1:
         raise ValueError("bridge endpoint has an unsupported version")

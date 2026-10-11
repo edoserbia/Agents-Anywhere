@@ -10,13 +10,27 @@ import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import { join } from 'node:path'
+import os from 'node:os'
+import { syncBuiltinESMExports } from 'node:module'
 import { readFile } from 'node:fs/promises'
 import Include, { type PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import { load } from 'js-yaml'
 
+/** Bridge rendezvous files under the fixture home, which the fixture installs as the OS user home. */
+export const bridgePath = (home: string, ...parts: string[]) => join(home, '.agents-anywhere', 'dsh-bridge', ...parts)
+
+/** Points `os.userInfo().homedir` at `home` for the Host's fixed per-user paths; returns the restore. */
+export function useHome(home: string): () => void {
+  const original = os.userInfo
+  os.userInfo = ((options?: never) => ({ ...original(options), homedir: home })) as typeof os.userInfo
+  syncBuiltinESMExports()
+  return () => { os.userInfo = original; syncBuiltinESMExports() }
+}
+
 /** Real SDK services, no model provider, no browser, and all files in a test-owned home. */
 export async function nativeRuntime(home: string, beforeHost?: (ctx: Context) => Promise<void>, seedPrefix = '') {
   const ctx = new Context()
+  ctx.effect(() => useHome(home))
   try {
     await ctx.plugin(SessionStore).await()
     await ctx.plugin(JsonlPersistence, { root: join(home, 'native-sessions'), compression: 'none' }).await()

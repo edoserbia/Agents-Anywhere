@@ -83,8 +83,12 @@ export type ConnectorState = {
   connectorDir: string;
   resolvedUvPath: string;
   uvMissing: boolean;
+  /** The interpreter `uv run` is pinned to; empty when uv chooses one itself. */
+  resolvedPythonPath: string;
   uvPath: string;
+  pythonPath: string;
   uvPypiIndexUrl: string;
+  uvPythonInstallMirror: string;
   logChunkSizeKb: number;
   logRetainChunks: number;
   logRetentionDays: number;
@@ -100,7 +104,9 @@ export type DesktopSettings = {
   silentLaunch: boolean;
   notificationsEnabled: boolean;
   uvPath: string;
+  pythonPath: string;
   uvPypiIndexUrl: string;
+  uvPythonInstallMirror: string;
   logChunkSizeKb: number;
   logRetainChunks: number;
   logRetentionDays: number;

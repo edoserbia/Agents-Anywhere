@@ -121,6 +121,16 @@ device_runtimes = Table(
 )
 
 
+retired_device_runtimes = Table(
+    "retired_device_runtimes",
+    metadata,
+    Column("connector_id", Text, ForeignKey("connectors.id", ondelete="CASCADE"), nullable=False),
+    Column("runtime_id", Text, nullable=False),
+    Column("retired_at", Text, nullable=False),
+    PrimaryKeyConstraint("connector_id", "runtime_id"),
+)
+
+
 connector_runtime_catalogs = Table(
     "connector_runtime_catalogs",
     metadata,
@@ -411,6 +421,7 @@ sessions = Table(
     Column("permission_selection_id", Text),
     Column("external_session_id", Text),
     Column("title", Text),
+    Column("title_source", Text),
     Column("cwd", Text),
     Column("status", Text, nullable=False),
     Column("takeover", Integer, nullable=False),

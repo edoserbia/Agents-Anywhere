@@ -73,6 +73,7 @@ class ClaudeTurnController:
             notifications=self.notifications,
             interactions=self.interactions,
             pending_messages=self.pending_messages,
+            catalogs=self.catalogs,
             sdk_loader=self.sdk_loader,
             client_factory=self.client_factory,
         )
@@ -149,11 +150,16 @@ class ClaudeTurnController:
         external_session_id: str | None,
         selections: Mapping[str, str | None],
     ) -> RuntimeOperationResult:
-        return await self.selections.update_session_selections(
+        result = await self.selections.update_session_selections(
             session_id=session_id,
             external_session_id=external_session_id,
             selections=selections,
         )
+        if result.ok:
+            session = self.session_store.get(session_id)
+            if session is not None:
+                await self.runner.refresh_idle_connection(session)
+        return result
 
     async def respond_interaction(
         self,

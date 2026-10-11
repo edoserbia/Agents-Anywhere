@@ -25,6 +25,7 @@ from dsh_probe_transport import IngestTransport
 
 from agent_server.app import create_app
 from agent_server.core.auth import create_connector_access_token
+from connector.core import runtime_owner
 from connector.runtimes.dsh.provider import DshProvider
 from connector.runtimes.dsh.runtime import DshRuntime
 from connector.runtimes.dsh.identity import model_selection_id, permission_selection_id
@@ -280,4 +281,6 @@ async def main(home: Path) -> None:
 
 
 if __name__ == "__main__":
+    # The Host fixture uses this directory as the user home for the bridge endpoint.
+    runtime_owner.system_home = lambda: Path(sys.argv[1])
     asyncio.run(main(Path(sys.argv[1])))

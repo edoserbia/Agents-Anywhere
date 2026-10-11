@@ -4,7 +4,7 @@ import { receiptKey } from './attachments.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionLogSnapshot } from '@deepseek-ai/dsh-session-query'
-import { createProjection, replayHistory, type SessionProjection } from './history.js'
+import { createProjection, replayHistory, PROJECTION_VERSION, type SessionProjection } from './history.js'
 import { sessionId } from './identity.js'
 import type { NativeChange, NativeRuntime } from './native.js'
 import { record, type TimelineItem } from './types.js'
@@ -13,11 +13,11 @@ import type { SourceState } from './sessions/source.js'
 
 export type SyncOperation = { kind: string, [key: string]: unknown }
 export interface SyncBatch { streamId: string, batchSeq: number, projectionVersion: number, operations: SyncOperation[] }
-export interface SyncCheckpoint { version: 1, projectionVersion: 2, throughSeq: number, historyHash: string, settled: boolean }
+export interface SyncCheckpoint { version: 1, projectionVersion: typeof PROJECTION_VERSION, throughSeq: number, historyHash: string, settled: boolean }
 
 function matchesCheckpoint(value: unknown, projection: SessionProjection): boolean {
   const checkpoint = record(value)
-  return checkpoint.version === 1 && checkpoint.projectionVersion === 2 && checkpoint.settled === true
+  return checkpoint.version === 1 && checkpoint.projectionVersion === PROJECTION_VERSION && checkpoint.settled === true
     && projection.settled && checkpoint.throughSeq === projection.throughSeq && checkpoint.historyHash === projection.historyHash
 }
 const MAX_BUFFER = 10_000
@@ -121,7 +121,7 @@ export class SyncFeed {
       await delay(Math.ceil(SYNC_FLUSH_MS - (performance.now() - this.lastSentAt)), undefined, { signal: this.abort.signal })
     }
     this.abort.signal.throwIfAborted()
-    const batch: SyncBatch = { streamId: this.id, batchSeq: ++this.batchSeq, projectionVersion: 2, operations }
+    const batch: SyncBatch = { streamId: this.id, batchSeq: ++this.batchSeq, projectionVersion: PROJECTION_VERSION, operations }
     if (jsonBytes(batch) > 7 * 1024 * 1024) throw new Error('DSH sync batch exceeds frame size')
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -310,14 +310,23 @@ export class SyncFeed {
     const ended: [string, Record<string, unknown>][] = []
     let reconcile = false
     for (const change of changes) {
-      if (change.type === 'capabilities') {
+      if (change.type === 'capabilities' || change.type === 'commands') {
         await this.runtimeOperation('capabilities', async () => this.notification('runtime.capability.updated', await this.native.capabilities()))
+        for (const id of this.published.keys()) await this.sessionOperation(id, 'capabilities', async () => {
+          await this.notification('session.capability.updated', await this.native.capabilities(this.published.get(id), id as SessionId))
+        })
         continue
       }
       if (change.type === 'catalogs') {
-        if (this.native.ctx.get('llm')) await this.runtimeOperation('models', async () => this.notification('catalog.model.update', { ...await this.native.catalogs.models() }))
-        if (this.native.ctx.get('permissionPresets')) await this.runtimeOperation('permissions', async () => this.notification('catalog.permission.update', this.native.catalogs.permissions()))
-        await this.runtimeOperation('capabilities', async () => this.notification('runtime.capability.updated', await this.native.capabilities()))
+        if (change.catalogType === 'model' && this.native.ctx.get('llm')) {
+          await this.runtimeOperation('models', async () => this.notification('catalog.model.update', { ...await this.native.catalogs.models() }))
+        }
+        if (change.catalogType === 'permission' && this.native.ctx.get('permissionPresets')) {
+          await this.runtimeOperation('permissions', async () => this.notification('catalog.permission.update', this.native.catalogs.permissions()))
+        }
+        if (change.catalogType === 'model') {
+          await this.runtimeOperation('capabilities', async () => this.notification('runtime.capability.updated', await this.native.capabilities()))
+        }
         continue
       }
       if (change.type === 'visibility') { reconcile = true; continue }
@@ -411,7 +420,7 @@ export class SyncFeed {
     for (const id of this.checkpointDirty) {
       const projection = this.projections.get(id)
       if (!projection || !this.published.has(id) || this.failedSessions.has(id)) continue
-      const checkpoint: SyncCheckpoint = { version: 1, projectionVersion: 2,
+      const checkpoint: SyncCheckpoint = { version: 1, projectionVersion: PROJECTION_VERSION,
         throughSeq: projection.throughSeq, historyHash: projection.historyHash!, settled: projection.settled }
       await this.send([{ kind: 'checkpoint.save', externalSessionId: id, checkpoint }])
     }

@@ -117,9 +117,8 @@ def codex_session_capabilities(context: CodexCapabilityContext) -> RuntimeCapabi
             session_capability(
                 context,
                 capability_id=CAPABILITY_SESSION_COMMANDS,
-                supported=False,
-                available=False,
-                unavailable_reason="unsupported",
+                available=session_loaded(context),
+                unavailable_reason=session_unloaded_reason(context),
             ),
             session_capability(
                 context,

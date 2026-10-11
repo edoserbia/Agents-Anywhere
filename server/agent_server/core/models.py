@@ -283,6 +283,9 @@ class AuthConfigResponse(BaseModel):
     oauthRegistrationOpen: bool = False
     oauthEnabled: bool = False
     oauthProviderLabel: str | None = None
+    # True only when the instance enabled self-service password reset and
+    # email delivery is configured.
+    passwordResetEnabled: bool = False
     # ISO-8601 UTC, only present when needsBootstrap is true. Lets the setup
     # page show a countdown / "expired, check log" hint without ever exposing
     # the token value itself.
@@ -292,7 +295,7 @@ class AuthConfigResponse(BaseModel):
 
 class EmailCodeRequest(BaseModel):
     email: str = Field(max_length=320)
-    purpose: Literal["register", "bind"]
+    purpose: Literal["register", "bind", "reset"]
     setupToken: str | None = None
     pendingToken: str | None = None
 
@@ -318,6 +321,10 @@ class ChangePasswordRequest(BaseModel):
     newPassword: str | None = None
     newPasswordVerifier: str | None = None
     newPasswordSalt: str | None = None
+    # Unauthenticated password reset: email + code issued with purpose=reset.
+    # Ignored when the request carries a bearer token.
+    email: str | None = Field(default=None, max_length=320)
+    code: str | None = Field(default=None, max_length=6)
 
 
 class UpdateAvatarRequest(BaseModel):
@@ -345,6 +352,8 @@ class AdminUserCreateRequest(BaseModel):
     passwordVerifier: str | None = None
     passwordSalt: str | None = None
     role: UserRoleName = "member"
+    # Create this one user as already email-verified without a code.
+    skipEmailVerification: bool = False
 
 
 class AdminUserUpdateRequest(BaseModel):
@@ -358,6 +367,8 @@ class AdminUserUpdateRequest(BaseModel):
 
 class AdminUserListResponse(BaseModel):
     users: list[UserView]
+    # Total number of users, regardless of limit/offset.
+    total: int | None = None
     serverTime: str
 
 
@@ -485,6 +496,7 @@ class OAuthProviderConfigUpdate(OAuthProviderPublicConfig):
 class InstanceSettingsView(BaseModel):
     registrationOpen: bool
     oauthRegistrationOpen: bool = False
+    passwordResetEnabled: bool = False
     oauth: OAuthProviderPublicConfig | None = None
     email: EmailSettingsView = Field(default_factory=EmailSettingsView)
 
@@ -492,6 +504,7 @@ class InstanceSettingsView(BaseModel):
 class InstanceSettingsUpdateRequest(BaseModel):
     registrationOpen: bool | None = None
     oauthRegistrationOpen: bool | None = None
+    passwordResetEnabled: bool | None = None
     oauth: OAuthProviderConfigUpdate | None = None
     email: EmailSettingsUpdate | None = None
 

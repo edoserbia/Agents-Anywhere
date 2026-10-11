@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 
 from agent_server.infra.timeline_broker import TimelineBroker
@@ -24,133 +23,54 @@ def test_dashboard_events_are_debounced() -> None:
     asyncio.run(exercise())
 
 
-class _HealthyPubSub:
-    """A subscription that works."""
-
-    def __init__(self, events: list) -> None:
-        self._events = events
-        self.patterns: tuple[str, ...] = ()
-
-    async def psubscribe(self, *patterns: str) -> None:
-        self.patterns = patterns
-
-    async def listen(self):
-        for event in self._events:
-            yield event
-
-    async def aclose(self) -> None:
-        return None
+def test_oversized_unicode_envelope_requests_durable_recovery() -> None:
+    async def exercise() -> None:
+        broker = TimelineBroker()
+        queue = await broker.register("s1")
+        await broker.publish("s1", {"sessionId": "s1", "nextSeq": 8,
+                                   "items": [{"text": "中" * 400_000}]})
+        message = await queue.get()
+        assert len(message) < 100
+        events = await message.prepared_events()
+        assert len(events) == 1
+        assert events[0].event_type == "session.refetch_required"
+        assert json.loads(events[0].encoded_json)["sequence"] == 8
+    asyncio.run(exercise())
 
 
-class _DistributedCoordinator:
-    """Just enough coordinator for the listener: a client and a channel name."""
+def test_listener_recovers_and_invalidates_existing_sockets() -> None:
+    from fakeredis import FakeServer
+    from fakeredis.aioredis import FakeRedis
 
-    prefix = "aa"
-
-    def __init__(self, *, pubsub) -> None:
-        self._pubsub = pubsub
-
-    @property
-    def distributed(self) -> bool:
-        return True
-
-    @property
-    def client(self):
-        return self
-
-    def pubsub(self):
-        # What a reconnect gets: a fresh, working subscription.
-        return self._pubsub
-
-    def channel(self, *parts: str) -> str:
-        return ":".join((self.prefix, "channel", *(str(part) for part in parts)))
-
-
-class _FlakyPubSub:
-    """A subscription that dies once, the way a dropped Redis connection does."""
-
-    def __init__(self, events_after_recovery: list) -> None:
-        self._events = events_after_recovery
-        self._dropped = False
-        self.patterns: tuple[str, ...] = ()
-
-    async def psubscribe(self, *patterns: str) -> None:
-        self.patterns = patterns
-
-    async def listen(self):
-        if not self._dropped:
-            self._dropped = True
-            # A connection lost mid-stream: the iterator raises, exactly as the
-            # redis client does, and the listener has to come back from it.
-            raise ConnectionError(
-                "Error UNKNOWN while writing to socket. Connection lost."
-            )
-        for event in self._events:
-            yield event
-
-    async def aclose(self) -> None:
-        return None
-
-
-def test_the_listener_resubscribes_after_redis_drops_the_connection() -> None:
-    """A subscription that dies with its connection freezes every client.
-
-    Seen in production: Redis dropped the pubsub connection, the listener ended,
-    and from then on publishers wrote into a channel nobody read. Clients kept
-    the snapshot they had loaded and never saw another change until the process
-    was restarted. The listener has to outlive its connection.
-    """
-
-    async def run():
-        broker = TimelineBroker(
-            listen_retry_seconds=0.01,
-            listen_retry_max_seconds=0.02,
-        )
-        event = {
-            "type": "pmessage",
-            "channel": "aa:channel:timeline:sess_1",
-            "data": '{"type":"timeline.items"}',
-        }
-        recovered = _HealthyPubSub([event])
-        broker._coordinator = _DistributedCoordinator(pubsub=recovered)
-        first = _FlakyPubSub([event])
-        broker._pubsub = first
-        queue: asyncio.Queue = asyncio.Queue()
-        broker._subs["sess_1"] = {queue}
-
-        task = asyncio.create_task(broker._listen())
+    from agent_server.infra.redis_coordinator import RedisCoordinator
+    async def exercise() -> None:
+        client = FakeRedis(server=FakeServer(), decode_responses=True)
+        broker = TimelineBroker(RedisCoordinator(client=client))
+        await broker.start()
+        old_signal = broker.connection_lost
+        original = broker._listen_once
+        failed = False
+        async def fail_once():
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise ConnectionError("injected subscriber disconnect")
+            await original()
+        broker._listen_once = fail_once
         try:
-            for _ in range(200):
-                await asyncio.sleep(0.01)
-                if not queue.empty():
-                    break
-            assert not queue.empty(), "the listener never recovered the subscription"
-            assert broker._pubsub is not None
-            assert broker._pubsub is not first, "it kept using the dead connection"
-            assert broker._pubsub.patterns == (
-                "aa:channel:timeline:*",
-                "aa:channel:dashboard:*",
-            )
+            await asyncio.wait_for(old_signal.wait(), 1)
+            assert not broker.healthy
+            async with asyncio.timeout(4):
+                while not broker.healthy:
+                    await asyncio.sleep(.01)
+            assert old_signal.is_set()
+            assert broker.connection_lost is not old_signal
+            assert not broker.connection_lost.is_set()
+            queue = await broker.register("s1")
+            await broker.publish("s1", {"sessionId": "s1", "nextSeq": 9})
+            assert json.loads(await asyncio.wait_for(queue.get(), 1))["nextSeq"] == 9
         finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-    asyncio.run(run())
-
-
-def test_the_listener_stops_when_it_is_cancelled() -> None:
-    """Recovery must not turn shutdown into a spin."""
-
-    async def run():
-        broker = TimelineBroker(listen_retry_seconds=0.01)
-        broker._coordinator = _DistributedCoordinator(pubsub=_HealthyPubSub([]))
-        broker._pubsub = _FlakyPubSub([])
-        task = asyncio.create_task(broker._listen())
-        await asyncio.sleep(0.05)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-        assert task.done()
-
-    asyncio.run(run())
+            await broker.close()
+            await client.aclose()
+        assert not broker.healthy
+    asyncio.run(exercise())

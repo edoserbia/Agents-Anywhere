@@ -3,6 +3,8 @@ import Textual
 
 extension EnvironmentValues {
     @Entry var chatLayoutTraceOwner = "markdown"
+    /// One Dynamic Type step below body; every block scales from this.
+    @Entry var chatMarkdownFont: Font = .callout
 }
 
 struct ChatMarkdownView: View {
@@ -10,11 +12,15 @@ struct ChatMarkdownView: View {
     var isStreaming = false
     var resolvesFileReferences = false
     @State private var blocks: [MarkdownBlockSnapshot] = []
+    /// When each block's newest glyphs finish revealing. A block's drawing
+    /// clock runs only until then, so a stalled or finished block stops redrawing.
+    @State private var revealDeadlines: [Int: Date] = [:]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
             ForEach(blocks) { block in
-                MarkdownBlockView(block: block, isStreaming: isStreaming, isTail: block.id == blocks.last?.id)
+                MarkdownBlockView(block: block, isStreaming: isStreaming, isTail: block.id == blocks.last?.id,
+                                  revealDeadline: revealDeadlines[block.id] ?? .distantPast)
                     .equatable()
             }
         }
@@ -30,7 +36,17 @@ struct ChatMarkdownView: View {
                 worker.cancel()
             }
             guard !Task.isCancelled, case .success(let next) = result else { return }
-            if blocks != next { blocks = next }
+            guard blocks != next else { return }
+            if isStreaming {
+                // Set in the same update as the text, so the first frame of new
+                // glyphs already has a running clock.
+                let deadline = Date.now.addingTimeInterval(ReplyPresentation.revealSeconds + ReplyPresentation.drawSlack)
+                let previous = Dictionary(blocks.map { ($0.id, $0.digest) }, uniquingKeysWith: { $1 })
+                var deadlines = revealDeadlines.filter { id, _ in next.contains { $0.id == id } }
+                for block in next where previous[block.id] != block.digest { deadlines[block.id] = deadline }
+                revealDeadlines = deadlines
+            }
+            blocks = next
         }
     }
 
@@ -65,29 +81,33 @@ private struct MarkdownBlockView: View, Equatable {
     let block: MarkdownBlockSnapshot
     let isStreaming: Bool
     let isTail: Bool
+    let revealDeadline: Date
     @State private var hasSettled = false
     @State private var headingLedger = GlyphRevealLedger()
     @Environment(\.dynamicTypeSize) private var dynamicType
     @Environment(\.displayScale) private var displayScale
     @Environment(\.layoutDirection) private var direction
     @Environment(\.chatLayoutTraceOwner) private var traceOwner
+    @Environment(\.chatMarkdownFont) private var font
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.block == rhs.block && lhs.isStreaming == rhs.isStreaming && lhs.isTail == rhs.isTail
+            && lhs.revealDeadline == rhs.revealDeadline
     }
 
     var body: some View {
         // Only changed blocks reach Textual's parser. The complete document was
         // parsed above, so cross-block references and nested structures survive.
         MarkdownBlockLayout(dynamicType: dynamicType, displayScale: displayScale, direction: direction) {
-            StructuredText(String(block.content.hashValue), parser: ParsedMarkdownText(content: block.content))
+            StructuredText(String(block.digest), parser: ParsedMarkdownText(content: block.content))
                 .textual.structuredTextStyle(ChatMarkdownStyle(headingLedger: headingLedger))
                 .textual.imageAttachmentLoader(ChatImageLoader())
                 // Controls own their gestures. Only paragraph/heading labels and
                 // the native code/table text areas install selection overlays.
                 .textual.textSelection(.disabled)
                 .environment(\.streamingGlyphAnimation, isStreaming && !hasSettled)
-                .font(.body)
+                .environment(\.streamingRevealDeadline, revealDeadline)
+                .font(font)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -125,10 +145,13 @@ private struct ChatMarkdownStyle: StructuredText.Style {
     }
 
     var inlineStyle: InlineStyle { defaults.inlineStyle }
-    var blockQuoteStyle: StructuredText.DefaultBlockQuoteStyle { defaults.blockQuoteStyle }
-    var listItemStyle: StructuredText.DefaultListItemStyle { defaults.listItemStyle }
-    var unorderedListMarker: StructuredText.SymbolListMarker { defaults.unorderedListMarker }
-    var orderedListMarker: StructuredText.DecimalListMarker { defaults.orderedListMarker }
+    var blockQuoteStyle: ChatBlockQuoteStyle { ChatBlockQuoteStyle() }
+    // Textual's defaults indent each level by 2em; a phone column needs ~1.4em.
+    var listItemStyle: StructuredText.DefaultListItemStyle { .default(markerSpacing: .fontScaled(0.4)) }
+    var unorderedListMarker: StructuredText.SymbolListMarker {
+        .init(symbolName: "circle.fill", scale: 0.33, minWidth: .fontScaled(1))
+    }
+    var orderedListMarker: StructuredText.DecimalListMarker { .init(minWidth: .fontScaled(1)) }
     var tableStyle: ChatTableStyle { ChatTableStyle() }
     var tableCellStyle: StructuredText.DefaultTableCellStyle { defaults.tableCellStyle }
     var thematicBreakStyle: StructuredText.DividerThematicBreakStyle { defaults.thematicBreakStyle }
@@ -141,6 +164,19 @@ private struct ChatParagraphStyle: StructuredText.ParagraphStyle {
             .textual.blockSpacing(.fontScaled(top: 0.8))
             .modifier(StreamingGlyphReveal())
             .textual.textSelectionScope()
+    }
+}
+
+/// A thin leading rule, like Web, instead of Textual's padded aside box.
+private struct ChatBlockQuoteStyle: StructuredText.BlockQuoteStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .textual.padding(.leading, .fontScaled(0.75))
+            .overlay(alignment: .leading) {
+                Capsule().fill(.primary.opacity(0.18)).frame(width: 3).allowsHitTesting(false)
+            }
     }
 }
 

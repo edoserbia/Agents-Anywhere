@@ -499,7 +499,7 @@ const themes: { id: AppearanceMode; labelKey: string; descKey: string }[] = [
 function AppearanceTab() {
   const t = useTranslations("pages.settings")
   const { theme, setTheme } = useTheme()
-  const { sidebarShowsSessions, setSidebarShowsSessions } = useWorkspace()
+  const { sidebarShowsSessions, setSidebarShowsSessions, sidebarCompactSessions, setSidebarCompactSessions } = useWorkspace()
   const selected: AppearanceMode = theme === "light" || theme === "dark" ? theme : "auto"
 
   const handleThemeChange = (value: string) => {
@@ -543,6 +543,20 @@ function AppearanceTab() {
               id="settings-sidebar-shows-sessions"
               checked={sidebarShowsSessions}
               onCheckedChange={setSidebarShowsSessions}
+            />
+          </Field>
+          <Field orientation="horizontal" data-disabled={!sidebarShowsSessions || undefined}>
+            <FieldContent>
+              <FieldLabel htmlFor="settings-sidebar-compact-sessions">
+                {t("desktopSidebarCompactSessions")}
+              </FieldLabel>
+              <FieldDescription>{t("desktopSidebarCompactSessionsDescription")}</FieldDescription>
+            </FieldContent>
+            <Switch
+              id="settings-sidebar-compact-sessions"
+              checked={sidebarCompactSessions}
+              disabled={!sidebarShowsSessions}
+              onCheckedChange={setSidebarCompactSessions}
             />
           </Field>
         </FieldGroup>

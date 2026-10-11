@@ -286,6 +286,8 @@ export type WorkspaceState = {
   filter: FilterValue
   search: string
   sidebarShowsSessions: boolean
+  /** Flat list only: one line per session, without the project · device line. */
+  sidebarCompactSessions: boolean
 
   // Panels
   panels: Record<PanelId, PanelMode>
@@ -306,6 +308,7 @@ export type WorkspaceState = {
   setFilter: (f: FilterValue) => void
   setSearch: (q: string) => void
   setSidebarShowsSessions: (show: boolean) => void
+  setSidebarCompactSessions: (compact: boolean) => void
   setPanelMode: (id: PanelId, mode: PanelMode) => void
   toggleCollapse: (id: PanelId) => void
   dismissPopupBlocked: () => void
@@ -341,6 +344,7 @@ const WorkspaceContext = React.createContext<WorkspaceState | null>(null)
 const FIRST_DEVICE_WIZARD_DISMISSED_KEY = "aa-first-device-wizard-dismissed-v1"
 const PANEL_MODE_STORAGE_KEY = "aa-session-runtime-panel-modes-v1"
 const SIDEBAR_SHOW_SESSIONS_STORAGE_KEY = "aa-sidebar-show-sessions-v1"
+const SIDEBAR_COMPACT_SESSIONS_STORAGE_KEY = "aa-sidebar-compact-sessions-v1"
 const SESSION_SEND_OPTIMISTIC_TOP_MS = 1_000
 const DEFAULT_PANEL_MODES: Record<PanelId, PanelMode> = {
   files: "docked",
@@ -397,6 +401,24 @@ function writeStoredSidebarShowsSessions(show: boolean) {
   if (typeof window === "undefined") return
   try {
     window.localStorage.setItem(SIDEBAR_SHOW_SESSIONS_STORAGE_KEY, show ? "1" : "0")
+  } catch {
+    // Persisting the sidebar preference is best-effort.
+  }
+}
+
+function readStoredSidebarCompactSessions(): boolean {
+  if (typeof window === "undefined") return false
+  try {
+    return window.localStorage.getItem(SIDEBAR_COMPACT_SESSIONS_STORAGE_KEY) === "1"
+  } catch {
+    return false
+  }
+}
+
+function writeStoredSidebarCompactSessions(compact: boolean) {
+  if (typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(SIDEBAR_COMPACT_SESSIONS_STORAGE_KEY, compact ? "1" : "0")
   } catch {
     // Persisting the sidebar preference is best-effort.
   }
@@ -518,6 +540,9 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
   const [search, setSearch] = React.useState("")
   const [sidebarShowsSessions, setSidebarShowsSessionsState] = React.useState(
     readStoredSidebarShowsSessions,
+  )
+  const [sidebarCompactSessions, setSidebarCompactSessionsState] = React.useState(
+    readStoredSidebarCompactSessions,
   )
   const [panels, setPanels] = React.useState<Record<PanelId, PanelMode>>(readStoredPanelModes)
   const [collapsed, setCollapsed] = React.useState<Record<PanelId, boolean>>({
@@ -672,6 +697,11 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
   const setSidebarShowsSessions = React.useCallback((show: boolean) => {
     setSidebarShowsSessionsState(show)
     writeStoredSidebarShowsSessions(show)
+  }, [])
+
+  const setSidebarCompactSessions = React.useCallback((compact: boolean) => {
+    setSidebarCompactSessionsState(compact)
+    writeStoredSidebarCompactSessions(compact)
   }, [])
 
   React.useEffect(() => {
@@ -1374,6 +1404,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     filter,
     search,
     sidebarShowsSessions,
+    sidebarCompactSessions,
     panels,
     collapsed,
     popupBlocked,
@@ -1390,6 +1421,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     setFilter,
     setSearch,
     setSidebarShowsSessions,
+    setSidebarCompactSessions,
     setPanelMode,
     toggleCollapse,
     dismissPopupBlocked,

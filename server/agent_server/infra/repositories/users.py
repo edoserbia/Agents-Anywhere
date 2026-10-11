@@ -280,11 +280,16 @@ class UserRepositoryMixin(EmailAccountRepositoryMixin):
         return int(row[0]) if row else 0
 
 
-    async def list_users(self) -> list[UserView]:
+    async def list_users(
+        self, *, limit: int | None = None, offset: int = 0
+    ) -> list[UserView]:
+        query = select(users_t).order_by(users_t.c.created_at.asc(), users_t.c.id.asc())
+        if offset:
+            query = query.offset(offset)
+        if limit is not None:
+            query = query.limit(limit)
         async with self._engine.connect() as conn:
-            rows = (
-                await conn.execute(select(users_t).order_by(users_t.c.created_at.asc()))
-            ).mappings().all()
+            rows = (await conn.execute(query)).mappings().all()
         return [_user_from_row(row) for row in rows]
 
 

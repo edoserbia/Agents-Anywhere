@@ -1,5 +1,9 @@
-/** `preparing` means the first Connector environment install is still running. */
-export type LocalOwnershipState = { status: "owned" | "conflict" | "preparing" | "error"; message?: string }
+/**
+ * `checking` is the value before the first probe answers; `preparing` means the
+ * first Connector environment install is still running. An `error` carries the
+ * underlying failure in `message`.
+ */
+export type LocalOwnershipState = { status: "owned" | "conflict" | "preparing" | "checking" | "error"; message?: string }
 import type { DesktopUpdateState } from "../../../../shared/desktop-updates"
 export type { DesktopUpdateState } from "../../../../shared/desktop-updates"
 
@@ -36,10 +40,14 @@ export type DesktopConnectorState = {
   resolvedUvPath?: string
   uvMissing?: boolean
   uvPath?: string
+  /** The interpreter uv runs the Connector with; empty when uv picks or downloads one. */
+  resolvedPythonPath?: string
+  pythonPath?: string
   logChunkSizeKb?: number
   logRetainChunks?: number
   logRetentionDays?: number
   uvPypiIndexUrl?: string
+  uvPythonInstallMirror?: string
 }
 
 export type DesktopLocalBinding = {
@@ -88,10 +96,12 @@ export type DesktopConnectorSettings = Partial<Pick<
   | "silentLaunch"
   | "notificationsEnabled"
   | "uvPath"
+  | "pythonPath"
   | "logChunkSizeKb"
   | "logRetainChunks"
   | "logRetentionDays"
   | "uvPypiIndexUrl"
+  | "uvPythonInstallMirror"
 >>
 
 export type DesktopConnectorConfigPatch = Partial<Pick<

@@ -33,7 +33,7 @@ struct SessionTimelineGroupView: View {
     }
     private var agentGroup: Bool { if case .agents = group.kind { true } else { false } }
     private var rows: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 2) {
             ForEach(group.rows) { row in
                 SessionTimelineRow(row: row, chat: chat, onAttachment: onAttachment, cwd: chat.session.metadata?.cwd,
                     disclosures: chat.disclosures, onFile: onFile)
@@ -62,6 +62,8 @@ struct SessionTimelineEventView: View {
                 TimelineFold(id: row.id, title: value.title, symbol: value.symbol, status: row.value.status, disclosures: disclosures) {
                     ChatMarkdownView(text: row.text, isStreaming: row.isRevealing, resolvesFileReferences: true)
                         .id(row.layoutGeneration).padding(.leading, 24).foregroundStyle(.secondary)
+                        // Reasoning stays well below the reply text.
+                        .environment(\.chatMarkdownFont, .caption2)
                 }
             }
         case .compact:
@@ -112,7 +114,8 @@ struct TimelineMarkerRow: View {
             if let accessory { AppSymbol(accessory, size: 14) }
         }
         .foregroundStyle(status.isFailure ? Color.red : .primary)
-        .frame(minHeight: 44).contentShape(Rectangle())
+        // Consecutive tool rows read as one list; the full-width row stays tappable.
+        .frame(minHeight: 32).contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityValue(status.label)
     }
@@ -181,7 +184,7 @@ private struct TimelineFold<Content: View>: View {
     @ViewBuilder var content: () -> Content
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
             Button {
                 withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { disclosures.toggle(id) }
             } label: { TimelineMarkerRow(title: title, symbol: symbol, status: status, expanded: disclosures.isExpanded(id)) }

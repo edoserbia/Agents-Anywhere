@@ -8,10 +8,12 @@ import { tmpdir } from 'node:os'
 import { createConnection } from 'node:net'
 import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
-import { nativeRuntime } from '../fixtures/native-runtime.js'
+import { bridgePath, nativeRuntime } from '../fixtures/native-runtime.js'
 import SqliteQuery from '@deepseek-ai/dsh-session-query-sqlite'
 import { RuntimeServer, type Endpoint } from '../../src/host/dsh-runtime/server.js'
 import { sessionId } from '../../src/host/dsh-runtime/identity.js'
+import dshProtocol from '@deepseek-ai/dsh-typert-protocol/package.json' with { type: 'json' }
+import bridgePackage from '../../package.json' with { type: 'json' }
 
 const execute = promisify(execFile)
 async function endpoint(path: string): Promise<Endpoint> {
@@ -41,12 +43,14 @@ test('published Host + official SessionQuery/JSONL + actual Python adapter compl
   let context: Awaited<ReturnType<typeof nativeRuntime>> | undefined
   try {
     context = await nativeRuntime(home)
-    const path = join(home, 'agents-anywhere/bridge/endpoint.json')
+    const path = bridgePath(home, 'endpoint.json')
     const value = await endpoint(path)
     if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, 0o600)
     const connection = await client(value)
     try {
       assert.equal(connection.result.result.features.readOnly, true)
+      assert.equal(connection.result.result.identity.runtimeVersion, dshProtocol.version, 'reports the Host DSH version')
+      assert.equal(connection.result.result.identity.bridgeVersion, bridgePackage.version)
       const snapshot = await connection.rpc('session.getSnapshot', { sessionId: sessionId('instance', 'native-main'), externalSessionId: 'native-main' })
       assert.equal(snapshot.result.complete, true)
       assert.equal(snapshot.result.items.filter((item: { type: string }) => item.type === 'tool').length, 1)

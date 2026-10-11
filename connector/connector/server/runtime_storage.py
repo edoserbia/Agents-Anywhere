@@ -52,7 +52,8 @@ class RuntimeStorageManager:
                             kv.write_document({"version": 1, "values": {}})
                         for file in temporary.iterdir():
                             file.chmod(0o600)
-                            with file.open("rb") as stream:
+                            # Windows fsync requires a writable file descriptor.
+                            with file.open("r+b") as stream:
                                 os.fsync(stream.fileno())
                         temporary.rename(target)
                     finally:

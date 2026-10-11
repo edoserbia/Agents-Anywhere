@@ -241,6 +241,29 @@ final class V2SessionRepository {
         return try await task.value
     }
 
+    /// The command catalog is read once per live connection; it is dropped with
+    /// the option catalogs when the connection stops or selections change.
+    func commands(sessionId: V2SessionID, force: Bool = false) async throws -> [V2RuntimeCommand] {
+        let entry = entry(for: sessionId)
+        if !force, let cached = entry.commands { return cached }
+        try requireNetwork()
+        let version = entry.catalogVersion
+        let commands = try await interactions.commands(sessionId: sessionId)
+        try requireCurrent(entry)
+        guard version == entry.catalogVersion else { throw CacheError.invalidated }
+        entry.commands = commands
+        return commands
+    }
+
+    func executeCommand(sessionId: V2SessionID, request: RuntimeCommandRequest) async throws -> V2RuntimeCommandExecuteResponse {
+        try requireNetwork()
+        let entry = entry(for: sessionId)
+        let response = try await interactions.executeCommand(sessionId: sessionId, command: request.command, arguments: request.args, raw: request.raw)
+        try requireCurrent(entry)
+        if let session = response.session { entry.projection?.applyMeta(session); emit(entry) }
+        return response
+    }
+
     func draftDidChange() { schedulePersistence() }
 
     func localWorkDidChange(sessionID: V2SessionID) {
@@ -589,6 +612,7 @@ final class V2SessionRepository {
         entry.catalogVersion += 1
         entry.catalogs = nil
         entry.catalogReadAt = nil
+        entry.commands = nil
         entry.catalogTask?.cancel()
         entry.catalogTask = nil
     }
@@ -651,6 +675,7 @@ private final class Entry {
     var catalogs: V2SessionCatalogs?
     var catalogScopes: Set<String>?
     var catalogReadAt: Date?
+    var commands: [V2RuntimeCommand]?
 
     init(id: V2SessionID, model: V2SessionModel) { self.id = id; self.model = model }
 }

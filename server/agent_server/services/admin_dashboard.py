@@ -114,6 +114,10 @@ class DeviceSnapshot:
     agent_counts: Counter[str]
 
 
+# Range summaries only need activity; device columns on the facts are unused.
+_EMPTY_DEVICE_SNAPSHOT = DeviceSnapshot(total_devices=0, by_os=Counter(), by_user={}, agent_counts=Counter())
+
+
 class AdminDashboardService:
     def __init__(self, store: AdminDashboardRepository) -> None:
         self._store = store
@@ -199,7 +203,18 @@ class AdminDashboardService:
         metrics = await self._read_metrics(from_date, to_date)
         facts = await self._read_facts(from_date, to_date)
         series = [_series_point(day, metrics.get(day.isoformat(), {})) for day in _date_range(from_date, to_date)]
-        summary = _summary_from_series(series[-1] if series else None)
+        range_start_utc, _ = _day_bounds_utc(from_date, timezone)
+        _, range_end_utc = _day_bounds_utc(to_date, timezone)
+        range_user_facts = await self._compute_user_facts(
+            start_utc=range_start_utc,
+            end_utc=range_end_utc,
+            device_snapshot=_EMPTY_DEVICE_SNAPSHOT,
+        )
+        range_session_agent_counts = await self._active_session_agent_counts(
+            start_utc=range_start_utc,
+            end_utc=range_end_utc,
+        )
+        summary = _range_summary(series, range_user_facts)
         range_facts = list(facts.values())
         effective_settings = settings if customized_settings else _settings_for_facts(range_facts)
         message_histogram = _histogram(
@@ -225,7 +240,7 @@ class AdminDashboardService:
             userSegments=user_segments,
             deviceBreakdown=_breakdown(latest_metrics, "devices.by_os", DEVICE_LABELS),
             agentBreakdown=_breakdown(latest_metrics, "agents.installed", AGENT_LABELS),
-            sessionAgentBreakdown=_breakdown(latest_metrics, "sessions.by_agent", AGENT_LABELS),
+            sessionAgentBreakdown=_counter_breakdown(range_session_agent_counts, AGENT_LABELS),
             settings=effective_settings.model_copy(update={"serverTime": utc_now()}),
             serverTime=utc_now(),
         )
@@ -962,10 +977,50 @@ def _series_point(
     )
 
 
-def _summary_from_series(point: DashboardSeriesPoint | None) -> DashboardSummary:
-    if point is None:
+def _range_summary(
+    series: list[DashboardSeriesPoint],
+    range_facts: dict[str, UserDailyFact],
+) -> DashboardSummary:
+    """Summarize the whole selected range, not just its last day.
+
+    Flow metrics (messages, active users, active sessions) are counted over the
+    range with de-duplication; DAU is the daily average; stock metrics (users,
+    devices) and rolling windows (WAU/MAU) are taken as of the end date.
+    """
+    if not series:
         return DashboardSummary()
-    return DashboardSummary(**point.model_dump(exclude={"date"}))
+    latest = series[-1]
+    range_users = len(range_facts)
+    total_messages = sum(fact.messages for fact in range_facts.values())
+    user_sessions = sum(len(fact.active_sessions) for fact in range_facts.values())
+    return DashboardSummary(
+        totalUsers=latest.totalUsers,
+        newUsers=sum(point.newUsers for point in series),
+        dau=int(sum(point.dau for point in series) / len(series) + 0.5),
+        activeUsers=sum(1 for fact in range_facts.values() if fact.active_sessions),
+        wau=latest.wau,
+        mau=latest.mau,
+        totalMessages=total_messages,
+        activeSessions=len({sid for fact in range_facts.values() for sid in fact.active_sessions}),
+        avgMessagesPerActiveUser=round(_ratio(total_messages, range_users), 2),
+        avgActiveSessionsPerActiveUser=round(_ratio(user_sessions, range_users), 2),
+        totalDevices=latest.totalDevices,
+        avgDevicesPerUser=latest.avgDevicesPerUser,
+    )
+
+
+def _counter_breakdown(counts: Counter[str], labels: dict[str, str]) -> list[DashboardBreakdownItem]:
+    total = sum(counts.get(key, 0) for key in labels)
+    return [
+        DashboardBreakdownItem(
+            key=key,
+            label=label,
+            value=float(value),
+            percent=round(_ratio(value * 100, total), 2) if total else 0,
+        )
+        for key, label in labels.items()
+        for value in [counts.get(key, 0)]
+    ]
 
 
 def _breakdown(

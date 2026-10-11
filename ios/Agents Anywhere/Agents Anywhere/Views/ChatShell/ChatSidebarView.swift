@@ -26,6 +26,10 @@ struct ChatSidebarView: View {
     @State private var isShowingPairing = false
     @State private var showsArchives = false
     @AppStorage(ProjectSidebarPreferences.sessionListKey) private var showsSessionList = false
+    /// Flat list only: one line per session, without the project · device line.
+    @AppStorage(ProjectSidebarPreferences.compactSessionListKey) private var compactSessionList = false
+
+    private static let contentInset: CGFloat = 14
 
     var body: some View {
         ScrollView {
@@ -68,6 +72,7 @@ struct ChatSidebarView: View {
                         sessions: pinnedSessions,
                         selectedSessionId: selectedSessionId,
                         emptyMessage: "No pinned sessions",
+                        context: showsSessionList && !compactSessionList ? { sessionContext($0, after: $1) } : nil,
                         onOpen: onOpenSession,
                         onRename: onRenameSession,
                         onTogglePinned: onToggleSessionPinned,
@@ -91,6 +96,7 @@ struct ChatSidebarView: View {
                             selectedSessionId: selectedSessionId,
                             isLoading: isLoadingSessions,
                             emptyMessage: "No sessions yet",
+                            context: compactSessionList ? nil : { sessionContext($0, after: $1) },
                             onOpen: onOpenSession,
                             onRename: onRenameSession,
                             onTogglePinned: onToggleSessionPinned,
@@ -107,8 +113,10 @@ struct ChatSidebarView: View {
                 }
 
             }
-            .padding(.leading, safeAreaInsets.leading + 14)
-            .padding(.trailing, safeAreaInsets.trailing + 14)
+            .padding(.leading, safeAreaInsets.leading + Self.contentInset)
+            .padding(.trailing, safeAreaInsets.trailing + Self.contentInset)
+            .environment(\.chatSidebarRowBleed, EdgeInsets(top: 0, leading: safeAreaInsets.leading + Self.contentInset,
+                                                           bottom: 0, trailing: safeAreaInsets.trailing + Self.contentInset))
             .padding(.top, 10)
             .padding(.bottom, safeAreaInsets.bottom + 82)
         }
@@ -137,6 +145,22 @@ struct ChatSidebarView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
+
+    /// Web's flat-list second line: project first, then the device, which
+    /// collapses to `^` when it repeats the row above.
+    private func sessionContext(_ session: ChatSidebarSession, after previous: ChatSidebarSession?) -> String? {
+        let project = repository?.projects.first { $0.id == session.projectId }?.name
+            ?? session.cwd?.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init)
+        let device = previous?.connectorId == session.connectorId ? "^"
+            : devices.first { $0.id == session.connectorId }?.name ?? session.connectorId
+        let parts = [project, device].compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
+extension EnvironmentValues {
+    /// Distance from a sidebar row to the sidebar edges; selection bars bleed through it.
+    @Entry var chatSidebarRowBleed = EdgeInsets()
 }
 
 struct ChatSidebarListMenu<Filters: View>: View {
@@ -235,6 +259,7 @@ private struct ChatSidebarSessionSection: View {
     let selectedSessionId: V2SessionID?
     var isLoading = false
     let emptyMessage: LocalizedStringResource
+    var context: ((ChatSidebarSession, ChatSidebarSession?) -> String?)? = nil
     let onOpen: (V2SessionID) -> Void
     let onRename: (V2SessionID, String) -> Void
     let onTogglePinned: (V2SessionID, Bool) -> Void
@@ -250,10 +275,12 @@ private struct ChatSidebarSessionSection: View {
             } else if sessions.isEmpty {
                 ChatSidebarEmptyRow(title: emptyMessage)
             } else {
-                ForEach(sessions) { session in
+                ForEach(Array(sessions.enumerated()), id: \.element.id) { index, session in
                     ChatSidebarSessionRow(
                         session: session,
                         isSelected: selectedSessionId == session.id,
+                        context: context?(session, index > 0 ? sessions[index - 1] : nil),
+                        showsDivider: context != nil && index < sessions.count - 1,
                         onOpen: { onOpen(session.id) },
                         onRename: { onRename(session.id, $0) },
                         onTogglePinned: { onTogglePinned(session.id, !session.pinned) },
@@ -320,9 +347,12 @@ private struct ChatSidebarDeviceRow: View {
 
 struct ChatSidebarSessionRow: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.chatSidebarRowBleed) private var bleed
 
     let session: ChatSidebarSession
     let isSelected: Bool
+    var context: String? = nil
+    var showsDivider = false
     var inset = false
     let onOpen: () -> Void
     let onRename: (String) -> Void
@@ -335,19 +365,35 @@ struct ChatSidebarSessionRow: View {
 
     var body: some View {
         Button(action: onOpen) {
-            HStack(spacing: 10) {
-                Text(session.title ?? String(localized: "Untitled session"))
-                    .font(.body).foregroundStyle(.primary)
-                    .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-                ChatSidebarSessionIndicator(indicator: session.presentation.indicator)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    SessionAgentIcon(runtime: session.runtime, runtimeType: session.runtimeType)
+                        .foregroundStyle(.primary)
+                    Text(session.title ?? String(localized: "Untitled session"))
+                        .font(.body).foregroundStyle(.primary)
+                        .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                    ChatSidebarSessionIndicator(indicator: session.presentation.indicator)
+                }
+                if let context {
+                    Text(verbatim: context).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            // Match Web's inset session rows while keeping the selection and
-            // the touch target across the full sidebar width.
-            .padding(.leading, inset ? 36 : 10)
+            // Nested rows shift by at most half of the project's folder icon.
+            .padding(.leading, inset ? 19 : 10)
             .padding(.trailing, 10)
+            .padding(.vertical, context == nil ? 0 : 8)
             .frame(minHeight: 42)
-            .background(isSelected ? AppTheme.sidebarSelectionFill(colorScheme) : .clear, in: RoundedRectangle(cornerRadius: 9))
+            // Selection is a full-width bar reaching both sidebar edges.
+            .background {
+                if isSelected {
+                    Rectangle().fill(AppTheme.sidebarSelectionFill(colorScheme))
+                        .padding(.leading, -bleed.leading).padding(.trailing, -bleed.trailing)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if showsDivider { Divider().padding(.horizontal, 10).offset(y: 2) }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

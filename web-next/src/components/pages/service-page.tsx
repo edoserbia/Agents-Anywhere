@@ -287,7 +287,7 @@ export function ServicePage() {
   )
 
   const handleSettingToggle = React.useCallback(
-    async (key: "registrationOpen" | "oauthRegistrationOpen", value: boolean) => {
+    async (key: "registrationOpen" | "oauthRegistrationOpen" | "passwordResetEnabled", value: boolean) => {
       if (!settings || !session?.accessToken || togglePending) return
       const previous = settings
       setTogglePending(key)
@@ -383,6 +383,14 @@ export function ServicePage() {
                 disabled={!isAdmin || togglePending === "oauthRegistrationOpen"}
                 pending={togglePending === "oauthRegistrationOpen"}
                 onCheckedChange={(value) => void handleSettingToggle("oauthRegistrationOpen", value)}
+              />
+              <SettingSwitchField
+                label={t("passwordReset")}
+                description={settings.email.enabled ? t("passwordResetDescription") : t("passwordResetNeedsEmail")}
+                checked={settings.passwordResetEnabled === true}
+                disabled={!isAdmin || togglePending === "passwordResetEnabled"}
+                pending={togglePending === "passwordResetEnabled"}
+                onCheckedChange={(value) => void handleSettingToggle("passwordResetEnabled", value)}
               />
             </FieldGroup>
           </CardContent>

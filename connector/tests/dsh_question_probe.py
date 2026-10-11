@@ -2,6 +2,7 @@
 # ruff: noqa: E402
 from __future__ import annotations
 
+from connector.core import runtime_owner
 from connector.runtimes.dsh.identity import model_selection_id, permission_selection_id
 
 import asyncio
@@ -130,4 +131,6 @@ async def main(home: Path) -> None:
 
 
 if __name__ == "__main__":
+    # The Host fixture uses this directory as the user home for the bridge endpoint.
+    runtime_owner.system_home = lambda: Path(sys.argv[1])
     asyncio.run(main(Path(sys.argv[1])))

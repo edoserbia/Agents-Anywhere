@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process'
-import { access, mkdir } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
@@ -9,10 +9,33 @@ import { writeJson } from '../storage/files.js'
 import { DEFAULT_CONNECTOR_SETTINGS, type ConnectorSettings } from '../../contracts/connector.js'
 import { resolveUv } from './environment.js'
 import { ConnectorLogs } from './logs.js'
+import { materializeConnectorProject } from './project.js'
 
 const runFile = promisify(execFile)
 const MAX_FRAME = 1024 * 1024
+/**
+ * The first request waits out uv's initial dependency installation, not a Python launch: the
+ * Connector project pulls roughly 235 MiB of wheels, which needs a quarter of an hour on a
+ * 300 KB/s link. A stalled install still fails long before this budget, because uv gives up on
+ * its own read timeout below and its exit rejects every pending request; the caller may abort
+ * the start signal at any point. So this only bounds an installation that is making progress.
+ */
+const FIRST_REQUEST_TIMEOUT = 3_600_000
+/** Bounds a transfer that stopped producing bytes, which uv can see and this process cannot. */
+const UV_READ_TIMEOUT_SECONDS = '60'
+/** Reclaiming the cache is housekeeping, so it may not outlast the failure that asked for it. */
+const CACHE_PRUNE_TIMEOUT = 60_000
 type ConnectorLauncher = (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams
+type CachePruner = (command: string) => Promise<unknown>
+
+/**
+ * uv unpacks a download into a temporary directory inside its cache and only commits the entry
+ * once it is whole, so a child killed mid-download orphans that directory for good: the reporter
+ * of #112 accumulated 57 of them, 2.44 GiB, over four days of retries. Pruning drops exactly those
+ * dangling entries and keeps every archive that did finish, so the next attempt still starts from
+ * whatever the last one managed to download.
+ */
+const pruneUvCache: CachePruner = command => runFile(command, ['cache', 'prune'], { timeout: CACHE_PRUNE_TIMEOUT, windowsHide: true })
 interface Pending {
   resolve: (value: unknown) => void
   reject: (error: Error) => void
@@ -51,8 +74,12 @@ export class SourceConnector implements ConnectorProcess {
   private listeners = new Set<(state: ConnectorState) => void>()
   private readonly closed = new WeakSet<ChildProcessWithoutNullStreams>()
   private readonly logs: ConnectorLogs
+  /** 可写的项目副本；uv 只在这个目录里写 uv.lock，绝不碰插件包目录。 */
+  private projectDir: string | null = null
   constructor(private readonly config: ResolvedConfig, private readonly launch: ConnectorLauncher = spawn,
-    private readonly settings: () => ConnectorSettings = () => DEFAULT_CONNECTOR_SETTINGS) {
+    private readonly settings: () => ConnectorSettings = () => DEFAULT_CONNECTOR_SETTINGS,
+    private readonly firstRequestTimeoutMs = FIRST_REQUEST_TIMEOUT,
+    private readonly prune: CachePruner = pruneUvCache) {
     this.logs = new ConnectorLogs(join(config.stateRoot, 'logs'))
   }
 
@@ -76,12 +103,8 @@ export class SourceConnector implements ConnectorProcess {
   }
 
   async prepare(settings = this.settings()): Promise<void> {
-    try {
-      await access(join(this.config.connectorSourceDir, 'pyproject.toml'))
-      await access(join(this.config.connectorSourceDir, 'connector', 'cli.py'))
-    } catch {
-      throw new Error('未找到内部 Connector 源码，请重新构建插件或配置 connectorSourceDir。')
-    }
+    // uv 会在项目目录写 uv.lock，所以插件包目录只当只读负载用，项目落到可写副本里。
+    this.projectDir = await materializeConnectorProject(this.config)
     try {
       const executable = await resolveUv(this.config, settings)
       if (!executable) throw new Error('uv unavailable')
@@ -117,13 +140,17 @@ export class SourceConnector implements ConnectorProcess {
     await this.logs.startSession([binding.connectorToken])
     this.logs.record('starting')
     const executable = await resolveUv(this.config, settings)
+    const command = executable ?? (settings.uvPath || this.config.uvPath)
     const pypiIndexUrl = settings.uvPypiIndexUrl || 'https://pypi.org/simple'
     signal.throwIfAborted()
-    const child = this.launch(executable ?? (settings.uvPath || this.config.uvPath), [
-      'run', '--directory', this.config.connectorSourceDir,
+    // 不依赖 prepare() 的调用顺序：start() 自己也要保证项目副本就位。
+    const projectDir = this.projectDir ??= await materializeConnectorProject(this.config)
+    signal.throwIfAborted()
+    const child = this.launch(command, [
+      'run', '--directory', projectDir,
       'anywhere-cli', 'rpc', '--config', configPath,
     ], {
-      cwd: this.config.connectorSourceDir,
+      cwd: projectDir,
       windowsHide: true,
       detached: process.platform !== 'win32',
       env: {
@@ -134,6 +161,7 @@ export class SourceConnector implements ConnectorProcess {
         UV_PROJECT_ENVIRONMENT: join(this.config.stateRoot, 'connector-venv'),
         PYTHONDONTWRITEBYTECODE: '1',
         PYTHONUNBUFFERED: '1',
+        UV_HTTP_TIMEOUT: process.env['UV_HTTP_TIMEOUT'] || UV_READ_TIMEOUT_SECONDS,
         UV_PYTHON_INSTALL_MIRROR: settings.uvPythonInstallMirror || 'https://github.com/astral-sh/python-build-standalone/releases/download',
         UV_DEFAULT_INDEX: pypiIndexUrl,
         UV_INDEX_URL: pypiIndexUrl,
@@ -160,13 +188,16 @@ export class SourceConnector implements ConnectorProcess {
     const abort = () => { void this.stop() }
     signal.addEventListener('abort', abort, { once: true })
     try {
+      signal.throwIfAborted()
       // Includes the first uv dependency installation, not just Python startup.
-      this.updateState(await this.call('connector.getState', 180_000))
+      this.updateState(await this.call('connector.getState', this.firstRequestTimeoutMs))
       signal.throwIfAborted()
       this.updateState(await this.call('connector.start'))
       signal.throwIfAborted()
     } catch (error) {
       await this.stop()
+      // Whatever ended this attempt left a partial download behind, and only a prune reclaims it.
+      try { await this.prune(command) } catch { /* Housekeeping may not replace the real failure. */ }
       throw error
     } finally {
       signal.removeEventListener('abort', abort)

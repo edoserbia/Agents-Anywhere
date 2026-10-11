@@ -298,6 +298,61 @@ internal fun AgentsAnywhereNavHost(
                         onRenameDevice = onRenameDevice,
                         onDeleteDevice = onDeleteDevice,
                         onPrepareDeviceSetup = onPrepareDeviceSetup,
+                        onListDeviceRuntimes = onListDeviceRuntimes,
+                        onSetDeviceRuntimeActive = { connectorId, runtime, active ->
+                            onSetDeviceRuntimeActive(connectorId, runtime, active).onSuccess {
+                                deviceAgentPreviewRefreshKey += 1L
+                            }
+                        },
+                        onDeleteDeviceRuntimeConfig = { connectorId, runtime ->
+                            onDeleteDeviceRuntimeConfig(connectorId, runtime).onSuccess {
+                                deviceAgentPreviewRefreshKey += 1L
+                            }
+                        },
+                        onBulkSetSessionsArchived = onBulkSetSessionsArchived,
+                        onArchiveAllDeviceSessions = onArchiveAllDeviceSessions,
+                    )
+                    AppDestination.Devices -> DevicesScreen(
+                        state = sessionsState,
+                        isRefreshing = isRefreshingSessions,
+                        onRefresh = onRefreshSessions,
+                        onOpenDevice = onOpenDevice,
+                        onBack = { navigate(AppDestination.Sessions) },
+                        agentPreviews = deviceAgentPreviews,
+                        onAddDevice = { navigate(AppDestination.DeviceSetup) },
+                    )
+                    AppDestination.Terminal -> TerminalScreen(
+                        navigate = navigate,
+                        state = sessionsState,
+                        terminalPool = remoteTerminalPool,
+                        onPairDevice = { navigate(AppDestination.DeviceSetup) },
+                    )
+                    AppDestination.Files -> FilesScreen(
+                        navigate = navigate,
+                        state = sessionsState,
+                        controller = filesController,
+                        onPairDevice = { navigate(AppDestination.DeviceSetup) },
+                    )
+                    AppDestination.DeviceSetup -> androidx.compose.runtime.key(serverUrl, userId) {
+                        AddDeviceScreen(
+            }
+                        devices = sessionsState.devices,
+                        controller = sessionDetailController,
+                        realtimeController = sessionRealtimeController,
+                        filesController = filesController,
+                        terminalPool = remoteTerminalPool,
+                        composerDraftStore = sessionComposerDraftStore,
+                        onSessionChanged = onSessionChanged,
+                    )
+                    AppDestination.DeviceDetail -> DeviceDetailScreen(
+                        navigate = navigate,
+                        state = sessionsState,
+                        selectedDeviceId = selectedDeviceId,
+                        backDestination = deviceDetailReturnDestination,
+                        onOpenSession = onOpenSession,
+                        onRenameDevice = onRenameDevice,
+                        onDeleteDevice = onDeleteDevice,
+                        onPrepareDeviceSetup = onPrepareDeviceSetup,
                         onClaimDevicePairCode = onClaimDevicePairCode,
                         onListDeviceRuntimes = onListDeviceRuntimes,
                         onSetDeviceRuntimeActive = { connectorId, runtime, active ->

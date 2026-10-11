@@ -4,7 +4,7 @@
  * Order of operations, mirroring the DSH desktop release scripts:
  *
  * 1. read and validate the signing/notarization environment (all-or-nothing)
- * 2. run the uv bundle and the app build with every secret stripped
+ * 2. run the uv and Python bundles and the app build with every secret stripped
  * 3. hand the secrets to electron-builder only, which is the step that signs
  * 4. verify the produced artifact
  *
@@ -28,7 +28,8 @@ import {
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_DIR = join(PROJECT_ROOT, "release");
 const RELEASE_VERSION = JSON.parse(readFileSync(join(PROJECT_ROOT, "package.json"), "utf8")).version;
-const UV_TARGETS = {
+// uv and CPython bundles share the `<platform>-<arch>` target keys.
+const BUNDLE_TARGETS = {
   "darwin-arm64": "darwin-arm64",
   "darwin-x64": "darwin-x64",
   "win32-x64": "win32-x64",
@@ -85,19 +86,28 @@ function parseArguments(argv) {
 function resolveTargets({ platform, archFlag }) {
   if (platform === "linux") {
     if (archFlag === "--arm64" || archFlag === "--universal") fail("Linux currently supports x64 only");
-    return { builderFlags: ["--x64"], uvTargets: [UV_TARGETS["linux-x64"]] };
+    return { builderFlags: ["--x64"], bundleTargets: [BUNDLE_TARGETS["linux-x64"]] };
   }
   if (platform === "win") {
     if (archFlag === "--universal") fail("--universal is macOS only");
     const arch = archFlag === "--arm64" ? "arm64" : "x64";
-    return { builderFlags: [`--${arch}`], uvTargets: [UV_TARGETS[`win32-${arch}`]] };
+    return { builderFlags: [`--${arch}`], bundleTargets: [BUNDLE_TARGETS[`win32-${arch}`]] };
   }
   if (archFlag === null || archFlag === "--universal") {
-    return { builderFlags: ["--universal"], uvTargets: [UV_TARGETS["darwin-arm64"], UV_TARGETS["darwin-x64"]] };
+    return { builderFlags: ["--universal"], bundleTargets: [BUNDLE_TARGETS["darwin-arm64"], BUNDLE_TARGETS["darwin-x64"]] };
   }
   const arch = archFlag === "--x64" || archFlag === "--arm64" ? archFlag.slice(2) : process.arch;
   if (arch !== "arm64" && arch !== "x64") fail(`Unsupported macOS architecture: ${arch}`);
-  return { builderFlags: [`--${arch}`], uvTargets: [UV_TARGETS[`darwin-${arch}`]] };
+  return { builderFlags: [`--${arch}`], bundleTargets: [BUNDLE_TARGETS[`darwin-${arch}`]] };
+}
+
+/** The uv and CPython executables `bundle:uv` and `bundle:python` leave for a target. */
+function bundledExecutables(target) {
+  const windows = target.startsWith("win32");
+  return [
+    `build/uv/${target}/${windows ? "uv.exe" : "uv"}`,
+    `build/python/${target}/${windows ? "python.exe" : "bin/python3"}`,
+  ];
 }
 
 /** The first Developer ID Application identity in the Keychain, if any. */
@@ -162,7 +172,7 @@ async function main() {
     );
   }
 
-  const { builderFlags, uvTargets } = resolveTargets({ platform, archFlag });
+  const { builderFlags, bundleTargets } = resolveTargets({ platform, archFlag });
   let credentials = platform === "mac"
     ? readMacReleaseCredentials(process.env)
     : readWindowsReleaseCredentials(process.env);
@@ -180,15 +190,16 @@ async function main() {
   } else {
     log(`Signing: ${describeSigning(credentials, "no signing certificate")}`);
   }
-  log(`uv targets: ${uvTargets.join(", ")}`);
+  log(`uv and Python targets: ${bundleTargets.join(", ")}`);
 
   if (skipBuild) {
-    for (const relative of ["dist/electron/main.js", "renderer/out/index.html", ...uvTargets.map((target) => `build/uv/${target}/${target.startsWith("win") ? "uv.exe" : "uv"}`)]) {
+    for (const relative of ["dist/electron/main.js", "renderer/out/index.html", ...bundleTargets.flatMap(bundledExecutables)]) {
       if (!existsSync(join(PROJECT_ROOT, relative))) fail(`--skip-build requires ${relative}; run a full dist first.`);
     }
-    log("Reusing compiled app and uv bundles (--skip-build)");
+    log("Reusing compiled app, uv and Python bundles (--skip-build)");
   } else {
-    yarn(["bundle:uv"], { ...cleanEnvironment, UV_BUNDLE_TARGETS: uvTargets.join(",") });
+    yarn(["bundle:uv"], { ...cleanEnvironment, UV_BUNDLE_TARGETS: bundleTargets.join(",") });
+    yarn(["bundle:python"], { ...cleanEnvironment, PYTHON_BUNDLE_TARGETS: bundleTargets.join(",") });
     yarn(["build"], cleanEnvironment);
   }
   mkdirSync(OUTPUT_DIR, { recursive: true });

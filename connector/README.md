@@ -149,30 +149,9 @@ DSH requires the bridge integration described in
 [DSH Bridge Next](../dsh-bridge-next/README.md). Legacy ACP adapters are not part
 of the default provider registry.
 
-OpenScience is a local service the user starts; the connector attaches to it
-rather than launching one:
-
-```bash
-cd /absolute/path/to/research-project
-openscience serve --port 4096
-```
-
-Discovery follows what the OpenScience CLI itself does. The desktop app starts
-its sidecar on a random port and advertises it in
-`<data-root>/desktop-server.json`, and the connector accepts that record only
-when the server on that port reports the same `runId` over `/global/health` — so
-a record left behind by a dead sidecar is inert. A terminal `serve` advertises
-nothing, so the well-known ports `4096` and `4097` are probed instead.
-
-Every candidate must then answer `/runtime/capabilities` with a JSON body
-carrying a supported `protocolVersion`. That check is what keeps the connector
-off other local services: OpenCode also defaults to port 4096 and answers every
-unmatched path with its web UI as `text/html`, so a status code alone would
-attach to the wrong product. Set `baseUrl` to skip discovery and pin one server;
-an address that does not speak the runtime protocol is refused rather than used.
-`authToken` supplies the bearer token when the server sets
-`OPENSCIENCE_AUTH_TOKEN`, and `directory` selects the project the server reads as
-session context.
+Connected sessions expose native slash commands through a live runtime catalog.
+See [runtime slash commands](docs/runtime-commands.md) for Codex commands, DSH
+registry behavior, result states and headless verification.
 
 The connector uses local runtime credentials and local filesystem permissions.
 Agents Anywhere does not proxy Claude or Codex account credentials.

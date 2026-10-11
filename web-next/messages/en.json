@@ -263,6 +263,7 @@
       "expand": "Expand sidebar",
       "markAllRead": "Mark all read",
       "filter": "Filter recents",
+      "showMoreSessions": "Show {count} more",
       "mobileConnections": "Mobile connection",
       "newSession": "New session",
       "open": "Open",
@@ -304,6 +305,7 @@
       "title": "Couldn't load dashboard"
     },
     "filters": {
+      "deviceAgentAria": "Filter projects by device and agent",
       "active": "Active",
       "all": "All",
       "allActive": "Active sessions",
@@ -346,13 +348,16 @@
       "permissionModes": {
         "dsh": {
           "readOnly": {
-            "label": "read-only"
+            "label": "Read Only"
           },
           "workspaceWrite": {
-            "label": "workspace-write"
+            "label": "Workspace Write"
           },
           "fullAccess": {
-            "label": "danger-full-access"
+            "label": "Full access"
+          },
+          "auto": {
+            "label": "Auto review"
           }
         },
         "requestApproval": {
@@ -495,6 +500,7 @@
       "editDescription": "You can rename this project. Its device and workspace cannot be changed.",
       "editTitle": "Edit project",
       "empty": "No projects yet.",
+      "emptyFiltered": "No projects match the current device or agent filter.",
       "filterSessions": "Filter project sessions",
       "name": "Project name",
       "nameConflict": "A project named “{name}” already exists. Choose another name.",
@@ -520,6 +526,8 @@
       "workspaceConflictDescription": "The workspace “{path}” already belongs to “{currentName}”. Continuing will rename that project to “{name}” instead of creating a duplicate. Its sessions and settings will be preserved.",
       "workspaceConflictTitle": "This workspace already has a project",
       "workspaceImmutable": "The workspace is fixed after the project is created.",
+      "showMoreSessions": "Show {count} more",
+      "showFewerSessions": "Show less",
       "createDescriptionRuntime": "Choose a device and confirm the project name. The runtime decides where the project is stored.",
       "nameDescriptionRuntime": "The runtime creates the project directory, so the name is the only thing to choose.",
       "workspaceOwnedByRuntime": "The location is chosen by {runtime}."
@@ -776,6 +784,7 @@
     },
     "panels": {
       "files": {
+        "allDrives": "All drives",
         "addToComposer": "Add to Composer",
         "addToComposerNoSession": "Enable Takeover in a session to add this path.",
         "title": "Files",
@@ -884,6 +893,7 @@
         "Messages may not sync to the {agent} client immediately. Restarting it usually refreshes the sync.",
         "If you operate this session in both Agents Anywhere and the {agent} client at the same time, unexpected results may occur."
       ],
+      "takeoverEnableDshDescription": "DSH now syncs in real time <beta>Beta</beta> with Agents Anywhere. Enable Takeover to send messages.",
       "takeoverDisableTitle": "Disable Takeover?",
       "takeoverDisableDescription": [
         "After disabling Takeover, the session returns to read-only mode and you cannot send more messages.",
@@ -935,9 +945,14 @@
       "reasoningSummary": "Reasoning · {count} notes",
       "conversationCompacting": "Compacting context",
       "conversationCompacted": "Conversation compacted",
+      "conversationCompactionFailed": "Context compaction did not complete",
       "loadOlder": "Load earlier messages",
       "expandMessage": "Show more",
       "collapseMessage": "Show less",
+      "mermaidDiagram": "Mermaid diagram",
+      "mermaidUpdateFailed": "Showing the last valid diagram. The latest source could not be rendered.",
+      "mermaidSource": "View source",
+      "tableFullscreen": "View table fullscreen",
       "copyCode": "Copy code",
       "copyItemId": "Copy item ID",
       "copyItemJson": "Copy item JSON",
@@ -983,6 +998,27 @@
       "commandNoMatches": "No matching commands",
       "commandLoading": "Loading commands...",
       "commandFailed": "Failed to run command.",
+      "commandUnavailable": "Commands are unavailable for this session.",
+      "commandCatalogError": "Could not load commands. Try opening the menu again.",
+      "commandUnknown": "Unknown command. Choose one from the menu.",
+      "commandAttachments": "Remove attachments before running a command; your draft is preserved.",
+      "commandMultiline": "This command does not accept multiple lines.",
+      "commandInvalidArgs": "This command does not accept these arguments.",
+      "commandAccepted": "Command accepted; background work may still be running.",
+      "commandCompleted": "Command completed.",
+      "commandUnknownOutcome": "The result is unknown. Check the session before trying again.",
+      "commandReason_session_unloaded": "Open this session before running the command.",
+      "commandReason_native_commands_unavailable": "This Codex version does not expose the required command controls.",
+      "commandReason_codex_unavailable": "Codex is currently unavailable.",
+      "commandDetails": "Details",
+      "commandLess": "Show less",
+      "commandMenu": "Commands",
+      "commandDismiss": "Dismiss",
+      "commandBlocked_busy": "Not available while the agent is busy",
+      "commandBlocked_readOnly": "Turn on takeover to run commands",
+      "commandBlocked_offline": "The device is offline",
+      "commandBlocked_unavailable": "Commands are unavailable for this session",
+      "commandUnsupported": "This runtime version does not support commands yet. Upgrade it to use them.",
       "approvalPending": "{count} approval request pending",
       "approvalPendingPlural": "{count} approval requests pending",
       "interactionPending": "{count} interaction pending",
@@ -1324,9 +1360,11 @@
       "passwordPlaceholder": "••••••••",
       "submit": "Sign in",
       "titlePrefix": "Sign in to",
+      "invalidEmail": "Enter an email address.",
       "userPlaceholder": "name@example.com",
       "signingIn": "Signing in...",
-      "submitWithEnter": "Sign in ↵"
+      "submitWithEnter": "Sign in ↵",
+      "resetPassword": "Forgot password?"
     },
     "signedOut": {
       "description": "Your local credentials have been cleared. You can safely close this page, or open the sign-in page to continue.",
@@ -1420,6 +1458,17 @@
       "retry": "Resend in {seconds}s",
       "sent": "Code sent. Check your inbox.",
       "failed": "Failed to send verification code."
+    },
+    "forgotPassword": {
+      "title": "Reset password",
+      "description": "Enter your account email. We'll send a verification code so you can set a new password.",
+      "done": "Your password has been reset. Sign in with the new password.",
+      "signIn": "Sign in",
+      "backToLogin": "Back to sign in",
+      "newPassword": "New password",
+      "submit": "Reset password",
+      "submitting": "Resetting...",
+      "failed": "Could not reset the password."
     }
   },
   "pages": {
@@ -1519,6 +1568,8 @@
       "desktopSidebarDescription": "Choose how sessions are organized in the sidebar.",
       "desktopSidebarShowSessions": "Show sessions in the sidebar",
       "desktopSidebarShowSessionsDescription": "Show sessions directly instead of grouping them under projects.",
+      "desktopSidebarCompactSessions": "Single-line sessions",
+      "desktopSidebarCompactSessionsDescription": "Show only the session title, without the project and device line. Available when sessions are shown in the sidebar.",
       "language": "Language",
       "languageDescription": "Choose the interface language for this browser.",
       "english": "English",
@@ -1626,7 +1677,13 @@
       "emailDescription": "This address is used to sign in.",
       "invalidEmail": "Enter a valid email address.",
       "invalidDisplayName": "Nickname must be 1–64 characters.",
-      "typeEmail": "Type the account email to confirm"
+      "typeEmail": "Type the account email to confirm",
+      "skipEmailVerification": "Skip email verification",
+      "skipEmailVerificationDescription": "Only for this user. No code is needed and the email is treated as verified.",
+      "previousPage": "Previous",
+      "nextPage": "Next",
+      "pageOf": "{page} / {pages}",
+      "pageRange": "{from}-{to} of {total}"
     },
     "opsDashboard": {
       "title": "Dashboard",
@@ -1762,7 +1819,10 @@
         "save": "Save email settings",
         "saved": "Email settings saved.",
         "failed": "Failed to save email settings."
-      }
+      },
+      "passwordReset": "Password reset",
+      "passwordResetDescription": "Let users reset a forgotten password with an email verification code.",
+      "passwordResetNeedsEmail": "Turn on email first. Password reset sends a verification code by email."
     }
   },
   "preview": {

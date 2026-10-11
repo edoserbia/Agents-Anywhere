@@ -5,6 +5,7 @@ struct AccountSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(AppAppearance.storageKey) private var appearanceValue = AppAppearance.system.rawValue
     @AppStorage(ProjectSidebarPreferences.sessionListKey) private var showsSessionList = false
+    @AppStorage(ProjectSidebarPreferences.compactSessionListKey) private var compactSessionList = false
     @State private var confirmsSignOut = false
     @State private var signOutError: String?
     @State private var toasts = ChatToastStore()
@@ -59,6 +60,12 @@ struct AccountSettingsSheet: View {
                         Label(String(localized: "Project mode"), appSymbol: "folder")
                             .labelStyle(.titleAndIcon)
                     }.tint(.green)
+                    Toggle(isOn: $compactSessionList) {
+                        Label(String(localized: "Single-line sessions"), appSymbol: "sidebar.left")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .tint(.green)
+                    .disabled(!showsSessionList)
                 }
                 Section(String(localized: "Workspace")) {
                     NavigationLink { SettingsServerView() } label: {

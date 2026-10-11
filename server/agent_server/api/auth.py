@@ -96,13 +96,15 @@ async def auth_config(
         # the server log by the time they hit refresh.
         expires_at = await _setup_token(request).current_expires_at_iso()
     oauth_config = await db.get_oauth_provider_config()
+    email_enabled = bool((await get_email_settings(db)).get("enabled"))
     return AuthConfigResponse(
-        emailVerificationRequired=bool((await get_email_settings(db)).get("enabled")),
+        emailVerificationRequired=email_enabled,
         needsBootstrap=needs_bootstrap,
         registrationOpen=await db.is_registration_open(),
         oauthRegistrationOpen=await db.is_oauth_registration_open(),
         oauthEnabled=oauth_enabled(oauth_config),
         oauthProviderLabel=str(oauth_config.get("label") or "OAuth") if oauth_enabled(oauth_config) else None,
+        passwordResetEnabled=email_enabled and await db.is_password_reset_enabled(),
         setupTokenExpiresAt=expires_at,
         serverTime=utc_now(),
     )
@@ -206,12 +208,19 @@ async def send_email_code(
         bootstrap_allowed = await db.count_users() == 0 and await _setup_token(request).verify(payload.setupToken)
         if not (await db.is_registration_open() or (user and user.role == "admin") or oauth_allowed or bootstrap_allowed):
             raise HTTPException(status_code=403, detail="registration is closed")
+    if payload.purpose == "reset" and not await db.is_password_reset_enabled():
+        raise HTTPException(status_code=409, detail="password reset is disabled")
     if not (await get_email_settings(db)).get("enabled"):
         raise HTTPException(status_code=409, detail="email verification is disabled")
     try:
         email = normalize_email(payload.email)
         existing = await db.user_for_email(email)
-        if existing and (payload.purpose != "bind" or existing.userId != user.userId):
+        if payload.purpose == "reset":
+            # Answer the same way for unknown addresses so the endpoint cannot
+            # be used to discover which emails have accounts.
+            if existing is None or existing.disabled:
+                return EmailCodeResponse(serverTime=utc_now())
+        elif existing and (payload.purpose != "bind" or existing.userId != user.userId):
             raise ValueError("email is already in use")
         user_id = user.userId if payload.purpose == "bind" else ""
         code = await db.issue_email_code(
@@ -413,14 +422,23 @@ async def clear_avatar(
 @router.post("/auth/change-password", status_code=204)
 async def change_password(
     payload: ChangePasswordRequest,
-    user: UserView = Depends(current_user),
+    request: Request,
     db: Store = Depends(get_store),
 ) -> None:
     """Caller changes their own password.
 
     The bearer token is the authentication factor here. Until 2FA exists, do
     not require users to re-enter the current password just to set a new one.
+
+    Without a bearer token, ``email`` + ``code`` (issued by
+    ``/auth/email-code`` with purpose=reset) reset a forgotten password when
+    the instance enabled password reset.
     """
+    authorization = request.headers.get("authorization")
+    if authorization is None and payload.email and payload.code:
+        await _reset_password(payload, db)
+        return
+    user = await current_user(current_user_id(authorization), db)
     if not payload.newPassword and not payload.newPasswordVerifier:
         raise HTTPException(status_code=422, detail="new password is required")
     await db.update_user_password(
@@ -534,6 +552,25 @@ async def confirm_mobile_login(
     if row is None:
         raise HTTPException(status_code=401, detail="invalid or expired mobile login token")
     return _mobile_login_status_response(row)
+
+
+async def _reset_password(payload: ChangePasswordRequest, db: Store) -> None:
+    if not (
+        await db.is_password_reset_enabled()
+        and (await get_email_settings(db)).get("enabled")
+    ):
+        raise HTTPException(status_code=409, detail="password reset is disabled")
+    if not payload.newPassword and not payload.newPasswordVerifier:
+        raise HTTPException(status_code=422, detail="new password is required")
+    try:
+        await db.reset_password_with_code(
+            email=payload.email or "",
+            verification_code=payload.code,
+            password=payload.newPassword,
+            password_hash=_password_hash_from_change(payload),
+        )
+    except ValueError as exc:
+        raise _value_error_to_http(exc) from exc
 
 
 def _me_response(user: UserView) -> AuthMeResponse:

@@ -9,6 +9,7 @@ import com.agentsanywhere.app.api.RemoteRuntimePermissionCatalog
 import com.agentsanywhere.app.api.RemoteSessionQueue
 import com.agentsanywhere.app.api.SessionsApi
 import com.agentsanywhere.app.api.UploadFilePart
+import com.agentsanywhere.app.api.toMap
 import com.agentsanywhere.app.feature.auth.AuthSessionReader
 import com.agentsanywhere.app.feature.sessions.toAgentSession
 import com.agentsanywhere.app.model.AgentDevice
@@ -18,6 +19,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlin.math.max
+import org.json.JSONObject
 
 private const val INITIAL_TIMELINE_LIMIT = 100
 private const val TIMELINE_PAGE_LIMIT = 100
@@ -791,10 +793,8 @@ class SessionDetailController(
 
     suspend fun executeCommand(
         sessionId: String,
-        command: String,
-        args: List<String>,
-        raw: String,
-    ): Result<CommandExecutionResult> {
+        request: RuntimeCommandRequest,
+    ): RuntimeCommandOutcome {
         return withContext(Dispatchers.IO) {
             runCatching {
                 val auth = authSession()
@@ -802,20 +802,17 @@ class SessionDetailController(
                     auth.serverUrl,
                     auth.accessToken,
                     sessionId,
-                    command,
-                    args,
-                    raw,
+                    request.command,
+                    request.args,
+                    request.raw,
                 )
-                if (!response.ok) {
-                    throw IllegalStateException(response.message ?: response.code ?: "Command failed.")
-                }
-                CommandExecutionResult(
-                    command = response.command,
+                RuntimeCommandOutcome.fromResponse(
+                    ok = response.ok,
                     code = response.code,
                     message = response.message,
-                    result = response.result,
+                    result = (response.result as? JSONObject).toMap(),
                 )
-            }
+            }.getOrElse(RuntimeCommandOutcome::fromTransportFailure)
         }
     }
 
@@ -891,7 +888,6 @@ class SessionDetailController(
         text: String,
         clientMessageId: String,
         attachments: List<TimelineAttachment> = emptyList(),
-        retryAction: RuntimeMessageAction? = null,
     ): SessionDetailState {
         val lastOrderSeq = maxOf(
             state.timeline.orderingItems.maxOfOrNull { it.orderSeq } ?: 0,
@@ -910,7 +906,6 @@ class SessionDetailController(
             updatedSeq = optimisticOrderSeq,
             clientMessageId = clientMessageId,
             optimistic = true,
-            retryAction = retryAction,
         )
         optimisticStore.upsert(sessionId, message)
         return state.copy(

@@ -5,14 +5,14 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { tmpdir } from 'node:os'
 import { acquireManagerLock } from '../../src/host/storage/files.js'
-import { nativeRuntime } from '../fixtures/native-runtime.js'
+import { bridgePath, nativeRuntime } from '../fixtures/native-runtime.js'
 import type { OnboardingSnapshot } from '../../src/contracts/index.js'
 import type { BridgeStatus } from '../../src/contracts/bridge-status.js'
 import { startupFailure } from '../../src/host/dsh-runtime/startup-status.js'
 
 test('a busy local bridge keeps the management gateway available and can restart after release', { timeout: 30_000 }, async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-startup-retry-'))
-  const endpointPath = join(home, 'agents-anywhere/bridge/endpoint.json')
+  const endpointPath = bridgePath(home, 'endpoint.json')
   const release = await acquireManagerLock(endpointPath)
   const releaseManager = await acquireManagerLock(join(home, 'account/manager.lock'))
   let fixture: Awaited<ReturnType<typeof nativeRuntime>> | undefined

@@ -8,7 +8,9 @@ import json
 import sys
 from pathlib import Path
 
+from connector.core import runtime_owner
 from connector.runtime_protocol import RuntimeAttachment, RuntimeAttachmentContent, RuntimeConfig, RuntimeInvalidRequestError
+from connector.runtimes.dsh import provider_config
 from connector.runtimes.dsh.bridge.client import BridgeClient
 from connector.runtimes.dsh.discovery import load_endpoint
 from connector.runtimes.dsh.runtime import DshRuntime
@@ -56,7 +58,7 @@ async def main(home: Path, selections: dict[str, str]) -> None:
             created = await runtime.create_and_start_session("sess_python_image", "", cwd=str(home),
                 selections=selections, attachments=(image, document), client_message_id="image-only")
             assert created.ok, created
-            assert list((home / "agents-anywhere/bridge/attachments/staging").iterdir()) == []
+            assert list((provider_config.bridge_directory() / "attachments/staging").iterdir()) == []
         external = created.result["externalSessionId"]
         assert (await runtime.start_turn("sess_python_image", external, "text still works", client_message_id="text")).ok
         for _ in range(100):
@@ -77,4 +79,6 @@ async def main(home: Path, selections: dict[str, str]) -> None:
 
 
 if __name__ == "__main__":
+    # The Host fixture uses this directory as the user home for the bridge endpoint.
+    runtime_owner.system_home = lambda: Path(sys.argv[1])
     asyncio.run(main(Path(sys.argv[1]), json.loads(sys.argv[2])))

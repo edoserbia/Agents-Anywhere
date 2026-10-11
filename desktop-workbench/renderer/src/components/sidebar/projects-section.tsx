@@ -2,6 +2,7 @@
 
 import { ChevronRight, MoreHorizontal, Monitor, Plus } from "lucide-react"
 import * as React from "react"
+import { SessionFilterMenu } from "@/components/session-filter-menu"
 import { ProjectSidebarItem } from "@/components/sidebar/project-sidebar-item"
 import { SidebarLoadingItem } from "@/components/sidebar/sidebar-loading-item"
 import { SidebarSectionTrigger } from "@/components/sidebar/sidebar-section-trigger"
@@ -31,6 +32,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import type { WorkspaceSessionView } from "@/components/workspace-context"
+import type { IdentityParts, ProjectIdentity } from "@/components/sidebar/project-identity"
 import type { ProjectSessionStatusFilter } from "@/components/sidebar/sidebar-selectors"
 import {
   groupProjectsByDevice,
@@ -46,6 +48,9 @@ export type ProjectListController = {
     projectId: string,
     status?: ProjectSessionStatusFilter,
   ) => WorkspaceSessionView[]
+  identityForProject: (project: ProjectView) => ProjectIdentity
+  /** Which halves of the identity belong on the row (only filtered dimensions). */
+  identityParts: IdentityParts
   expandedProjectIds: string[]
   activeSessionId: string | null
   onExpandedChange: (projectId: string, open: boolean) => void
@@ -75,6 +80,8 @@ export function ProjectList({
           key={project.id}
           project={project}
           sessions={controller.sessionsForProject(project.id, sessionStatus)}
+          identity={controller.identityForProject(project)}
+          identityParts={controller.identityParts}
           expanded={controller.expandedProjectIds.includes(project.id)}
           activeSessionId={controller.activeSessionId}
           onExpandedChange={(open) => controller.onExpandedChange(project.id, open)}
@@ -147,6 +154,9 @@ type ProjectsSectionProps = {
   expanded: boolean
   controller: ProjectListController
   sessionStatus: ProjectSessionStatusFilter
+  /** True when the device/Agent filter hid every project in this section. */
+  hiddenByDeviceAgentFilter?: boolean
+  onClearDeviceAgentFilter?: () => void
   onExpandedChange: (expanded: boolean) => void
   onSessionStatusChange: (status: ProjectSessionStatusFilter) => void
   onAddProject: () => void
@@ -160,6 +170,8 @@ export function ProjectsSection({
   expanded,
   controller,
   sessionStatus,
+  hiddenByDeviceAgentFilter = false,
+  onClearDeviceAgentFilter,
   onExpandedChange,
   onSessionStatusChange,
   onAddProject,
@@ -186,7 +198,10 @@ export function ProjectsSection({
           role="heading"
           aria-level={2}
         >
-          <SidebarSectionTrigger label={t("sections.projects")} expanded={expanded} />
+          <div className="flex min-w-0 items-center gap-1">
+            <SidebarSectionTrigger label={t("sections.projects")} expanded={expanded} />
+            <SessionFilterMenu ariaLabel={t("filters.deviceAgentAria")} />
+          </div>
           <div className="flex items-center gap-0.5">
             <DropdownMenu open={filterOpen} onOpenChange={setFilterOpen}>
               <DropdownMenuTrigger asChild>
@@ -251,7 +266,22 @@ export function ProjectsSection({
               {isLoading ? (
                 <SidebarLoadingItem label={t("status.loadingProjects")} />
               ) : projects.length === 0 ? (
-                <p className="px-3 py-2 text-xs text-muted-foreground">{t("projects.empty")}</p>
+                hiddenByDeviceAgentFilter ? (
+                  <div className="px-3 py-2 text-xs text-muted-foreground">
+                    <p>{t("projects.emptyFiltered")}</p>
+                    {onClearDeviceAgentFilter ? (
+                      <button
+                        type="button"
+                        onClick={onClearDeviceAgentFilter}
+                        className="mt-1 rounded text-sidebar-foreground/80 underline-offset-2 transition-colors hover:text-sidebar-foreground hover:underline"
+                      >
+                        {t("filters.clear")}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : (
+                  <p className="px-3 py-2 text-xs text-muted-foreground">{t("projects.empty")}</p>
+                )
               ) : useGroups ? (
                 <div className="flex flex-col gap-0.5">
                   {groups.map((group) => (

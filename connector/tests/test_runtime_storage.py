@@ -1,4 +1,5 @@
 import asyncio
+import os
 from unittest.mock import AsyncMock
 
 import pytest
@@ -8,6 +9,30 @@ from connector.runtime_protocol import RuntimeInstanceHost, RuntimeInstanceSpec,
 from connector.server.runtime_host import ConnectorRuntimeHost
 from connector.server.runtime_storage import RuntimeStorageManager
 from connector.server.sync_state import JsonSyncStateStore
+
+
+@pytest.mark.parametrize("copy_legacy", [False, True])
+def test_prepare_fsync_requires_writable_descriptors(tmp_path, monkeypatch, copy_legacy):
+    legacy = JsonSyncStateStore(tmp_path / "connector-state.json")
+    kv_path = tmp_path / "connector-kv.json"
+    if copy_legacy:
+        legacy.path.write_text('{"version":1,"states":{}}')
+        JsonKeyValueStore(kv_path).set("legacy", {"value": "preserved"})
+    real_fsync = os.fsync
+
+    def writable_fsync(fd):
+        # Emulate Windows rejecting read-only descriptors, without changing bytes.
+        os.write(fd, b"")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", writable_fsync)
+    state, kv = RuntimeStorageManager(legacy, kv_path).prepare("conn", "rti_a")
+    assert state.path.is_file()
+    assert kv.path.is_file()
+    assert kv.get("legacy") == ({"value": "preserved"} if copy_legacy else None)
+    if copy_legacy:
+        assert state.path.read_bytes() == legacy.path.read_bytes()
+        assert kv.path.read_bytes() == kv_path.read_bytes()
 
 
 def test_full_copy_once_isolation_and_flush(tmp_path, monkeypatch):

@@ -84,6 +84,7 @@ USERNAME_RE = re.compile(r"^[a-z0-9_-]{3,32}$")
 SETTING_REGISTRATION_OPEN = "registration_open"
 SETTING_OAUTH_REGISTRATION_OPEN = "oauth_registration_open"
 SETTING_OAUTH_PROVIDER = "oauth_provider"
+SETTING_PASSWORD_RESET_ENABLED = "password_reset_enabled"
 
 UserRole = str  # "admin" | "member"
 ADMIN_ROLE = "admin"
@@ -203,6 +204,27 @@ def _truncate_title(text: str) -> str:
     if len(text) <= DERIVED_SESSION_TITLE_MAX_CHARS:
         return text
     return f"{text[:DERIVED_SESSION_TITLE_MAX_CHARS].rstrip()}..."
+
+
+def _client_session_title(title: str | None) -> str | None:
+    # Web / Desktop send the whole first prompt as the create-time title.
+    # Normalize it like a derived title so a pasted document never becomes a
+    # multi-kilobyte session name (Codex never reports a replacement title).
+    if title is None:
+        return None
+    collapsed = " ".join(title.split())
+    return _truncate_title(collapsed) if collapsed else None
+
+
+def _manual_archive_values(*, archived: bool | int, now: str) -> dict[str, Any]:
+    """Column values for a user-initiated session archive or unarchive."""
+
+    return {
+        "archived": int(bool(archived)),
+        "archived_at": now if archived else None,
+        "dsh_archive_legacy": 0,
+        "updated_at": now,
+    }
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

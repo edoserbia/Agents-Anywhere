@@ -537,7 +537,7 @@ def test_v2_named_instance_enforces_discovered_required_fields(
     assert rpc.requests == []
 
 
-def test_v2_codex_named_instance_allows_optional_home_and_enforces_single_policy(
+def test_v2_codex_single_runtime_policy_allows_multiple_saved_configs_with_optional_home(
     tmp_path: Any,
 ) -> None:
     discovery = _v2_discovery(instance_policy="single", max_instances=1)
@@ -579,12 +579,12 @@ def test_v2_codex_named_instance_allows_optional_home_and_enforces_single_policy
             "active": False,
         },
     )
-    assert second.status_code == 409, second.text
-    assert second.json()["detail"]["code"] == "runtime_conflict"
-    assert second.json()["detail"]["message"] == "runtime instance limit reached"
+    assert second.status_code == 201, second.text
+    assert second.json()["runtimeId"] != created.json()["runtimeId"]
+    assert second.json()["config"] == {}
 
 
-def test_v2_create_enforces_runtime_type_instance_limit(tmp_path: Any) -> None:
+def test_v2_create_does_not_apply_running_instance_limit_to_saved_configs(tmp_path: Any) -> None:
     client, _, connector_id, headers = _make_client(
         tmp_path,
         _v2_discovery(max_instances=2),
@@ -604,7 +604,7 @@ def test_v2_create_enforces_runtime_type_instance_limit(tmp_path: Any) -> None:
         )
         assert response.status_code == 201, response.text
 
-    rejected = client.post(
+    third = client.post(
         f"/connectors/{connector_id}/runtimes",
         headers=headers,
         json={
@@ -614,14 +614,12 @@ def test_v2_create_enforces_runtime_type_instance_limit(tmp_path: Any) -> None:
             "active": False,
         },
     )
-    assert rejected.status_code == 409, rejected.text
-    assert rejected.json()["detail"] == {
-        "code": "runtime_conflict",
-        "message": "runtime instance limit reached",
-    }
+    assert third.status_code == 201, third.text
+    assert third.json()["configured"] is True
+    assert third.json()["active"] is False
 
 
-def test_v2_lifecycle_sends_type_and_instance_identity_and_clear_is_soft(
+def test_v2_lifecycle_sends_instance_identity_and_manual_delete_retires_it(
     tmp_path: Any,
 ) -> None:
     client, rpc, connector_id, headers = _make_client(tmp_path, _v2_discovery())
@@ -677,17 +675,19 @@ def test_v2_lifecycle_sends_type_and_instance_identity_and_clear_is_soft(
         )
     ]
     cleared_runtime = cleared.json()
-    assert cleared_runtime["runtimeId"] == runtime_id
+    replacement_id = cleared_runtime["runtimeId"]
+    assert replacement_id != runtime_id
+    assert replacement_id.startswith("rti_")
     assert cleared_runtime["name"] == "Renamed Codex"
     assert cleared_runtime["configured"] is False
     assert cleared_runtime["config"] is None
     assert cleared_runtime["active"] is False
     assert cleared_runtime["status"] == "stopped"
     assert cleared_runtime["error"] is None
-    assert cleared_runtime["createdAt"] == runtime["createdAt"]
+    assert cleared_runtime["createdAt"] >= runtime["createdAt"]
 
     still_present = client.get(
-        f"/connectors/{connector_id}/runtimes/{runtime_id}",
+        f"/connectors/{connector_id}/runtimes/{replacement_id}",
         headers=headers,
     )
     assert still_present.status_code == 200, still_present.text
@@ -702,7 +702,7 @@ def test_v2_lifecycle_sends_type_and_instance_identity_and_clear_is_soft(
     assert listed_after_type_disappears.status_code == 200
     assert [
         item["runtimeId"] for item in listed_after_type_disappears.json()["runtimes"]
-    ] == [runtime_id]
+    ] == [replacement_id]
     assert listed_after_type_disappears.json()["runtimes"][0]["present"] is False
     rejected = client.post(
         f"/connectors/{connector_id}/runtimes",

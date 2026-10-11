@@ -719,9 +719,12 @@ export class DashboardApi {
     sessionId: string,
     options: { query?: string; limit?: number } = {},
   ): Promise<SessionCommandListResponse> {
-    void options;
+    const params = new URLSearchParams();
+    if (options.query !== undefined) params.set("query", options.query);
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const suffix = params.size ? `?${params}` : "";
     return this.client.get<SessionCommandListResponse>(
-      `/sessions/${encodeURIComponent(sessionId)}/runtime/commands`,
+      `/sessions/${encodeURIComponent(sessionId)}/runtime/commands${suffix}`,
       { token },
     );
   }
@@ -737,7 +740,7 @@ export class DashboardApi {
       {
         command,
         ...(options.args && options.args.length > 0 ? { args: options.args } : {}),
-        ...(options.raw ? { raw: options.raw } : {}),
+        ...(options.raw !== undefined ? { raw: options.raw } : {}),
       },
       { token },
     );

@@ -35,18 +35,16 @@ def timeline_notice():
 
 @pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("projection_version", [2, 3])
-def test_checkpoint_waits_for_ingestion_but_the_ack_does_not(tmp_path, fail, projection_version):
-    """The bridge is stop-and-wait, so an ack that waited for the upload made
+def test_ingestion_precedes_checkpoint_and_ack_and_json_survives_restart(tmp_path, fail, projection_version):
+    """
     the whole live stream advance at one remote round trip per batch: the
     bridge flushes thirty times a second and got two, its event buffer
     overflowed, and every session was recalibrated in a loop.
-
     The acknowledgement may therefore be sent on local receipt. What must not
     move is the *checkpoint*: a replay starts from it, so it may only be
     recorded once the Server actually holds the data it covers.
     """
     checkpoint = {**CHECKPOINT, "projectionVersion": projection_version}
-
     async def run():
         entered, release, acked = asyncio.Event(), asyncio.Event(), asyncio.Event()
         forwarded, acks = [], []

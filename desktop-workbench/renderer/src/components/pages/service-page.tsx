@@ -19,6 +19,7 @@ import { copyText } from "@/lib/clipboard"
 import { useAuth } from "@/components/auth/auth-context"
 import { PageHeader } from "@/components/pages/page-header"
 import { ServiceEmailCard } from "@/components/pages/service-email-card"
+import { ServiceAnnouncementCard } from "@/components/pages/service-announcement-card"
 import { LoadingState } from "@/components/loading-state"
 import { Button } from "@/components/ui/button"
 import {
@@ -289,7 +290,7 @@ export function ServicePage() {
   )
 
   const handleSettingToggle = React.useCallback(
-    async (key: "registrationOpen" | "oauthRegistrationOpen", value: boolean) => {
+    async (key: "registrationOpen" | "oauthRegistrationOpen" | "passwordResetEnabled", value: boolean) => {
       if (!settings || !session?.accessToken || togglePending) return
       const previous = settings
       setTogglePending(key)
@@ -386,11 +387,21 @@ export function ServicePage() {
                 pending={togglePending === "oauthRegistrationOpen"}
                 onCheckedChange={(value) => void handleSettingToggle("oauthRegistrationOpen", value)}
               />
+              <SettingSwitchField
+                label={t("passwordReset")}
+                description={settings.email.enabled ? t("passwordResetDescription") : t("passwordResetNeedsEmail")}
+                checked={settings.passwordResetEnabled === true}
+                disabled={!isAdmin || togglePending === "passwordResetEnabled"}
+                pending={togglePending === "passwordResetEnabled"}
+                onCheckedChange={(value) => void handleSettingToggle("passwordResetEnabled", value)}
+              />
             </FieldGroup>
           </CardContent>
         </Card>
 
         <ServiceEmailCard settings={settings.email} token={session?.accessToken ?? ""} isAdmin={isAdmin} onSaved={setSettings} />
+
+        {isAdmin && session?.accessToken && <ServiceAnnouncementCard token={session.accessToken} />}
 
         <OAuthProviderCard
           draft={oauthDraft}

@@ -132,6 +132,7 @@ export class BackendServer {
       if (path === "/device/create") return this.state.createAndConnect(body as never);
       if (path === "/device/reconnect") return this.state.reconnectAndConnect(body as never);
       if (path === "/device/disconnect") return this.state.disconnectLocal(body as never);
+      if (path === "/device/revoke") return this.state.revokeLocal(body as never);
       if (path === "/device/rename") return this.state.updateLocalBindingName(String(body.name ?? ""));
     }
     throw new Error(`Unknown Desktop backend route: ${method} ${path}`);
@@ -150,9 +151,9 @@ export class BackendServer {
       "x-accel-buffering": "no",
     });
     response.write(`retry: ${SSE_RETRY_MS}\n\n`);
-    // Ownership is deliberately not sent here: until the first real probe
-    // finishes the value is a placeholder, and the renderer must show its
-    // loading state rather than an error dialog.
+    // Before the first probe answers, ownership is `checking`, which the
+    // renderer shows as progress, so even the earliest frame is safe to send.
+    this.send(response, "ownership", this.state.ownershipState());
     this.send(response, "settings", this.state.getSettings());
     this.clients.add(response);
     const ping = setInterval(() => {

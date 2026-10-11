@@ -58,6 +58,25 @@ struct AuthMe: Codable {
     }
 }
 
+struct PublicAnnouncement: Decodable, Equatable, Identifiable {
+    let markdown: String
+    let publishedAt: String
+
+    var id: String { publishedAt }
+    var publishedDate: Date? { Self.parse(publishedAt) }
+
+    static func parse(_ raw: String?) -> Date? {
+        guard let raw else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
+    }
+}
+
+struct PublicAnnouncementResponse: Decodable {
+    let announcement: PublicAnnouncement?
+}
+
 struct HealthResponse: Decodable {
     let status: String
     let serverTime: String

@@ -32,6 +32,11 @@ struct RootView: View {
                 showingQRCodeLogin = false
             }
         }
+        .announcementGate(
+            server: appState.serverURL,
+            route: appState.route,
+            blocked: showingManualLogin || showingQRCodeLogin
+        )
         .overlay(alignment: .top) {
             if appState.route == .signedIn, let error = appState.restoreConnectionError {
                 HStack(spacing: 12) {

@@ -1,5 +1,25 @@
 # DSH Bridge Next 验证记录
 
+## DSH 0.2.0-rc.2 与版本声明统一（2026-09-30）
+
+DSH 开发依赖统一升级到 `0.2.0-rc.2`；Typert peer 从精确的 `0.2.0-rc.1` 改为范围 `>=0.2.0-rc.1 <0.3.0-0`。DSH 0.2.0-rc.2 起在安装和 profile 启动时按 DSH peer 检查插件，精确版本会让后续 rc 拒绝加载插件。握手上报的 `runtimeVersion` 与 `bridgeVersion` 改为运行时读取，不再写死。兼容旧版 DSH 的代码分支不变。
+
+rc.2 实机可用由维护者实测确认。`corepack yarn check` 在 rc.2 依赖下完成类型检查、构建、产物检查和 **180 项插件测试**，全部通过；新增断言确认握手上报的版本与 Host 的 Typert 包及插件 `package.json` 一致。按 DSH 的规则（`semver.satisfies`，`includePrerelease: true`）核对范围：`0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.x` 正式版及其 rc 满足，`0.1.x` 和 `0.3.0-rc.1` 起不满足。本次没有重新做 DSH Desktop、Windows 或手机实机验收。
+
+## DSH 0.2.0-rc.1 适配（2026-09-28）
+
+插件源码版本保持 `2.0.1`，DSH 依赖和 Typert peer 锁定到 `0.2.0-rc.1`，运行时上报的 DSH 版本与技术说明同步更新。`corepack yarn check` 完成类型检查、Host/Client 构建、产物检查和 **174 项插件测试**，全部通过；测试使用新版官方 Gateway、SessionQuery、AgentLoop 和 Python Connector 链路。
+
+在全新临时 `DSH_HOME` 中，使用官方 `@deepseek-ai/dsh@0.2.0-rc.1` 的 `dsh plugin --profile aa-rc1-smoke add "link:$PWD"` 安装成功，`--dump-config` 包含 `agents-anywhere-bridge-next` 配置行。未进行 DSH Desktop、Windows、付费模型或手机实机验收。当前源码仍使用已发布的 `2.0.1` 版本号；此记录只验证本地源码。
+
+## DSH 0.1.7-rc.2 适配（2026-09-25）
+
+开发依赖切换到 npm 发布的 `0.1.7-rc.2`，按新版包元数据更新 Cordis、Loader 和 Schemastery。历史投影读取新版顶层 tool-role 结果及 `tool/ptc-dispatch*` 事件，同时保留旧日志格式；投影版本升为 3，旧检查点触发快照重建，Connector 同时接受版本 2 和 3。预设测试组合迁移到官方 preset registry / preset 插件，补齐新版文件系统和模型目录要求。
+
+类型检查、构建、发布产物及真实官方 Client primitives 的 DOM 交互检查通过，插件 **167 项测试全部通过**；Connector 的 provider、契约、bridge client、事件同步、检查点和 live transport 共 **60 项通过**。新增回归覆盖工具结果的多块内容、空内容、错误状态、调用身份、PTC 父子关系、冷历史与实时结果一致，以及旧投影检查点重建。
+
+使用已安装的 DSH `0.1.7-rc.2`，在全新临时 `DSH_HOME` 下执行 `dsh plugin --profile aa-rc7-smoke add "link:$PWD"`；profile manifest 正确记录依赖与 bundle，`--dump-config` 包含 `agents-anywhere-bridge-next` 配置行。真实 Loader/patch、官方会话与持久化、Python Connector → AA Server 链路由集成测试覆盖。没有进行付费模型或手机实机验收；使用外部 CLI Connector 时需与插件一起更新。
+
 ## PR #73 主线集成复核（2026-09-14）
 
 与 `287fc57a` 主线合并时，保留主线的 OS 管理租约与 `unlink` 接管实现：它已覆盖存活 PID 的陈旧 endpoint，且能处理损坏的描述文件。本 PR 保留贡献者新增的独立存活进程 PID 回归测试，不恢复旧的 PID 判断或 JSON 读取前置条件。

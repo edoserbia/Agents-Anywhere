@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import case, delete, func, insert, or_, select, update
+from sqlalchemy import case, delete, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from agent_server.core.device_runtime import RuntimeTypeDescriptor
@@ -14,10 +14,12 @@ from agent_server.core.runtime_identity import (
     runtime_instance_name_key,
 )
 from agent_server.core.utc import utc_now
+from agent_server.infra.db import connector_runtime_catalogs as catalogs_t
 from agent_server.infra.db import connector_runtime_types as runtime_types_t
 from agent_server.infra.db import connector_terminal_roots as terminal_roots_t
 from agent_server.infra.db import connectors as connectors_t
 from agent_server.infra.db import device_runtimes as device_runtimes_t
+from agent_server.infra.db import retired_device_runtimes as retired_runtimes_t
 from agent_server.infra.db import sessions as sessions_t
 
 _CONTROL_V2_DESCRIPTOR_KEY = "__runtimeControlV2Descriptor"
@@ -41,6 +43,7 @@ class DeviceRuntimeRepositoryMixin:
             ))).scalars())
 
     async def get_unconfigured_runtime_ids(self, connector_id: str) -> set[str]:
+        """Ingress denylist, including identities permanently retired by deletion."""
         async with self._engine.connect() as conn:
             result = await conn.execute(
                 select(device_runtimes_t.c.runtime_id).where(
@@ -48,7 +51,10 @@ class DeviceRuntimeRepositoryMixin:
                     device_runtimes_t.c.config_json.is_(None),
                 )
             )
-            return set(result.scalars())
+            retired = await conn.execute(select(retired_runtimes_t.c.runtime_id).where(
+                retired_runtimes_t.c.connector_id == connector_id,
+            ))
+            return set(result.scalars()) | set(retired.scalars())
 
     async def replace_connector_runtime_types(
         self,
@@ -231,27 +237,10 @@ class DeviceRuntimeRepositoryMixin:
         now = utc_now()
         try:
             async with self._engine.begin() as conn:
-                # This no-op write serializes policy checks on SQLite and locks
-                # the type row on PostgreSQL before counting existing instances.
-                locked = await conn.execute(
-                    update(runtime_types_t)
-                    .where(
-                        runtime_types_t.c.connector_id == connector_id,
-                        runtime_types_t.c.runtime_type == runtime_type,
-                    )
-                    .values(updated_at=runtime_types_t.c.updated_at)
-                )
-                if locked.rowcount == 0:
-                    raise KeyError(runtime_type)
-
                 type_row = (
                     (
                         await conn.execute(
-                            select(
-                                runtime_types_t.c.present,
-                                runtime_types_t.c.instance_policy,
-                                runtime_types_t.c.max_instances,
-                            )
+                            select(runtime_types_t.c.present)
                             .join(
                                 connectors_t,
                                 connectors_t.c.id == runtime_types_t.c.connector_id,
@@ -273,24 +262,8 @@ class DeviceRuntimeRepositoryMixin:
                         "runtime type is not currently present on the connector"
                     )
 
-                current_count = (
-                    await conn.execute(
-                        select(func.count())
-                        .select_from(device_runtimes_t)
-                        .where(
-                            device_runtimes_t.c.connector_id == connector_id,
-                            device_runtimes_t.c.runtime_type == runtime_type,
-                        )
-                    )
-                ).scalar_one()
-                max_instances = (
-                    1
-                    if type_row["instance_policy"] == "single"
-                    else type_row["max_instances"]
-                )
-                if max_instances is not None and current_count >= max_instances:
-                    raise ValueError("runtime instance limit reached")
-
+                # The Connector enforces provider limits when starting native
+                # runtimes; saved configurations do not consume running slots.
                 await conn.execute(
                     insert(device_runtimes_t).values(
                         connector_id=connector_id,
@@ -472,6 +445,7 @@ class DeviceRuntimeRepositoryMixin:
         runtime_id: str,
         *,
         cleanup_files: bool = True,
+        replacement_runtime_id: str | None = None,
     ) -> list[str]:
         """Clear an instance and physically delete its sessions; return their IDs."""
         session_query = select(sessions_t.c.id).where(
@@ -514,6 +488,20 @@ class DeviceRuntimeRepositoryMixin:
             # attachment cleanup fails before the transaction commits.
             if cleanup_files:
                 await self.delete_runtime_session_files(session_ids)
+            if replacement_runtime_id is not None:
+                # Only manual deletion retires identity. Keep an unconfigured
+                # successor for existing clients' configure-then-start flow.
+                await conn.execute(insert(retired_runtimes_t).values(
+                    connector_id=connector_id, runtime_id=runtime_id, retired_at=utc_now(),
+                ))
+                await conn.execute(delete(catalogs_t).where(
+                    catalogs_t.c.connector_id == connector_id,
+                    catalogs_t.c.runtime_id == runtime_id,
+                ))
+                await conn.execute(update(device_runtimes_t).where(
+                    device_runtimes_t.c.connector_id == connector_id,
+                    device_runtimes_t.c.runtime_id == runtime_id,
+                ).values(runtime_id=replacement_runtime_id, created_at=utc_now()))
         return session_ids
 
     async def _update_device_runtime(

@@ -263,6 +263,7 @@
       "expand": "展开侧栏",
       "markAllRead": "全部标为已读",
       "filter": "过滤最近会话",
+      "showMoreSessions": "显示其余 {count} 个会话",
       "mobileConnections": "手机连接",
       "newSession": "新会话",
       "open": "打开",
@@ -310,6 +311,7 @@
       "team": "团队"
     },
     "filters": {
+      "deviceAgentAria": "按设备与 Agent 筛选项目",
       "active": "活跃",
       "all": "全部",
       "allActive": "活跃会话",
@@ -353,6 +355,9 @@
           },
           "fullAccess": {
             "label": "完全权限"
+          },
+          "auto": {
+            "label": "Auto review"
           }
         },
         "requestApproval": {
@@ -360,7 +365,7 @@
           "description": "编辑外部文件和使用互联网时始终询问"
         },
         "autoReview": {
-          "label": "替我审批",
+          "label": "Auto review",
           "description": "仅对检测到的风险操作请求批准"
         },
         "fullAccess": {
@@ -495,6 +500,7 @@
       "editDescription": "你可以修改项目名称；设备和工作区创建后不能更换。",
       "editTitle": "编辑项目",
       "empty": "还没有项目。",
+      "emptyFiltered": "没有符合当前设备或 Agent 筛选的项目。",
       "filterSessions": "筛选项目会话",
       "name": "项目名称",
       "nameConflict": "项目名称“{name}”已存在，请换一个名称。",
@@ -520,6 +526,8 @@
       "workspaceConflictDescription": "工作目录“{path}”已属于项目“{currentName}”。继续后不会创建新项目，而会把现有项目重命名为“{name}”；项目内的会话和设置都会保留。",
       "workspaceConflictTitle": "该工作目录已有项目",
       "workspaceImmutable": "项目创建后，工作区不能更换。",
+      "showMoreSessions": "显示更多（{count}）",
+      "showFewerSessions": "收起",
       "createDescriptionRuntime": "先选择设备并确认项目名称，项目存放位置由运行时决定。",
       "nameDescriptionRuntime": "项目目录由运行时创建，只需填写名称。",
       "workspaceOwnedByRuntime": "存放位置由 {runtime} 决定。"
@@ -776,6 +784,7 @@
     },
     "panels": {
       "files": {
+        "allDrives": "所有盘符",
         "addToComposer": "添加到 Composer",
         "addToComposerNoSession": "需要在已开启接管的会话里才能添加到 Composer。",
         "title": "文件",
@@ -884,6 +893,7 @@
         "消息可能不会立即同步到 {agent} 客户端，通常重启它们后即可刷新同步。",
         "如果你同时在 Agents Anywhere 和 {agent} 客户端中操作此会话，可能导致意料外的结果。"
       ],
+      "takeoverEnableDshDescription": "DSH 现可实时同步 <beta>Beta</beta> Agents Anywhere。启用接管即可发送消息。",
       "takeoverDisableTitle": "关闭接管？",
       "takeoverDisableDescription": [
         "关闭后会话将回到只读模式，无法继续发送消息。",
@@ -935,9 +945,14 @@
       "reasoningSummary": "推理过程 · {count} 条摘要",
       "conversationCompacting": "正在压缩上下文",
       "conversationCompacted": "对话已压缩",
+      "conversationCompactionFailed": "上下文压缩未完成",
       "loadOlder": "加载更早消息",
       "expandMessage": "展开",
       "collapseMessage": "收起",
+      "mermaidDiagram": "Mermaid 图表",
+      "mermaidUpdateFailed": "当前显示上一次成功生成的图表，最新源码暂时无法渲染。",
+      "mermaidSource": "查看源码",
+      "tableFullscreen": "全屏查看表格",
       "copyCode": "复制代码",
       "copyItemId": "复制 item ID",
       "copyItemJson": "复制 item JSON",
@@ -983,6 +998,27 @@
       "commandNoMatches": "没有匹配的指令",
       "commandLoading": "正在读取指令…",
       "commandFailed": "无法执行指令。",
+      "commandUnavailable": "此会话暂时无法使用指令。",
+      "commandCatalogError": "无法读取指令，请重新打开菜单重试。",
+      "commandUnknown": "未知指令，请从菜单中选择。",
+      "commandAttachments": "运行指令前请移除附件；草稿会保留。",
+      "commandMultiline": "此指令不支持多行输入。",
+      "commandInvalidArgs": "此指令不接受这些参数。",
+      "commandAccepted": "指令已接受，后台任务可能仍在进行。",
+      "commandCompleted": "指令已完成。",
+      "commandUnknownOutcome": "结果尚不确定，请先检查会话状态再决定是否重试。",
+      "commandReason_session_unloaded": "请先打开此会话，再运行指令。",
+      "commandReason_native_commands_unavailable": "此 Codex 版本尚不支持所需的指令操作。",
+      "commandReason_codex_unavailable": "Codex 当前不可用。",
+      "commandDetails": "查看详情",
+      "commandLess": "收起",
+      "commandMenu": "指令",
+      "commandDismiss": "关闭",
+      "commandBlocked_busy": "Agent 忙碌中，暂时不能执行",
+      "commandBlocked_readOnly": "开启接管后才能执行指令",
+      "commandBlocked_offline": "设备离线",
+      "commandBlocked_unavailable": "此会话暂时无法使用指令",
+      "commandUnsupported": "当前 Runtime 版本还不支持指令，升级后可用",
       "approvalPending": "{count} 个确认请求待处理",
       "approvalPendingPlural": "{count} 个确认请求待处理",
       "interactionPending": "{count} 个交互待处理",
@@ -1324,9 +1360,11 @@
       "passwordPlaceholder": "••••••••",
       "submit": "登录",
       "titlePrefix": "登录",
+      "invalidEmail": "请输入邮箱",
       "userPlaceholder": "name@example.com",
       "signingIn": "正在登录...",
-      "submitWithEnter": "登录 ↵"
+      "submitWithEnter": "登录 ↵",
+      "resetPassword": "忘记密码？"
     },
     "signedOut": {
       "description": "你的本地登录凭据已经清除。可以安全关闭这个页面，或重新打开登录页面继续使用。",
@@ -1420,6 +1458,17 @@
       "retry": "{seconds} 秒后重发",
       "sent": "验证码已发送，请查看邮箱。",
       "failed": "验证码发送失败。"
+    },
+    "forgotPassword": {
+      "title": "重置密码",
+      "description": "输入账号邮箱，我们会发送验证码，验证后即可设置新密码。",
+      "done": "密码已重置，请使用新密码登录。",
+      "signIn": "去登录",
+      "backToLogin": "返回登录",
+      "newPassword": "新密码",
+      "submit": "重置密码",
+      "submitting": "正在重置...",
+      "failed": "无法重置密码。"
     }
   },
   "pages": {
@@ -1519,6 +1568,8 @@
       "desktopSidebarDescription": "选择侧边栏中会话的组织方式。",
       "desktopSidebarShowSessions": "侧边栏显示会话",
       "desktopSidebarShowSessionsDescription": "直接显示会话，而不是按项目分组显示。",
+      "desktopSidebarCompactSessions": "单行显示会话",
+      "desktopSidebarCompactSessionsDescription": "只显示会话标题，不显示项目和设备那一行。仅在侧边栏显示会话时可用。",
       "language": "语言",
       "languageDescription": "选择此浏览器的界面语言。",
       "english": "English",
@@ -1626,7 +1677,13 @@
       "emailDescription": "用户将使用此邮箱登录。",
       "invalidEmail": "请输入有效邮箱。",
       "invalidDisplayName": "昵称需要 1–64 个字符。",
-      "typeEmail": "输入账号邮箱以确认"
+      "typeEmail": "输入账号邮箱以确认",
+      "skipEmailVerification": "无需邮箱验证",
+      "skipEmailVerificationDescription": "仅对这个用户生效。不需要验证码，邮箱会被视为已验证。",
+      "previousPage": "上一页",
+      "nextPage": "下一页",
+      "pageOf": "{page} / {pages}",
+      "pageRange": "第 {from}-{to} 位，共 {total} 位"
     },
     "opsDashboard": {
       "title": "看板",
@@ -1762,7 +1819,10 @@
         "save": "保存邮箱设置",
         "saved": "邮箱设置已保存。",
         "failed": "邮箱设置保存失败。"
-      }
+      },
+      "passwordReset": "找回密码",
+      "passwordResetDescription": "允许用户通过邮箱验证码重置忘记的密码。",
+      "passwordResetNeedsEmail": "需要先开启邮件服务，找回密码会通过邮件发送验证码。"
     }
   },
   "preview": {
