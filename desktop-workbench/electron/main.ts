@@ -169,6 +169,22 @@ function localDirect(): LocalDirect | undefined {
   return localDirectChannel ?? undefined;
 }
 
+/**
+ * Renderer diagnostics on stdout, when asked for.
+ *
+ * The live streams are the only place the renderer can tell "the Server never
+ * pushed" from "it pushed and I dropped it", and that distinction is invisible
+ * from the main process. Off unless AA_RENDERER_DEBUG is set.
+ */
+function forwardRendererDiagnostics(): void {
+  if (!process.env.AA_RENDERER_DEBUG) return;
+  app.on("web-contents-created", (_event, contents) => {
+    contents.on("console-message", (_e, _level, message) => {
+      if (message.includes("[aa-stream]")) console.log(message);
+    });
+  });
+}
+
 function streamBaseUrl(): string | null {
   try {
     return apiOrigin() || null;
@@ -1053,6 +1069,8 @@ if (hasSingleInstanceLock) {
     }
     if (app.isPackaged) queueDesktopOAuthCallback(rawUrl);
   });
+  forwardRendererDiagnostics();
+
   app.whenReady().then(async () => {
     Menu.setApplicationMenu(null);
     registerStaticWebProtocol();

@@ -1125,13 +1125,16 @@ export function SessionDetail({
         if (cancelled) return
         socketSubscribed = false
         socket = new WebSocket(dashboardApi.sessionWebSocketUrl(sessionId, ticket.ticket))
+        console.debug("[aa-stream] session connecting")
         socket.onopen = () => {
+          console.debug("[aa-stream] session open")
           if (!cancelled) streamConnectedRef.current = true
         }
         socket.onmessage = (message) => {
           if (cancelled || typeof message.data !== "string") return
           const event = parseProtocolEvent(message.data)
           if (!event) return
+          console.debug(`[aa-stream] session event ${event.type} seq=${event.sequence}`)
           if (event.type === "session.subscribed") {
             // The Server registers the broker subscription before emitting this
             // event. Recover only after that point so a same-sequence live
@@ -1143,12 +1146,14 @@ export function SessionDetail({
             return
           }
           if (!snapshotReady || recoveryPromise || recoveryStarting) {
+            console.debug(`[aa-stream] session buffered ${event.type} snapshotReady=${snapshotReady}`)
             bufferedEvents.push(event)
             return
           }
           applyEvent(event)
         }
-        socket.onclose = () => {
+        socket.onclose = (event) => {
+          console.debug(`[aa-stream] session closed code=${event.code} reason=${event.reason || "-"}`)
           if (cancelled) return
           socketSubscribed = false
           streamConnectedRef.current = false

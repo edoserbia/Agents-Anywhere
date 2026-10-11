@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+
+from loguru import logger
 from contextlib import suppress
 
 from agent_server.infra.event_preparation import EventPreparationPool
@@ -52,6 +54,8 @@ class TimelineBroker:
         coordinator: RedisCoordinator | None = None,
         *,
         dashboard_debounce_seconds: float = 0.0,
+        listen_retry_seconds: float = 1.0,
+        listen_retry_max_seconds: float = 30.0,
         event_workers: int = 0,
         event_threshold_bytes: int = 256 * 1024,
         event_queue_items: int = 32,
@@ -63,6 +67,8 @@ class TimelineBroker:
         self._dashboard_pending: dict[str, dict] = {}
         self._dashboard_tasks: dict[str, asyncio.Task[None]] = {}
         self._dashboard_debounce_seconds = dashboard_debounce_seconds
+        self._listen_retry_seconds = listen_retry_seconds
+        self._listen_retry_max_seconds = listen_retry_max_seconds
         self._lock = asyncio.Lock()
         self._pubsub = None
         self._listener_task: asyncio.Task[None] | None = None
@@ -77,14 +83,28 @@ class TimelineBroker:
             await self._event_pool.start()
         if not self._coordinator.distributed or self._listener_task is not None:
             return
+        await self._subscribe()
+        self._listener_task = asyncio.create_task(
+            self._listen(), name="redis-timeline-listener"
+        )
+
+    async def _subscribe(self) -> None:
         self._pubsub = self._coordinator.client.pubsub()
         await self._pubsub.psubscribe(
             self._coordinator.channel("timeline", "*"),
             self._coordinator.channel("dashboard", "*"),
         )
-        self._listener_task = asyncio.create_task(
-            self._listen(), name="redis-timeline-listener"
-        )
+
+    async def _resubscribe(self) -> None:
+        """Drop a dead pubsub connection and open a fresh subscription."""
+
+        pubsub, self._pubsub = self._pubsub, None
+        if pubsub is not None:
+            try:
+                await pubsub.aclose()
+            except Exception:  # noqa: BLE001 - it is already broken
+                pass
+        await self._subscribe()
 
     async def close(self) -> None:
         tasks = [*self._dashboard_tasks.values(), *self._preparation_tasks]
@@ -190,24 +210,52 @@ class TimelineBroker:
             self._fan_out_queues(queues, message)
 
     async def _listen(self) -> None:
-        assert self._pubsub is not None
         timeline_prefix = self._coordinator.channel("timeline", "")
         dashboard_prefix = self._coordinator.channel("dashboard", "")
-        async for event in self._pubsub.listen():
-            if event.get("type") != "pmessage":
-                continue
-            channel = self._as_text(event.get("channel"))
-            message = self._as_text(event.get("data"))
-            if channel.startswith(timeline_prefix):
-                await self._fan_out(
-                    self._subs, channel[len(timeline_prefix) :], message
+        delay = self._listen_retry_seconds
+        while True:
+            try:
+                if self._pubsub is None:
+                    await self._subscribe()
+                async for event in self._pubsub.listen():
+                    delay = self._listen_retry_seconds
+                    if event.get("type") != "pmessage":
+                        continue
+                    channel = self._as_text(event.get("channel"))
+                    message = self._as_text(event.get("data"))
+                    if channel.startswith(timeline_prefix):
+                        await self._fan_out(
+                            self._subs, channel[len(timeline_prefix) :], message
+                        )
+                    elif channel.startswith(dashboard_prefix):
+                        await self._fan_out(
+                            self._dashboard_subs,
+                            channel[len(dashboard_prefix) :],
+                            message,
+                        )
+                # `listen()` returning means the connection is finished.
+                raise RuntimeError("Redis pubsub stream ended")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - the listener must outlive it
+                # A subscription that dies with its connection takes every live
+                # update with it: publishers keep publishing into a channel
+                # nobody reads, and every client keeps the snapshot it loaded
+                # and never sees another change. Seen in production — the
+                # subscription was gone and clients were frozen until the
+                # process was restarted.
+                logger.warning(
+                    "timeline broker listener lost Redis, resubscribing in {}s: {}",
+                    delay, exc,
                 )
-            elif channel.startswith(dashboard_prefix):
-                await self._fan_out(
-                    self._dashboard_subs,
-                    channel[len(dashboard_prefix) :],
-                    message,
-                )
+                try:
+                    await self._resubscribe()
+                except Exception as resubscribe_exc:  # noqa: BLE001
+                    logger.warning(
+                        "timeline broker could not resubscribe: {}", resubscribe_exc
+                    )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, self._listen_retry_max_seconds)
 
     async def _fan_out(
         self,

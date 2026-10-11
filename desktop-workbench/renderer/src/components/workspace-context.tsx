@@ -814,6 +814,8 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         )
         if (cancelled) return
         socket = new WebSocket(dashboardApi.dashboardWebSocketUrl(ticket.ticket))
+        console.debug("[aa-stream] dashboard connecting")
+        socket.onopen = () => console.debug("[aa-stream] dashboard open")
         socket.onmessage = (event) => {
           if (cancelled || typeof event.data !== "string") return
           try {
@@ -824,10 +826,12 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
               window.clearTimeout(fallbackTimer)
               fallbackTimer = null
             }
+            console.debug(`[aa-stream] dashboard snapshot seq=${(snapshot as { sequence?: number }).sequence ?? "?"}`)
             scheduleDashboardSnapshot(snapshot)
           } catch { /* ignore malformed */ }
         }
-        socket.onclose = () => {
+        socket.onclose = (event) => {
+          console.debug(`[aa-stream] dashboard closed code=${event.code} reason=${event.reason || "-"}`)
           if (cancelled) return
           socket = null
           scheduleInitialFallback()
