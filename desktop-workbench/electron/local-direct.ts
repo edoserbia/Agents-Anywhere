@@ -93,6 +93,18 @@ export class LocalDirect {
   }
 
   /**
+   * Why the channel did or did not serve something.
+   *
+   * Falling back is deliberately silent, so there is otherwise no way to tell
+   * "the Connector was never asked" from "it was asked and declined". Set
+   * AA_LOCAL_DIRECT_DEBUG to see the difference.
+   */
+  private note(what: string, detail?: unknown): void {
+    if (!process.env.AA_LOCAL_DIRECT_DEBUG) return;
+    console.log(`[local-direct] ${what}`, detail === undefined ? "" : detail);
+  }
+
+  /**
    * Answer locally, or return null so the caller forwards to the Server.
    *
    * Never throws: a failure here is a reason to use the Server, not a reason for
@@ -104,9 +116,13 @@ export class LocalDirect {
     );
     if (!route) return null;
     const sessionId = decodeURIComponent(route.pattern.exec(url.pathname)![1]);
+    this.note("route served", { kind: route.kind, sessionId });
     try {
       const session = await this.sessionRuntime(sessionId, request.headers.get("authorization"));
-      if (!session) return null;
+      if (!session) {
+        this.note("no runtime for session; falling back", sessionId);
+        return null;
+      }
       const params: Record<string, unknown> = {
         sessionId,
         runtime: session.runtime,
@@ -118,23 +134,34 @@ export class LocalDirect {
       if (route.kind === "send") {
         // The Server would refuse these; refusing them here too keeps the
         // faster path from becoming a way around the rules.
-        if (!session.writable) return null;
+        if (!session.writable) {
+          this.note("session is read-only or archived; falling back", sessionId);
+          return null;
+        }
         const body = (await request.clone().json()) as Record<string, unknown>;
         if (typeof body?.content !== "string") return null;
         params.content = body.content;
         // No id, no local write: a retry of a send without one cannot be told
         // apart from a second send.
-        if (typeof body.clientMessageId !== "string" || !body.clientMessageId) return null;
+        if (typeof body.clientMessageId !== "string" || !body.clientMessageId) {
+          this.note("no clientMessageId; falling back", sessionId);
+          return null;
+        }
         params.clientMessageId = body.clientMessageId;
         // Attachments are resolved by the Server from file ids; without that
         // resolution the local call would silently drop them, so a message that
         // carries any goes the normal way.
-        if (Array.isArray(body.attachments) && body.attachments.length > 0) return null;
+        if (Array.isArray(body.attachments) && body.attachments.length > 0) {
+          this.note("message carries attachments; falling back", sessionId);
+          return null;
+        }
         const result = await this.call("session.send_message", params);
+        this.note("served a send locally", sessionId);
         return json({ ok: true, result, error: null });
       }
 
       const result = await this.call("session.state", params);
+      this.note("served a read locally", sessionId);
       return json({ state: result, serverTime: new Date(this.clock()).toISOString() });
     } catch (error) {
       // A write that reached the runtime and then lost its reply must not be
@@ -148,6 +175,7 @@ export class LocalDirect {
         });
       }
       // Everything else: the Server answers this one.
+      this.note("failed; falling back", error instanceof Error ? error.message : String(error));
       return null;
     }
   }
