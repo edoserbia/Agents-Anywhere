@@ -8,6 +8,7 @@ import pytest
 from agent_server.infra.db.engine import build_engine, resolve_db_url
 from agent_server.infra.db.legacy_import import rehearse_v1_import
 from agent_server.infra.db.migrations import (
+    schema_version_for_revision,
     CURRENT_SCHEMA_REVISION,
     CURRENT_SCHEMA_VERSION,
     DatabaseMigrationError,
@@ -1125,8 +1126,8 @@ def test_unversioned_runtime_schema_is_classified_by_actual_columns(
     )
 
 
-def test_current_schema_version_is_v2_44() -> None:
-    assert CURRENT_SCHEMA_REVISION == "v2_44"
+def test_current_schema_version_is_v2_44_jupiter() -> None:
+    assert CURRENT_SCHEMA_REVISION == "v2_44_jupiter"
     assert CURRENT_SCHEMA_VERSION == "2.44"
 
 
@@ -2431,3 +2432,18 @@ def test_v2_35_replaces_the_session_item_time_index(tmp_path) -> None:
         assert "updated_seq DESC" in definition
     finally:
         engine.dispose()
+
+
+def test_a_suffixed_revision_still_maps_to_its_version() -> None:
+    """A revision may name the line it came from; the version is still 2.44.
+
+    Ours carry a `jupiter` suffix so they are recognisable next to the upstream
+    chain. The readiness check reports the version, and reading it used to fall
+    back to the raw revision for anything but a bare `v2_N`.
+    """
+
+    assert schema_version_for_revision("v2_44") == "2.44"
+    assert schema_version_for_revision("v2_44_jupiter") == "2.44"
+    assert schema_version_for_revision("v2_42_jupiter") == "2.42"
+    assert schema_version_for_revision("v1_legacy") == "1.legacy"
+    assert schema_version_for_revision(None) == "unversioned"

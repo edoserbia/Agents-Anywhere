@@ -17,8 +17,8 @@ Revises: v2_36
 import sqlalchemy as sa
 from alembic import op
 
-revision = "v2_43"
-down_revision = "v2_42"
+revision = "v2_43_jupiter"
+down_revision = "v2_42_jupiter"
 branch_labels = None
 depends_on = None
 

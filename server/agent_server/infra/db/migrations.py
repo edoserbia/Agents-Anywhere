@@ -22,7 +22,7 @@ from agent_server.infra.db.engine import POSTGRES_BACKEND, resolve_db_url
 
 LEGACY_V1_REVISION = "v1_legacy"
 BASELINE_V2_REVISION = "v2_0"
-CURRENT_SCHEMA_REVISION = "v2_44"
+CURRENT_SCHEMA_REVISION = "v2_44_jupiter"
 CURRENT_SCHEMA_VERSION = "2.44"
 POSTGRES_MIGRATION_LOCK_ID = 0x414147454E545332
 DEFAULT_MIGRATION_LOCK_TIMEOUT_SECONDS = 120.0
@@ -234,7 +234,10 @@ def schema_version_for_revision(revision: str | None) -> str:
     if revision == LEGACY_V1_REVISION:
         return "1.legacy"
     if revision.startswith("v") and "_" in revision:
-        major, minor = revision[1:].split("_", 1)
+        major, _, rest = revision[1:].partition("_")
+        # A revision may carry a suffix naming the line it came from
+        # (v2_44_jupiter). The version it maps to is still 2.44.
+        minor = rest.split("_", 1)[0]
         if major.isdigit() and minor.isdigit():
             return f"{int(major)}.{int(minor)}"
     return revision
