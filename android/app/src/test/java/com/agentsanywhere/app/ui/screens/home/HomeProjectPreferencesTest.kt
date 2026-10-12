@@ -28,6 +28,12 @@ private class FakeStore : HomePreferenceStore {
     override fun putString(key: String, value: String) {
         strings[key] = value
     }
+
+    override fun remove(key: String) {
+        strings.remove(key)
+        stringSets.remove(key)
+        booleans.remove(key)
+    }
 }
 
 /**
