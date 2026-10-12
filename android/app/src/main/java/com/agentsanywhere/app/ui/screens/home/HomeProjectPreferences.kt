@@ -23,6 +23,7 @@ internal interface HomePreferenceStore {
     fun putBoolean(key: String, value: Boolean)
     fun getString(key: String): String?
     fun putString(key: String, value: String)
+    fun remove(key: String)
 }
 
 private class SharedPreferenceStore(private val storage: SharedPreferences) : HomePreferenceStore {
@@ -43,6 +44,10 @@ private class SharedPreferenceStore(private val storage: SharedPreferences) : Ho
 
     override fun putString(key: String, value: String) {
         storage.edit().putString(key, value).apply()
+    }
+
+    override fun remove(key: String) {
+        storage.edit().remove(key).apply()
     }
 }
 
@@ -84,9 +89,9 @@ internal class HomeProjectPreferences(private val storage: HomePreferenceStore, 
             ?: ProjectSessionStatusFilter.Active,
     )
         private set
-    var selectedDeviceId by mutableStateOf(storage.getString("$key:device", null)?.takeIf(String::isNotBlank))
+    var selectedDeviceId by mutableStateOf(storage.getString("$key:device")?.takeIf(String::isNotBlank))
         private set
-    var selectedAgentRuntime by mutableStateOf(storage.getString("$key:agent", null)?.takeIf(String::isNotBlank))
+    var selectedAgentRuntime by mutableStateOf(storage.getString("$key:agent")?.takeIf(String::isNotBlank))
         private set
 
     fun selectSessionStatus(status: ProjectSessionStatusFilter) {
@@ -96,24 +101,21 @@ internal class HomeProjectPreferences(private val storage: HomePreferenceStore, 
 
     fun selectDevice(id: String?) {
         selectedDeviceId = id
-        storage.edit().apply {
-            if (id == null) remove("$key:device") else putString("$key:device", id)
-        }.apply()
+        if (id == null) storage.remove("$key:device") else storage.putString("$key:device", id)
     }
 
     fun selectAgent(runtime: String?) {
         selectedAgentRuntime = runtime
-        storage.edit().apply {
-            if (runtime == null) remove("$key:agent") else putString("$key:agent", runtime)
-        }.apply()
+        if (runtime == null) storage.remove("$key:agent") else storage.putString("$key:agent", runtime)
     }
 
     fun clearFilters() {
         sessionStatus = ProjectSessionStatusFilter.Active
         selectedDeviceId = null
         selectedAgentRuntime = null
-        storage.edit().putString("$key:status", ProjectSessionStatusFilter.Active.name)
-            .remove("$key:device").remove("$key:agent").apply()
+        storage.putString("$key:status", ProjectSessionStatusFilter.Active.name)
+        storage.remove("$key:device")
+        storage.remove("$key:agent")
     }
 
     fun setProjectExpanded(id: String, expanded: Boolean) {

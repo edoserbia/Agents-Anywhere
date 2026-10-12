@@ -14,9 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.SaveableStateHolder
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -63,6 +61,8 @@ import com.agentsanywhere.app.ui.screens.home.NewSessionScreen
 import com.agentsanywhere.app.ui.screens.sessiondetail.SessionComposerDraftStore
 import com.agentsanywhere.app.ui.screens.sessiondetail.SessionDetailScreen
 import com.agentsanywhere.app.ui.screens.terminal.TerminalScreen
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.saveable.SaveableStateHolder
 
 @Composable
 internal fun AgentsAnywhereNavHost(
@@ -148,9 +148,9 @@ internal fun AgentsAnywhereNavHost(
 ) {
     val context = LocalContext.current
     val colors = LocalAAColors.current
-    val saveableStateHolder = rememberSaveableStateHolder()
     var profileOpen by rememberSaveable(serverUrl, userId) { mutableStateOf(false) }
     var deviceAgentPreviewRefreshKey by remember { mutableLongStateOf(0L) }
+    val saveableStateHolder = rememberSaveableStateHolder()
     val deviceAgentPreviews = rememberDeviceAgentPreviews(
         devices = sessionsState.devices,
         isRefreshing = isRefreshingSessions,
@@ -298,62 +298,6 @@ internal fun AgentsAnywhereNavHost(
                         onRenameDevice = onRenameDevice,
                         onDeleteDevice = onDeleteDevice,
                         onPrepareDeviceSetup = onPrepareDeviceSetup,
-                        onListDeviceRuntimes = onListDeviceRuntimes,
-                        onSetDeviceRuntimeActive = { connectorId, runtime, active ->
-                            onSetDeviceRuntimeActive(connectorId, runtime, active).onSuccess {
-                                deviceAgentPreviewRefreshKey += 1L
-                            }
-                        },
-                        onDeleteDeviceRuntimeConfig = { connectorId, runtime ->
-                            onDeleteDeviceRuntimeConfig(connectorId, runtime).onSuccess {
-                                deviceAgentPreviewRefreshKey += 1L
-                            }
-                        },
-                        onBulkSetSessionsArchived = onBulkSetSessionsArchived,
-                        onArchiveAllDeviceSessions = onArchiveAllDeviceSessions,
-                    )
-                    AppDestination.Devices -> DevicesScreen(
-                        state = sessionsState,
-                        isRefreshing = isRefreshingSessions,
-                        onRefresh = onRefreshSessions,
-                        onOpenDevice = onOpenDevice,
-                        onBack = { navigate(AppDestination.Sessions) },
-                        agentPreviews = deviceAgentPreviews,
-                        onAddDevice = { navigate(AppDestination.DeviceSetup) },
-                    )
-                    AppDestination.Terminal -> TerminalScreen(
-                        navigate = navigate,
-                        state = sessionsState,
-                        terminalPool = remoteTerminalPool,
-                        onPairDevice = { navigate(AppDestination.DeviceSetup) },
-                    )
-                    AppDestination.Files -> FilesScreen(
-                        navigate = navigate,
-                        state = sessionsState,
-                        controller = filesController,
-                        onPairDevice = { navigate(AppDestination.DeviceSetup) },
-                    )
-                    AppDestination.DeviceSetup -> androidx.compose.runtime.key(serverUrl, userId) {
-                        AddDeviceScreen(
-            }
-                        devices = sessionsState.devices,
-                        controller = sessionDetailController,
-                        realtimeController = sessionRealtimeController,
-                        filesController = filesController,
-                        terminalPool = remoteTerminalPool,
-                        composerDraftStore = sessionComposerDraftStore,
-                        onSessionChanged = onSessionChanged,
-                    )
-                    AppDestination.DeviceDetail -> DeviceDetailScreen(
-                        navigate = navigate,
-                        state = sessionsState,
-                        selectedDeviceId = selectedDeviceId,
-                        backDestination = deviceDetailReturnDestination,
-                        onOpenSession = onOpenSession,
-                        onRenameDevice = onRenameDevice,
-                        onDeleteDevice = onDeleteDevice,
-                        onPrepareDeviceSetup = onPrepareDeviceSetup,
-                        onClaimDevicePairCode = onClaimDevicePairCode,
                         onListDeviceRuntimes = onListDeviceRuntimes,
                         onSetDeviceRuntimeActive = { connectorId, runtime, active ->
                             onSetDeviceRuntimeActive(connectorId, runtime, active).onSuccess {

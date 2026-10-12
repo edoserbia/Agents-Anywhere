@@ -5,11 +5,13 @@ import android.net.Uri
 import com.agentsanywhere.app.feature.sessiondetail.TimelineAttachment
 import org.json.JSONArray
 import org.json.JSONObject
+import com.agentsanywhere.app.feature.sessiondetail.RuntimeMessageAction
 
 internal data class SessionComposerDraft(
     val text: String = "",
     val attachments: List<PendingAttachment> = emptyList(),
     val clientMessageId: String? = null,
+    val retryAction: RuntimeMessageAction? = null,
 )
 
 class SessionComposerDraftStore(

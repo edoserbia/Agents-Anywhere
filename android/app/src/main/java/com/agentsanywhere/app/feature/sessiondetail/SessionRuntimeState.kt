@@ -7,6 +7,7 @@ import com.agentsanywhere.app.api.RemoteRuntimePermissionCatalog
 import com.agentsanywhere.app.api.RemoteSessionCommand
 
 const val SESSION_SEND_MESSAGE_CAPABILITY = "session.send_message"
+const val SESSION_STEER_CAPABILITY = "session.steer"
 const val SESSION_INTERRUPT_CAPABILITY = "session.interrupt"
 const val SESSION_NOTICE_RESPONSE_CAPABILITY = "session.interaction.approval"
 const val SESSION_COMMANDS_CAPABILITY = "session.commands"
@@ -109,6 +110,37 @@ data class EffectiveCapabilities(
     ): Boolean {
         return find(capabilityId, runtimeId, runtimeType)?.usable == true
     }
+
+    fun messageAction(
+        runtime: String?,
+        runtimeStatus: SessionRuntimeStatus,
+        runtimeType: String? = runtime,
+    ): RuntimeMessageAction? {
+        val canSend = isUsable(SESSION_SEND_MESSAGE_CAPABILITY, runtime, runtimeType)
+        val canSteer = isUsable(SESSION_STEER_CAPABILITY, runtime, runtimeType)
+        return when {
+            canSteer && (!canSend || runtimeStatus in ACTIVE_RUNTIME_STATUSES) -> RuntimeMessageAction.Steer
+            canSend -> RuntimeMessageAction.Send
+            canSteer -> RuntimeMessageAction.Steer
+            else -> null
+        }
+    }
+
+    private companion object {
+        val ACTIVE_RUNTIME_STATUSES = setOf(
+            SessionRuntimeStatus.Waiting,
+            SessionRuntimeStatus.Pending,
+            SessionRuntimeStatus.Running,
+            SessionRuntimeStatus.Stopping,
+            SessionRuntimeStatus.WaitingApproval,
+            SessionRuntimeStatus.Blocked,
+        )
+    }
+}
+
+enum class RuntimeMessageAction {
+    Send,
+    Steer,
 }
 
 data class EffectiveCapability(

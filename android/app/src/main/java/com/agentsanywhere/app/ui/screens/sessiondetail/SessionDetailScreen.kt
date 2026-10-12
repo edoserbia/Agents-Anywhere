@@ -122,6 +122,8 @@ import com.agentsanywhere.app.feature.sessiondetail.SESSION_MODEL_CATALOG_CAPABI
 import com.agentsanywhere.app.feature.sessiondetail.SESSION_NOTICE_RESPONSE_CAPABILITY
 import com.agentsanywhere.app.feature.sessiondetail.SESSION_PERMISSION_CATALOG_CAPABILITY
 import com.agentsanywhere.app.feature.sessiondetail.SESSION_SEND_MESSAGE_CAPABILITY
+import com.agentsanywhere.app.feature.sessiondetail.SESSION_STEER_CAPABILITY
+import com.agentsanywhere.app.feature.sessiondetail.RuntimeMessageAction
 import com.agentsanywhere.app.feature.sessiondetail.selectionOptions
 import com.agentsanywhere.app.feature.sessiondetail.sendUnavailableReason
 import com.agentsanywhere.app.feature.sessiondetail.sessionComposerEnabled
@@ -1376,6 +1378,7 @@ fun SessionDetailScreen(
     val runtimeId = state.session?.runtimeId ?: state.runtime.runtimeId
     val runtimeType = state.session?.runtimeType ?: state.runtime.runtimeType
     val canUseSendMessage = state.capabilities.isUsable(SESSION_SEND_MESSAGE_CAPABILITY, runtimeId, runtimeType)
+    val canUseSteer = state.capabilities.isUsable(SESSION_STEER_CAPABILITY, runtimeId, runtimeType)
     val canUseInterrupt = state.capabilities.isUsable(SESSION_INTERRUPT_CAPABILITY, runtimeId, runtimeType)
     val canRespondToNotice = state.capabilities.isUsable(
         SESSION_NOTICE_RESPONSE_CAPABILITY,

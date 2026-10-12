@@ -134,6 +134,8 @@ internal fun HomeList(
         )
         else -> SessionList(
             sessions = sessions,
+            projects = state.projects,
+            devices = state.devices,
             projectPreferences = projectPreferences,
             hasMore = if (tab == HomeTab.Active) state.activeHasMore else state.archivedHasMore,
             isLoadingMore = if (tab == HomeTab.Active) state.isLoadingMoreActive else state.isLoadingMoreArchived,
@@ -238,6 +240,8 @@ private fun SkeletonLine(
 @Composable
 private fun SessionList(
     sessions: List<AgentSession>,
+    projects: List<AgentProject>,
+    devices: List<AgentDevice>,
     projectPreferences: HomeProjectPreferences,
     hasMore: Boolean,
     isLoadingMore: Boolean,

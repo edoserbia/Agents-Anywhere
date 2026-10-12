@@ -126,7 +126,6 @@ internal fun HomeProjectList(
     onNewSession: (AgentProject) -> Unit,
     onSessionLongPress: (AgentSession, Rect) -> Unit,
     onOpenSession: (AgentSession) -> Unit,
-    devices: List<AgentDevice> = emptyList(),
 ) {
     var filterAnchor by remember { mutableStateOf<Rect?>(null) }
     val projectsExpanded = projectPreferences.projectsExpanded
@@ -260,6 +259,7 @@ internal fun HomeProjectList(
                                 onNewSession = { onNewSession(project) },
                                 onSessionLongPress = onSessionLongPress,
                                 onOpenSession = onOpenSession,
+                                agentLabel = agentLabel,
                             )
                         }
                     }
