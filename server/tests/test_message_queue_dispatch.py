@@ -198,3 +198,85 @@ def test_dispatch_leaves_no_item_stuck_in_flight() -> None:
         assert all(item.status != QUEUE_STATUS_SENDING for item in await queue.list("s1"))
 
     asyncio.run(run())
+
+
+class _IdleRuntimeStore:
+    """Just enough store to resolve a runtime back to its sessions."""
+
+    def __init__(self, rows: list[tuple[str, str, str | None, str]]) -> None:
+        # (connector_id, session_id, runtime_id, runtime)
+        self._rows = rows
+        self.listed: list[str] = []
+
+    async def list_sessions_for_connector(self, connector_id: str):
+        self.listed.append(connector_id)
+        return [
+            _FakeSession(session_id, runtime_id, runtime)
+            for cid, session_id, runtime_id, runtime in self._rows
+            if cid == connector_id
+        ]
+
+
+class _FakeSession:
+    def __init__(self, session_id: str, runtime_id: str | None, runtime: str) -> None:
+        self.id = session_id
+        self.runtimeId = runtime_id
+        self.runtime = runtime
+
+
+def test_an_idle_runtime_resolves_to_the_sessions_it_owns() -> None:
+    """The queue dispatch hangs off a runtime going idle.
+
+    The `runtime.statusChanged` notification produces no ingest effect, so the
+    status never reaches the bucket the dispatch reads and a queued message
+    could sit in the panel forever. The trigger is resolved from the runtime
+    instead, which is what this pins.
+    """
+
+    async def run():
+        from agent_server.services.connector_ingest import ConnectorIngestService
+
+        service = ConnectorIngestService.__new__(ConnectorIngestService)
+        service._store = _IdleRuntimeStore([
+            ("conn_1", "sess_a", "rti_a", "codex"),
+            ("conn_1", "sess_b", "rti_b", "dsh"),
+            ("conn_1", "sess_c", None, "codex"),
+            ("conn_2", "sess_d", "rti_a", "codex"),
+        ])
+        found = await service._sessions_for_idle_runtimes({("conn_1", "rti_a")})
+        # Only the session bound to that instance, on that connector.
+        assert found == ["sess_a"]
+        assert service._store.listed == ["conn_1"]
+
+    asyncio.run(run())
+
+
+def test_a_session_without_an_instance_id_matches_its_runtime_type() -> None:
+    """A runtime with one instance is addressed by type, as the sender does."""
+
+    async def run():
+        from agent_server.services.connector_ingest import ConnectorIngestService
+
+        service = ConnectorIngestService.__new__(ConnectorIngestService)
+        service._store = _IdleRuntimeStore([("conn_1", "sess_a", None, "codex")])
+        found = await service._sessions_for_idle_runtimes({("conn_1", "codex")})
+        assert found == ["sess_a"]
+
+    asyncio.run(run())
+
+
+def test_listing_failure_does_not_break_ingest() -> None:
+    """A queue problem must never fail the ingest that observed the change."""
+
+    async def run():
+        from agent_server.services.connector_ingest import ConnectorIngestService
+
+        class _Broken:
+            async def list_sessions_for_connector(self, connector_id: str):
+                raise RuntimeError("database is away")
+
+        service = ConnectorIngestService.__new__(ConnectorIngestService)
+        service._store = _Broken()
+        assert await service._sessions_for_idle_runtimes({("conn_1", "rti_a")}) == []
+
+    asyncio.run(run())

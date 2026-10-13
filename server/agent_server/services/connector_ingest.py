@@ -153,6 +153,10 @@ class ConnectorIngestService:
         # composer, so a runtime that recovers must republish rather than leave
         # the client holding stale "cannot send" facts until it reconnects.
         runtime_status_changed = False
+        # Runtimes that just became idle or errored. Their effect is empty, so
+        # the bucket below never carries the status and the queue dispatch would
+        # never fire — a message could sit in the panel forever.
+        dispatchable_runtimes: set[tuple[str, str]] = set()
         unconfigured_runtimes = await self._store.get_unconfigured_runtime_ids(connector_id)
         for index, notification in enumerate(payload.notifications):
             if not runtime_notification_is_allowed(notification.method, notification.params, unconfigured_runtimes):
@@ -187,6 +191,11 @@ class ConnectorIngestService:
             accepted += 1
             if notification.method == "runtime.statusChanged":
                 runtime_status_changed = True
+                params = notification.params if isinstance(notification.params, dict) else {}
+                runtime_id = params.get("runtimeId")
+                status = params.get("status")
+                if status in DISPATCHABLE_STATUSES and isinstance(runtime_id, str) and runtime_id:
+                    dispatchable_runtimes.add((connector_id, runtime_id))
                 continue
             effects.append(effect)
             if notification.method == "protocol.capabilitiesUpdated":
@@ -201,7 +210,9 @@ class ConnectorIngestService:
                         and not isinstance(notification.params.get("sessionId"), str)
                     )
                 )
-        dashboard_changed = await self._publish_effects(effects)
+        dashboard_changed = await self._publish_effects(
+            effects, dispatchable_runtimes=dispatchable_runtimes
+        )
         # Republish whenever a runtime's capability-affecting status changed, so a
         # runtime that recovers does not leave open clients holding stale facts.
         if runtime_status_changed or protocol_capabilities_changed or runtime_scoped_capabilities_changed:
@@ -301,7 +312,12 @@ class ConnectorIngestService:
                 reason=method,
             )
 
-    async def _publish_effects(self, effects: list[IngestEffect]) -> bool:
+    async def _publish_effects(
+        self,
+        effects: list[IngestEffect],
+        *,
+        dispatchable_runtimes: set[tuple[str, str]] | None = None,
+    ) -> bool:
         dashboard_changed = any(effect.dashboard_changed for effect in effects)
         by_session: dict[str, dict[str, Any]] = {}
         for effect in effects:
@@ -536,8 +552,42 @@ class ConnectorIngestService:
             status = runtime_state.get("status") if isinstance(runtime_state, dict) else None
             if status in DISPATCHABLE_STATUSES:
                 settled.append(session_id)
+        if dispatchable_runtimes:
+            settled.extend(
+                await self._sessions_for_idle_runtimes(dispatchable_runtimes)
+            )
         await self._dispatch_queues(settled)
         return dashboard_changed
+
+    async def _sessions_for_idle_runtimes(
+        self,
+        runtimes: set[tuple[str, str]],
+    ) -> list[str]:
+        """Sessions whose runtime just became idle or errored.
+
+        Dispatch is idempotent — it claims the head of the queue under a
+        per-session lock and does nothing when the queue is empty — so listing
+        a session that has nothing waiting costs one no-op query.
+        """
+
+        sessions: list[str] = []
+        for connector_id, runtime_id in runtimes:
+            try:
+                rows = await self._store.list_sessions_for_connector(connector_id)
+            except Exception as error:  # noqa: BLE001 - never break ingest
+                logger.warning(
+                    "queued message dispatch could not list sessions connector_id={} error={}",
+                    connector_id,
+                    type(error).__name__,
+                )
+                continue
+            for session in rows:
+                # A session without an explicit instance id is bound to the
+                # runtime type itself, which is how the queue sender resolves it.
+                bound = session.runtimeId or session.runtime
+                if bound == runtime_id:
+                    sessions.append(session.id)
+        return sessions
 
     async def _dispatch_queues(self, settled: list[str]) -> None:
         """Hand the next queued message to each session whose turn just ended.
