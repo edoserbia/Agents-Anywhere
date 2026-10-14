@@ -434,7 +434,14 @@ class SessionRunService:
                 user_id=user_id,
             )
             return await self._enqueue_message(session, payload, user_id=user_id)
-        if runtime_status not in {"idle", "error"}:
+        # The live read is a runtime's own opinion of itself, and a runtime can
+        # be wrong about it: DSH reports idle while its turn is still running.
+        # Trusting that alone sent the message straight at a busy runtime, which
+        # dropped it — the user saw it in the transcript and nothing happened.
+        # The session's own status is the record of what the runtime last said
+        # it was doing, so a busy session is busy whatever the live read claims.
+        session_busy = session.status not in {"idle", "error"}
+        if session_busy or runtime_status not in {"idle", "error"}:
             # The runtime is mid-turn. With queueing requested, keep the message
             # instead of rejecting it; it is dispatched as this turn finishes.
             # Capabilities are still checked, because a runtime that cannot send

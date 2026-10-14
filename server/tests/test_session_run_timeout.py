@@ -106,7 +106,7 @@ def test_a_status_read_timeout_is_treated_as_busy_when_queueing() -> None:
     assert "except SessionRunTimeoutError:" in source, "the timeout is caught"
 
     branch = source[source.index("except SessionRunTimeoutError:"):]
-    branch = branch[: branch.index("if runtime_status not in")]
+    branch = branch[: branch.index("if session_busy or runtime_status not in")]
     assert "if not payload.queueWhenBusy:" in branch, "only queued sends are relaxed"
     assert "raise" in branch, "an ordinary send still reports the timeout"
     assert "_enqueue_message" in branch, "a queued send is enqueued"
@@ -116,3 +116,16 @@ def test_dispatching_a_claimed_item_cannot_enqueue_a_duplicate() -> None:
     """A claimed queue item must be requeued on a busy race, not copied."""
     source = inspect.getsource(SessionRunService.send_queued_message)
     assert "queueWhenBusy=False" in source
+
+
+def test_a_busy_session_queues_even_when_the_live_read_says_idle() -> None:
+    """A runtime can be wrong about itself, so the session status decides.
+
+    DSH reports idle while its turn is still running. Trusting the live read
+    alone sent the message straight at a busy runtime, which dropped it: the
+    client had already shown it in the transcript and nothing happened, and no
+    queue panel appeared because nothing was ever queued.
+    """
+    source = inspect.getsource(SessionRunService.send_message)
+    assert 'session_busy = session.status not in {"idle", "error"}' in source
+    assert "if session_busy or runtime_status not in" in source

@@ -1291,20 +1291,30 @@ export function SessionDetail({
       items: state?.items ?? [],
       nextSeq: state?.nextSeq ?? eventSequenceCursor.current(sessionId),
     })
-    addOptimisticMessage({
-      clientMessageId,
-      sessionId: session.id,
-      item: optimisticMessage,
-    })
+    // A message sent into a running turn is not part of the transcript yet: the
+    // server holds it in the queue and dispatches it when the turn finishes.
+    // Showing it here made it look sent while nothing had happened, and the
+    // queue panel — the only place it can be edited, inserted or deleted from —
+    // never appeared, because the queue was never read.
+    const queuesInsteadOfSending = options?.queueWhenBusy === true
+    if (!queuesInsteadOfSending) {
+      addOptimisticMessage({
+        clientMessageId,
+        sessionId: session.id,
+        item: optimisticMessage,
+      })
+    }
     const previousRuntimeState = state?.state ?? null
-    setState((current) => {
-      if (!current) return current
-      return {
-        ...current,
-        state: nextOptimisticRuntimeState(current.state, current.session, "waiting"),
-        items: mergeTimelineItems(current.items, [optimisticMessage]),
-      }
-    })
+    if (!queuesInsteadOfSending) {
+      setState((current) => {
+        if (!current) return current
+        return {
+          ...current,
+          state: nextOptimisticRuntimeState(current.state, current.session, "waiting"),
+          items: mergeTimelineItems(current.items, [optimisticMessage]),
+        }
+      })
+    }
     setSending(true)
     try {
       const selectionPatch = selectionPatchFromComposerSelections(runtimeState?.selections ?? {}, selections)
