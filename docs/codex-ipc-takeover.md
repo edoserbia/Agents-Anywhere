@@ -383,7 +383,7 @@ CodexRuntime
 Windows 适配：
 
 - 路由是命名管道 `\\.\pipe\codex-ipc`。`pathlib` 会把它改写成 `\pipe\codex-ipc`，所以连接时直接用字符串常量 `WINDOWS_PIPE_PATH`，不经过 `Path`。
-- Windows 上 Connector **不当 router**：多个进程可以创建同名管道实例，第二个 router 会把客户端分成两半；App 启动时自己会当 router。
+- Windows 上 Connector **不当 router**：`IpcRouter` 只有 Unix socket 实现，命名管道服务端还没写、也没验证，所以等 App 或 VS Code 来当 router。选举本身是可行的：libuv 和 CPython asyncio 创建第一个管道实例时都带 `FILE_FLAG_FIRST_PIPE_INSTANCE`，第二个监听者会像 socket 的 `EADDRINUSE` 一样失败，不会出现两个 router。另外 Windows 上能不能启用 IPC 取决于事件循环而不是平台：`create_pipe_connection` 只有 `ProactorEventLoop` 才有（Windows 默认），`CodexIpcClient.start()` 据此判断，不满足就记日志并禁用。
 - 没有 uid 和 IPC 目录，`ensure_ipc_directory` 在 win32 直接返回（原实现调用 `os.getuid()` 会抛错）。
 - App 进程识别：主进程是 `...\WindowsApps\OpenAI.Codex_<version>_x64__<publisher>\app\ChatGPT.exe`，按包名 `OpenAI.Codex_` 匹配，不会误认同名的 ChatGPT 桌面版；Windows 没有 `ps`，改用 psutil。
 - 写锁判定用 `msvcrt.locking` 非阻塞字节锁代替 `flock`。实测 Windows 上 Codex 释放写锁时会删除锁文件。

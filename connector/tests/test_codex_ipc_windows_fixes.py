@@ -17,7 +17,7 @@ from connector.runtimes.codex.domain.pending_messages import (
 )
 from connector.runtimes.codex.domain.sessions import stable_session_id
 from connector.runtimes.codex.ipc import control
-from connector.runtimes.codex.ipc.client import IpcRequest, IpcResponse
+from connector.runtimes.codex.ipc.client import CodexIpcClient, IpcRequest, IpcResponse
 from connector.runtimes.codex.ipc.control import CodexIpcTurnController
 from connector.runtimes.codex.ipc.follower import FollowedThread
 from connector.runtimes.codex.ipc.owner import CodexIpcOwnerService
@@ -407,3 +407,20 @@ def test_thread_aa_only_resumed_is_not_announced() -> None:
         assert [m for m, _ in client.broadcasts if m == "thread-unarchived"] == []
 
     asyncio.run(scenario())
+
+
+# -- Windows: the client needs the proactor loop, not just the platform ----------
+
+
+def test_windows_client_is_disabled_on_a_loop_without_pipe_support(tmp_path, monkeypatch) -> None:
+    async def run() -> None:
+        # The selector loop (and every loop outside Windows) has no
+        # create_pipe_connection, which is what the named-pipe client needs.
+        assert not hasattr(asyncio.get_running_loop(), "create_pipe_connection")
+        monkeypatch.setattr("connector.runtimes.codex.ipc.client.sys.platform", "win32")
+        client = CodexIpcClient(codex_home=tmp_path, reconnect_delay=0.01)
+        await client.start()
+        assert client._task is None
+        await client.stop()
+
+    asyncio.run(run())

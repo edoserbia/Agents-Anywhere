@@ -16,10 +16,6 @@ class IpcPathError(OSError):
     """Raised when the IPC directory or socket fails the ownership checks."""
 
 
-def is_supported_platform() -> bool:
-    return True
-
-
 def ipc_socket_path(codex_home: str | os.PathLike[str]) -> Path:
     if sys.platform == "win32":
         return Path(WINDOWS_PIPE_PATH)

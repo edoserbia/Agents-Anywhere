@@ -24,10 +24,7 @@ from connector.runtimes.codex.ipc.framing import (
     IpcFrameError,
     encode_frame,
 )
-from connector.runtimes.codex.ipc.paths import (
-    ensure_ipc_directory,
-    is_supported_platform,
-)
+from connector.runtimes.codex.ipc.paths import ensure_ipc_directory
 from connector.runtimes.codex.ipc.router import IpcRouter
 from connector.runtimes.codex.ipc.versions import accepts_version, version_for
 
@@ -161,8 +158,12 @@ class CodexIpcClient:
 
         if self._task is not None:
             return
-        if not is_supported_platform():
-            logger.info("codex ipc client disabled: unsupported platform")
+        if sys.platform == "win32" and not hasattr(
+            asyncio.get_running_loop(), "create_pipe_connection"
+        ):
+            # Named pipes need the proactor loop (the default on Windows);
+            # a selector loop has no create_pipe_connection.
+            logger.info("codex ipc client disabled: windows named pipes need ProactorEventLoop")
             return
         self._stopped = False
         self._task = asyncio.create_task(self._run(), name="codex-ipc-client")
@@ -338,9 +339,12 @@ class CodexIpcClient:
         if await _can_connect(path):
             return path
         if not self.allow_router or sys.platform == "win32":
-            # On Windows several processes can create instances of the same
-            # named pipe, so a second router would split the clients; the App
-            # becomes the router itself when it starts.
+            # IpcRouter only implements the Unix socket; a named-pipe server is
+            # not written or verified yet, so on Windows we wait for the App or
+            # VS Code to become the router. The election itself would work:
+            # libuv and asyncio both create the first instance with
+            # FILE_FLAG_FIRST_PIPE_INSTANCE, so a second listener fails like
+            # EADDRINUSE does for the socket.
             raise IpcNotConnectedError(f"no ipc router at {path}")
         if self._router is None or not self._router.listening:
             router = IpcRouter()
