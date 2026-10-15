@@ -366,3 +366,44 @@ def test_thread_an_owner_announces_after_startup_is_followed_without_restart(tmp
         assert service._extra_candidates == set() and not service._wake.is_set()
 
     asyncio.run(scenario())
+
+
+def test_thread_aa_creates_is_announced_to_the_app_sidebar() -> None:
+    async def scenario() -> None:
+        owner, client, _, states, _ = _owner()
+
+        async def step(status: str, source: str) -> None:
+            state = await states.update(
+                session_id="sess_aa", external_session_id=THREAD, status=status,
+                metadata={"source": source},
+            )
+            owner.notify_state(state)
+            await asyncio.sleep(0.01)
+
+        await step("idle", "codex.thread/start")
+        await step("waiting", "codex.turn/start.requested")
+        await step("running", "codex.turn/started")
+        await step("idle", "codex.turn/completed")
+        await step("running", "codex.turn/started")
+        announced = [p for m, p in client.broadcasts if m == "thread-unarchived"]
+        # Once when the rollout exists, once more to pick up the title; never again.
+        assert announced == [{"hostId": "local", "conversationId": THREAD}] * 2
+
+    asyncio.run(scenario())
+
+
+def test_thread_aa_only_resumed_is_not_announced() -> None:
+    async def scenario() -> None:
+        owner, client, _, states, _ = _owner()
+        # A thread the user archived in the App must not reappear because AA
+        # resumed it: only threads AA started are announced.
+        for status, source in (("running", "codex.turn/started"), ("idle", "codex.turn/completed")):
+            state = await states.update(
+                session_id="sess_aa", external_session_id=THREAD, status=status,
+                metadata={"source": source},
+            )
+            owner.notify_state(state)
+            await asyncio.sleep(0.01)
+        assert [m for m, _ in client.broadcasts if m == "thread-unarchived"] == []
+
+    asyncio.run(scenario())

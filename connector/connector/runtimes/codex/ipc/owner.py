@@ -50,6 +50,7 @@ from connector.runtimes.codex.sessions.reader import thread_with_raw_turns
 
 DEFAULT_PUBLISH_DELAY = 0.3
 QUEUE_DRAIN_STATUSES = frozenset({"idle", "error"})
+NEW_THREAD_SOURCE = "codex.thread/start"
 STATE_VERSION_NOTE = "agents-anywhere-owner"
 
 FOLLOWER_METHODS = (
@@ -100,6 +101,11 @@ class CodexIpcOwnerService:
     # message once the thread is idle and broadcasts the remaining queue.
     queues: dict[str, list[dict[str, Any]]] = field(default_factory=dict, init=False)
     _draining: set[str] = field(default_factory=set, init=False)
+    # Threads AA's app-server created, mapped to the status they were last
+    # announced with. The App loads its thread list once at startup and only
+    # learns about its own new threads afterwards; a thread-unarchived
+    # broadcast makes it read the thread and add it to the sidebar.
+    _new_threads: dict[str, str | None] = field(default_factory=dict, init=False)
     _publish_handles: dict[str, asyncio.TimerHandle] = field(default_factory=dict, init=False)
     _publish_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
     _unsubscribe: list[Callable[[], None]] = field(default_factory=list, init=False)
@@ -173,6 +179,7 @@ class CodexIpcOwnerService:
     def notify_state(self, state: SessionState) -> None:
         if state.external_session_id:
             self.notify_thread(state.external_session_id)
+            self._track_new_thread(state)
             if state.status in QUEUE_DRAIN_STATUSES and self.queues.get(state.external_session_id):
                 task = asyncio.create_task(self._drain_queue(state.external_session_id))
                 self._publish_tasks.add(task)
@@ -411,6 +418,44 @@ class CodexIpcOwnerService:
             raise RuntimeError(f"unsupported follower request {method}")
         self.notify_thread(thread_id)
         return {"method": method, **result}
+
+    # -- threads AA created --------------------------------------------------
+
+    def _track_new_thread(self, state: SessionState) -> None:
+        """Show a thread AA created in the App sidebar without restarting the App.
+
+        The rollout exists once the first turn started, so the App can read the
+        thread then; a second announcement after that turn picks up its title.
+        """
+
+        thread_id = state.external_session_id
+        if thread_id is None:
+            return
+        if state.metadata.get("source") == NEW_THREAD_SOURCE:
+            self._new_threads.setdefault(thread_id, None)
+            return
+        announced = self._new_threads.get(thread_id, "absent")
+        if announced == "absent":
+            return
+        if state.status == "running" and announced is None:
+            self._new_threads[thread_id] = "running"
+        elif state.status in QUEUE_DRAIN_STATUSES and announced == "running":
+            self._new_threads.pop(thread_id, None)
+        else:
+            return
+        task = asyncio.create_task(self._announce_new_thread(thread_id, state.status))
+        self._publish_tasks.add(task)
+        task.add_done_callback(self._publish_tasks.discard)
+
+    async def _announce_new_thread(self, thread_id: str, status: str) -> None:
+        try:
+            await self.client.broadcast(
+                "thread-unarchived", {"hostId": self.host_id, "conversationId": thread_id}
+            )
+        except Exception as exc:  # noqa: BLE001 - the App still sees it after a restart
+            logger.warning("codex ipc new thread announce failed thread={} error={}", thread_id, exc)
+            return
+        logger.info("codex ipc new thread announced to codex app thread={} status={}", thread_id, status)
 
     # -- queued follow-ups ----------------------------------------------------
 
