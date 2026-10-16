@@ -6,6 +6,7 @@ import { useTranslations } from "next-intl"
 
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { shouldLoadRequestHistory } from "@/components/session/request-history-pagination"
 import { cn } from "@/lib/utils"
 import {
   hasOlderRequests,
@@ -37,29 +38,53 @@ export function TimelineRequestHistory({
   entries: TimelineRequestEntry[]
   activeId: string | null
   onSelect: (entry: TimelineRequestEntry) => void
-  onLoadMore?: () => void
+  onLoadMore?: () => Promise<boolean>
   canLoadMore?: boolean
   loadingMore?: boolean
 }) {
   const tSession = useTranslations("dashboard.session")
-  // Requests are listed newest first so the reader opens on the most recent
-  // turn instead of scrolling the transcript to find it. Older ones are
-  // revealed by scrolling this panel, never by scrolling the conversation.
+  const tCommon = useTranslations("common")
   const [visibleCount, setVisibleCount] = React.useState(REQUEST_HISTORY_PAGE_SIZE)
+  const [autoLoading, setAutoLoading] = React.useState(false)
+  const [loadFailed, setLoadFailed] = React.useState(false)
+  const inFlightRef = React.useRef(false)
+  const generationRef = React.useRef(0)
 
-  // Reset the window when the panel is reopened or the session's requests
-  // change identity, so a stale count cannot hide the newest entries.
   React.useEffect(() => {
-    if (!open) setVisibleCount(REQUEST_HISTORY_PAGE_SIZE)
+    if (!open) {
+      generationRef.current += 1
+      setVisibleCount(REQUEST_HISTORY_PAGE_SIZE)
+      setLoadFailed(false)
+    }
   }, [open])
 
+  // A page can contain only tool calls. Keep fetching until there are enough
+  // requests, not just until the first timeline page has arrived.
+  React.useEffect(() => {
+    if (!onLoadMore || inFlightRef.current || !shouldLoadRequestHistory({
+      open, entryCount: entries.length, visibleCount, hasMore: canLoadMore,
+      loading: loadingMore || autoLoading, failed: loadFailed,
+    })) return
+    inFlightRef.current = true
+    const generation = generationRef.current
+    setAutoLoading(true)
+    void Promise.resolve().then(onLoadMore).then((success) => {
+      if (generationRef.current === generation) setLoadFailed(!success)
+    }, () => {
+      if (generationRef.current === generation) setLoadFailed(true)
+    }).finally(() => {
+      inFlightRef.current = false
+      setAutoLoading(false)
+    })
+  }, [autoLoading, canLoadMore, entries.length, loadFailed, loadingMore, onLoadMore, open, visibleCount])
+
   const visible = requestHistoryWindow(entries, visibleCount)
-  const hasLocalOlder = hasOlderRequests(entries, visibleCount)
-  const hasOlder = hasLocalOlder || canLoadMore
-  const handleLoadMore = React.useCallback(() => {
-    setVisibleCount((current) => current + REQUEST_HISTORY_PAGE_SIZE)
-    if (!hasLocalOlder) onLoadMore?.()
-  }, [hasLocalOlder, onLoadMore])
+  const hasOlder = hasOlderRequests(entries, visibleCount) || canLoadMore
+  const busy = loadingMore || autoLoading
+  const handleLoadMore = () => {
+    if (loadFailed) setLoadFailed(false)
+    else setVisibleCount((current) => current + REQUEST_HISTORY_PAGE_SIZE)
+  }
 
   if (!open) return null
 
@@ -67,9 +92,9 @@ export function TimelineRequestHistory({
     <aside
       data-slot="timeline-request-history"
       aria-label={tSession("requestHistory.title")}
-      className="flex h-full w-64 min-w-0 shrink-0 flex-col overflow-hidden border-l border-border bg-background"
+      className="flex h-full w-64 min-w-0 shrink-0 flex-col overflow-hidden border-l border-border bg-background pt-14"
     >
-      <div className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-border pl-3 pr-2">
+      <div className="aa-window-no-drag flex h-11 shrink-0 items-center justify-between gap-2 border-b border-border pl-3 pr-2">
         <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">
           {tSession("requestHistory.title")}
         </span>
@@ -83,10 +108,10 @@ export function TimelineRequestHistory({
           <History className="size-4" />
         </Button>
       </div>
-      {entries.length === 0 ? (
-        <p className="px-3 py-4 text-xs text-muted-foreground">{tSession("requestHistory.empty")}</p>
-      ) : (
-        <ScrollArea className="min-h-0 flex-1">
+      <ScrollArea className="min-h-0 flex-1">
+          {entries.length === 0 && !busy && !hasOlder ? (
+            <p className="px-3 py-4 text-xs text-muted-foreground">{tSession("requestHistory.empty")}</p>
+          ) : null}
           <ul className="flex flex-col gap-0.5 p-1.5">
             {visible.map((entry) => (
               <li key={entry.id}>
@@ -113,24 +138,22 @@ export function TimelineRequestHistory({
               </li>
             ))}
           </ul>
-          {hasOlder ? (
+          {hasOlder || busy || loadFailed ? (
             <div className="p-2">
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 className="w-full"
-                disabled={loadingMore}
+                disabled={busy}
                 onClick={handleLoadMore}
               >
-                {loadingMore
-                  ? tSession("requestHistory.loading")
-                  : tSession("requestHistory.more")}
+                {busy ? tSession("requestHistory.loading")
+                  : loadFailed ? tCommon("retry") : tSession("requestHistory.more")}
               </Button>
             </div>
           ) : null}
-        </ScrollArea>
-      )}
+      </ScrollArea>
     </aside>
   )
 }

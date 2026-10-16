@@ -5,6 +5,7 @@ import pytest
 from connector.server.runtime_rpc_params import (
     CommandExecuteParams,
     RuntimeProjectCreateParams,
+    SessionQueueItemParams,
     runtime_attachments,
 )
 
@@ -103,3 +104,19 @@ def test_runtime_project_create_rejects_malformed_params(
     with pytest.raises((TypeError, ValueError)):
         RuntimeProjectCreateParams.parse(params)
 
+
+
+def test_queue_delete_params_do_not_require_edit_content() -> None:
+    parsed = SessionQueueItemParams.parse(
+        {"sessionId": "s", "itemId": "q1"}, require_content=False
+    )
+    assert parsed.item_id == "q1"
+    assert parsed.action == "edit"
+
+
+def test_queue_steer_params_are_content_free() -> None:
+    parsed = SessionQueueItemParams.parse(
+        {"sessionId": "s", "itemId": "q1", "action": {"kind": "steer"}}
+    )
+    assert parsed.action == "steer"
+    assert parsed.content is None

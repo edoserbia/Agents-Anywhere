@@ -413,13 +413,20 @@ class DshRuntime(AgentRuntime):
 
     async def update_session_queue(
         self, session_id: str, external_session_id: str | None,
-        item_id: str, content: str,
+        item_id: str, content: str | None = None, action: str = "edit",
     ) -> RuntimeOperationResult:
-        result = _object(await self._request("session.queue.update", {
+        if action not in {"edit", "steer"}:
+            raise ValueError(f"unsupported queue action: {action}")
+        request: dict[str, Any] = {
             **_session_params(session_id, external_session_id),
             "itemId": item_id,
-            "content": content,
-        }))
+            "action": {"kind": action},
+        }
+        if action == "edit":
+            if content is None:
+                raise ValueError("content is required for queue edit")
+            request["content"] = content
+        result = _object(await self._request("session.queue.update", request))
         return RuntimeOperationResult(
             ok=result.get("ok") is not False,
             code=result.get("code"), message=result.get("message"),

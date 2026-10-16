@@ -739,11 +739,15 @@ export type QueuedMessage = {
   position: number;
   status: string;
   content: string;
+  attachments?: AttachmentRef[];
   clientMessageId?: string | null;
   errorCode?: string | null;
   errorMessage?: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Native runtimes (for example DSH) identify their queue owner. */
+  runtime?: string | null;
+  placement?: string | null;
 };
 
 export type SessionQueueResponse = {

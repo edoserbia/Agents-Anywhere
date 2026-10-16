@@ -138,8 +138,13 @@ export class RuntimeRouter {
       case 'session.queue.update': {
         if (!this.reader.native) throw new BridgeError('UNSUPPORTED_OPERATION', 'Queue editing is unavailable.')
         const id = await this.resolve(params, signal)
-        if (typeof params.itemId !== 'string' || typeof params.content !== 'string') throw new BridgeError('INVALID_PARAMS', 'itemId and content are required.')
-        return this.reader.native.updateQueue(id, params.itemId, params.content, signal)
+        if (typeof params.itemId !== 'string') throw new BridgeError('INVALID_PARAMS', 'itemId is required.')
+        const rawAction = params.action && typeof params.action === 'object' ? params.action as { kind?: unknown } : undefined
+        if (rawAction?.kind === 'steer') {
+          return this.reader.native.updateQueue(id, params.itemId, { kind: 'steer' }, signal)
+        }
+        if (typeof params.content !== 'string') throw new BridgeError('INVALID_PARAMS', 'content is required for queue edits.')
+        return this.reader.native.updateQueue(id, params.itemId, { kind: 'edit', content: [{ type: 'text', text: params.content }] }, signal)
       }
       case 'session.queue.delete': {
         if (!this.reader.native) throw new BridgeError('UNSUPPORTED_OPERATION', 'Queue deletion is unavailable.')

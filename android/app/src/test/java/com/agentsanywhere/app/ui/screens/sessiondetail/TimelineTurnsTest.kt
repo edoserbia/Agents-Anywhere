@@ -2,8 +2,12 @@ package com.agentsanywhere.app.ui.screens.sessiondetail
 
 import com.agentsanywhere.app.feature.sessiondetail.MessageAuthor
 import com.agentsanywhere.app.feature.sessiondetail.TimelineMessage
+import com.agentsanywhere.app.feature.sessiondetail.TimelineOrderingItem
+import com.agentsanywhere.app.feature.sessiondetail.shouldLoadRequestHistory
+import com.agentsanywhere.app.feature.sessiondetail.timelinePageMadeProgress
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -305,4 +309,23 @@ class TimelineTurnsTest {
         assertEquals("", requestPreview(""))
         assertEquals("", requestPreview("   \n  "))
     }
+
+    @Test
+    fun historyLoadsUntilTenRequestsEvenWhenVisibleEntriesAreShort() {
+        assertTrue(shouldLoadRequestHistory(true, 0, 10, true, false, false))
+        assertTrue(shouldLoadRequestHistory(true, 9, 10, true, false, false))
+        assertFalse(shouldLoadRequestHistory(true, 10, 10, true, false, false))
+        assertTrue(shouldLoadRequestHistory(true, 10, 20, true, false, false))
+        assertFalse(shouldLoadRequestHistory(true, 20, 20, true, false, false))
+    }
+
+    @Test
+    fun historyPaginationStopsWhenPageDoesNotMoveOlder() {
+        val current = TimelineOrderingItem("current", 100, 1, 1)
+        val older = TimelineOrderingItem("older", 99, 1, 1)
+        assertFalse(timelinePageMadeProgress(emptyList(), 100))
+        assertFalse(timelinePageMadeProgress(listOf(current), 100))
+        assertTrue(timelinePageMadeProgress(listOf(older, current), 100))
+    }
+
 }

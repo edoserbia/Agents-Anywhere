@@ -358,20 +358,32 @@ class SessionQueueItemParams:
     external_session_id: str | None
     item_id: str
     content: str | None = None
+    action: str = "edit"
 
     @classmethod
-    def parse(cls, params: dict[str, Any]) -> "SessionQueueItemParams":
+    def parse(
+        cls, params: dict[str, Any], *, require_content: bool = True,
+    ) -> SessionQueueItemParams:
         item_id = params.get("itemId")
         if not isinstance(item_id, str) or not item_id:
             raise ValueError("itemId is required")
         content = params.get("content")
         if content is not None and not isinstance(content, str):
             raise TypeError("content must be a string")
+        raw_action = params.get("action")
+        action = raw_action.get("kind") if isinstance(raw_action, dict) else raw_action
+        if action is None:
+            action = "edit"
+        if action not in {"edit", "steer"}:
+            raise ValueError("action must be edit or steer")
+        if require_content and action == "edit" and content is None:
+            raise ValueError("content is required for queue edit")
         return cls(
             session_id=required_session_id(params),
             external_session_id=optional_string(params.get("externalSessionId")),
             item_id=item_id,
             content=content,
+            action=action,
         )
 
 

@@ -229,7 +229,8 @@ class AgentRuntime(ABC):
         session_id: str,
         external_session_id: str | None,
         item_id: str,
-        content: str,
+        content: str | None = None,
+        action: str = "edit",
     ) -> RuntimeOperationResult:
         raise RuntimeUnsupportedError("session.queue.update")
 

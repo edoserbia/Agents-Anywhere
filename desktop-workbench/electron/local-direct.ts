@@ -139,6 +139,15 @@ export class LocalDirect {
           return null;
         }
         const body = (await request.clone().json()) as Record<string, unknown>;
+        // Queue admission belongs to the Server. If this flag is present, a
+        // local direct send would bypass the Server queue and let the runtime
+        // own a message that the other clients cannot see or edit. Fall back
+        // so the Server can route it to the native queue (DSH) or its durable
+        // compatibility queue.
+        if (body.queueWhenBusy === true) {
+          this.note("queueing requested; falling back to Server", sessionId);
+          return null;
+        }
         if (typeof body?.content !== "string") return null;
         params.content = body.content;
         // No id, no local write: a retry of a send without one cannot be told

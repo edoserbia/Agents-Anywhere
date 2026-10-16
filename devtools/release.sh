@@ -2,7 +2,7 @@
 #
 # Cut a client release end to end.
 #
-# A release touches six version locations, two installers and a download page
+# A release updates every MAJOR.MINOR client version, installers and download page
 # on the server. Doing that by hand is how the page ends up advertising the
 # previous build, so the whole sequence lives here:
 #
@@ -64,7 +64,7 @@ if [[ "$SKIP_BUILD" -eq 1 ]]; then
   fi
   echo "==> publish only: tree stays at $VERSION (versionCode $current_code)"
 else
-echo "==> bumping version in all five locations"
+echo "==> bumping all platform versions and Android versionCode"
 python3 - "$VERSION" "$current_code" "$next_code" <<'PY'
 import io, re, sys
 version, current_code, next_code = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -75,6 +75,18 @@ edits = [
      r'^version = "[0-9.]+"', f'version = "{version}"'),
     ("desktop-workbench/package.json",
      r'"version": "[0-9.]+"', f'"version": "{version}"'),
+    ("desktop-workbench/renderer/package.json",
+     r'"version": "[0-9.]+"', f'"version": "{version}"'),
+    ("web-next/package.json",
+     r'"version": "[0-9.]+"', f'"version": "{version}"'),
+    ("web-next/src/lib/demo-api.ts",
+     r'version: "[0-9.]+"', f'version: "{version}"'),
+    ("dsh-bridge-next/package.json",
+     r'"version": "[0-9.]+"', f'"version": "{version}"'),
+    ("ios/Agents Anywhere/Agents Anywhere.xcodeproj/project.pbxproj",
+     r'MARKETING_VERSION = [0-9.]+;', f'MARKETING_VERSION = {version};'),
+    ("ios/Agents Anywhere/Agents Anywhere.xcodeproj/project.pbxproj",
+     r'MARKETING_VERSION = [0-9.]+;', f'MARKETING_VERSION = {version};'),
     # The Connector ships as its own installable package, so its version is what
     # `uv tool list` and the desktop app's bundled copy report. Leaving it out
     # made two very different Connectors both claim 0.1.7.2, which is how a

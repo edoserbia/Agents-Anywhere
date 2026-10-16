@@ -2039,6 +2039,7 @@ fun SessionDetailScreen(
                                 entries = requestEntries,
                                 canLoadMore = state.hasMore,
                                 loadingMore = state.timeline.loadingOlder,
+                                historyErrorMessage = state.timeline.historyErrorMessage,
                                 onLoadMore = ::loadOlderMessages,
                                 onSelect = { entry ->
                                     showRequestHistory = false

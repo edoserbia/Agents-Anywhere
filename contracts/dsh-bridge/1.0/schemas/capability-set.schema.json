@@ -13,7 +13,7 @@
         "type": "object",
         "required": ["capabilityId", "scope", "runtime", "supported", "available", "allowed"],
         "properties": {
-          "capabilityId": { "enum": ["session.send_message", "session.interrupt", "session.steer", "session.interaction.approval", "runtime.config", "catalog.model", "catalog.permission", "catalog.effort", "session.commands"] },
+          "capabilityId": { "enum": ["session.send_message", "session.queue", "session.interrupt", "session.steer", "session.interaction.approval", "runtime.config", "catalog.model", "catalog.permission", "catalog.effort", "session.commands"] },
           "scope": { "enum": ["runtime", "session"] },
           "runtime": { "const": "dsh" },
           "supported": { "type": "boolean" },

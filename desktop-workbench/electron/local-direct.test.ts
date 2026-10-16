@@ -54,6 +54,23 @@ test("a route this does not serve falls back", async () => {
   assert.equal(await local.handle(request, url(request)), null);
 });
 
+test("a queueing send always falls back so the Server owns admission", async () => {
+  let called = false
+  const local = make({
+    callLocal: async () => {
+      called = true
+      return { queued: true }
+    },
+  })
+  const request = new Request(`${SERVER}/api/v2/sessions/sess_1/runtime/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content: "hello", clientMessageId: "cm_queue", queueWhenBusy: true }),
+    headers: { "content-type": "application/json" },
+  })
+  assert.equal(await local.handle(request, url(request)), null)
+  assert.equal(called, false, "a local send must not bypass the queue endpoint")
+})
+
 test("a send the Connector accepts is answered locally, in the Server's shape", async () => {
   const seen: Array<[string, Record<string, unknown>]> = [];
   const local = make({

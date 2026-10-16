@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { MessageId } from '@deepseek-ai/dsh-llm/brand'
-import type { SessionPromptRequest } from '@deepseek-ai/dsh-api-session-controller'
+import type { QueueAction, SessionPromptRequest } from '@deepseek-ai/dsh-api-session-controller'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionRecord } from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-workspace'
@@ -342,14 +342,14 @@ export class NativeRuntime {
     }
   }
 
-  async updateQueue(id: SessionId, itemId: string, content: string, signal: AbortSignal) {
+  async updateQueue(id: SessionId, itemId: string, action: QueueAction, signal: AbortSignal) {
     return this.write(id, signal, async () => {
       await this.source.requireAvailable(id)
       const agent = await this.configuration.agent(id)
       this.configuration.controller().updateQueue({
         sessionId: id,
         itemId: MessageId(itemId),
-        action: { kind: 'edit', content: [{ type: 'text', text: content }] },
+        action,
       })
       await this.ctx.sessions.flush(agent.session)
       return { accepted: true, itemId }

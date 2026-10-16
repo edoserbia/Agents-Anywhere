@@ -870,12 +870,26 @@ class SessionDetailController(
             currentMessages = current.messages,
             orderingItems = orderingItems,
         )
+        val beforeOrderSeq = current.timeline.orderingItems
+            .minOfOrNull { it.orderSeq }
+            ?: current.messages.filterNot { it.optimistic }.minOfOrNull { it.orderSeq }
+        val madeProgress = beforeOrderSeq == null || timelinePageMadeProgress(
+            older.orderingItems + older.messages.map { message ->
+                TimelineOrderingItem(
+                    id = message.sourceItemId,
+                    orderSeq = message.orderSeq,
+                    revision = message.revision,
+                    updatedSeq = message.updatedSeq,
+                )
+            },
+            beforeOrderSeq,
+        )
         return current.copy(
             timeline = current.timeline.copy(
                 messages = messages,
                 orderingItems = orderingItems,
                 nextSeq = max(current.nextSeq, older.nextSeq),
-                hasMore = older.hasMore,
+                hasMore = older.hasMore && madeProgress,
                 loadingOlder = false,
                 historyErrorMessage = null,
             ),

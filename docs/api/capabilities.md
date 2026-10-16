@@ -42,6 +42,7 @@ Examples:
 
 ```text
 session.send_message
+session.queue
 session.steer
 session.interrupt
 session.selection.update

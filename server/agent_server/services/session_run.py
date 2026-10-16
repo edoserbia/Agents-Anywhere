@@ -14,6 +14,7 @@ from agent_server.core.capabilities import (
     CATALOG_PERMISSION,
     RUNTIME_ATTACHMENT,
     SESSION_INTERRUPT,
+    SESSION_QUEUE,
     SESSION_SEND_MESSAGE,
     SESSION_STEER,
     capability_unavailable_detail,
@@ -433,6 +434,8 @@ class SessionRunService:
                 SESSION_SEND_MESSAGE,
                 user_id=user_id,
             )
+            if await self._native_queue_available(session, user_id=user_id):
+                return await self._queue_runtime_message(session, payload, user_id=user_id)
             return await self._enqueue_message(session, payload, user_id=user_id)
         # The live read is a runtime's own opinion of itself, and a runtime can
         # be wrong about it: DSH reports idle while its turn is still running.
@@ -452,6 +455,8 @@ class SessionRunService:
                     SESSION_SEND_MESSAGE,
                     user_id=user_id,
                 )
+                if await self._native_queue_available(session, user_id=user_id):
+                    return await self._queue_runtime_message(session, payload, user_id=user_id)
                 return await self._enqueue_message(session, payload, user_id=user_id)
             raise SessionRunConflictError(f"session is {runtime_status}")
         await self._require_session_capability(
@@ -969,8 +974,10 @@ class SessionRunService:
             return
 
     async def list_queue(self, session_id: str, *, user_id: str) -> list[dict[str, Any]]:
-        await self._require_session(session_id, user_id=user_id)
-        return [item.to_payload() for item in await self._message_queue.list(session_id)]
+        session = await self._require_session(session_id, user_id=user_id)
+        native_items = await self._list_native_queue(session, user_id=user_id)
+        server_items = [item.to_payload() for item in await self._message_queue.list(session_id)]
+        return _merge_queue_items(native_items or [], server_items)
 
     async def update_queue_item(
         self,
@@ -980,9 +987,34 @@ class SessionRunService:
         *,
         user_id: str,
     ) -> dict[str, Any]:
-        await self._require_session(session_id, user_id=user_id)
+        session = await self._require_session(session_id, user_id=user_id)
         if payload.content is None:
             raise SessionRunConflictError("queue content is required")
+        native_items = await self._list_native_queue(session, user_id=user_id)
+        if native_items is not None and any(item.get("id") == item_id for item in native_items):
+            if payload.attachments:
+                raise SessionRunConflictError("native queue attachments cannot be edited")
+            await self._require_session_capability(
+                session, SESSION_QUEUE, user_id=user_id,
+            )
+            await self._ensure_session_runtime_running(session, user_id=user_id)
+            try:
+                await self._manager.request(
+                    session.connectorId,
+                    "session.queue.update",
+                    {
+                        **self._runtime_session_params(session),
+                        "itemId": item_id,
+                        "content": payload.content,
+                    },
+                )
+            except ConnectorOfflineError as exc:
+                raise SessionRunConflictError(str(exc)) from exc
+            except ConnectorRpcError as exc:
+                raise SessionRunUpstreamError(exc.message or exc.code) from exc
+            refreshed = await self._list_native_queue(session, user_id=user_id) or []
+            return _runtime_queue_item(refreshed, session.id, item_id, content=payload.content)
+
         try:
             item = await self._message_queue.update(
                 session_id=session_id,
@@ -1005,7 +1037,25 @@ class SessionRunService:
         *,
         user_id: str,
     ) -> dict[str, Any]:
-        await self._require_session(session_id, user_id=user_id)
+        session = await self._require_session(session_id, user_id=user_id)
+        native_items = await self._list_native_queue(session, user_id=user_id)
+        if native_items is not None and any(item.get("id") == item_id for item in native_items):
+            await self._require_session_capability(
+                session, SESSION_QUEUE, user_id=user_id,
+            )
+            await self._ensure_session_runtime_running(session, user_id=user_id)
+            try:
+                await self._manager.request(
+                    session.connectorId,
+                    "session.queue.delete",
+                    {**self._runtime_session_params(session), "itemId": item_id},
+                )
+            except ConnectorOfflineError as exc:
+                raise SessionRunConflictError(str(exc)) from exc
+            except ConnectorRpcError as exc:
+                raise SessionRunUpstreamError(exc.message or exc.code) from exc
+            return _runtime_queue_item(native_items, session.id, item_id, removed=True)
+
         try:
             item = await self._message_queue.remove(
                 session_id=session_id,
@@ -1026,6 +1076,29 @@ class SessionRunService:
         session = await self._require_session(session_id, user_id=user_id)
         if not session.takeover:
             raise SessionRunConflictError("session is read-only until takeover is enabled")
+        native_items = await self._list_native_queue(session, user_id=user_id)
+        if native_items is not None and any(item.get("id") == item_id for item in native_items):
+            await self._require_session_capability(
+                session, SESSION_QUEUE, user_id=user_id,
+            )
+            await self._ensure_session_runtime_running(session, user_id=user_id)
+            try:
+                await self._manager.request(
+                    session.connectorId,
+                    "session.queue.update",
+                    {
+                        **self._runtime_session_params(session),
+                        "itemId": item_id,
+                        "action": {"kind": "steer"},
+                    },
+                )
+            except ConnectorOfflineError as exc:
+                raise SessionRunConflictError(str(exc)) from exc
+            except ConnectorRpcError as exc:
+                raise SessionRunUpstreamError(exc.message or exc.code) from exc
+            refreshed = await self._list_native_queue(session, user_id=user_id) or []
+            server_items = [item.to_payload() for item in await self._message_queue.list(session_id)]
+            return _merge_queue_items(refreshed, server_items)
         await self._require_session_capability(
             session, SESSION_SEND_MESSAGE, user_id=user_id,
         )
@@ -1043,6 +1116,103 @@ class SessionRunService:
             await self.interrupt_session(session_id, user_id=user_id)
         await self._dispatch_enqueued(session_id)
         return [item.to_payload() for item in await self._message_queue.list(session_id)]
+
+    async def _native_queue_available(
+        self, session: SessionView, *, user_id: str,
+    ) -> bool:
+        """Whether this runtime exposes an authoritative editable queue.
+
+        Queue support is a capability, not a provider-name special case. Older
+        bridges that predate the capability simply fall back to the durable
+        Agents Anywhere queue.
+        """
+        _ = user_id
+        try:
+            capability_set = await read_session_capability_facts(
+                self._manager, session, runtime_id=_session_runtime_id(session),
+            )
+        except (ConnectorOfflineError, ConnectorRpcError, TimeoutError, ValueError):
+            return False
+        online_session = session.model_copy(update={"connectorStatus": "online"})
+        effective = derive_session_effective_capabilities(
+            session=online_session, runtime_capabilities=capability_set,
+        )
+        capability = next(
+            (item for item in effective.capabilities if item.capabilityId == SESSION_QUEUE),
+            None,
+        )
+        return bool(
+            capability
+            and capability.supported
+            and capability.available
+            and capability.allowed
+        )
+
+    async def _list_native_queue(
+        self, session: SessionView, *, user_id: str,
+    ) -> list[dict[str, Any]] | None:
+        if not await self._native_queue_available(session, user_id=user_id):
+            return None
+        await self._ensure_session_runtime_running(session, user_id=user_id)
+        try:
+            result = await self._manager.request(
+                session.connectorId,
+                "session.queue.list",
+                self._runtime_session_params(session),
+            )
+        except ConnectorOfflineError as exc:
+            raise SessionRunConflictError(str(exc)) from exc
+        except ConnectorRpcError as exc:
+            if exc.code == "runtime_unsupported":
+                return None
+            raise SessionRunUpstreamError(exc.message or exc.code) from exc
+        return _runtime_queue_items(result, session.id)
+
+    async def _queue_runtime_message(
+        self,
+        session: SessionView,
+        payload: MessageCreateRequest,
+        *,
+        user_id: str,
+    ) -> RpcResponsePayload:
+        """Submit a busy-session message to the runtime's native queue."""
+        params = self._runtime_session_params(session)
+        params["content"] = payload.content
+        if payload.clientMessageId:
+            params["clientMessageId"] = payload.clientMessageId
+        if session.cwd:
+            params["cwd"] = session.cwd
+        if payload.attachments:
+            attachment_payloads = await self._attachment_payloads(
+                session_id=session.id,
+                user_id=user_id,
+                file_ids=[attachment.fileId for attachment in payload.attachments],
+            )
+            await self._require_session_capability(
+                session,
+                RUNTIME_ATTACHMENT,
+                user_id=user_id,
+                attachment_media_types=[item["mediaType"] for item in attachment_payloads],
+            )
+            params["attachments"] = attachment_payloads
+            params["timelineAttachments"] = [
+                _timeline_attachment_payload(item) for item in attachment_payloads
+            ]
+        try:
+            result = await self._manager.request(session.connectorId, "session.queue", params)
+        except ConnectorOfflineError as exc:
+            raise SessionRunConflictError(str(exc)) from exc
+        except ConnectorRpcError as exc:
+            raise SessionRunUpstreamError(exc.message or exc.code) from exc
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise SessionRunConflictError({
+                "code": result.get("code") or "runtime_queue_failed",
+                "message": result.get("message") or "runtime queue rejected the message",
+            })
+        return RpcResponsePayload(
+            ok=True,
+            result={**(result if isinstance(result, dict) else {}), "queued": True},
+        )
 
     @staticmethod
     def _runtime_session_params(session: SessionView) -> dict[str, Any]:
@@ -1210,6 +1380,84 @@ def _session_source_error_detail(session: SessionView) -> dict[str, str]:
 
 def _selections_from_mapping(value: dict[str, str | None]) -> dict[str, str]:
     return {key: item for key, item in value.items() if isinstance(item, str) and item}
+
+
+def _runtime_queue_item(
+    items: list[dict[str, Any]],
+    session_id: str,
+    item_id: str,
+    *,
+    content: str | None = None,
+    removed: bool = False,
+) -> dict[str, Any]:
+    for item in items:
+        if str(item.get("id")) == item_id:
+            return item
+    now = utc_now()
+    return {
+        "id": item_id,
+        "sessionId": session_id,
+        "position": 0,
+        "status": "removed" if removed else "queued",
+        "content": content or "",
+        "attachments": [],
+        "clientMessageId": None,
+        "errorCode": None,
+        "errorMessage": None,
+        "createdAt": now,
+        "updatedAt": now,
+        "runtime": "native",
+        "placement": "queued",
+    }
+
+
+def _runtime_queue_items(result: Any, session_id: str) -> list[dict[str, Any]]:
+    raw_items = result.get("items", []) if isinstance(result, dict) else []
+    runtime = result.get("runtime") if isinstance(result, dict) else None
+    if not isinstance(raw_items, list):
+        return []
+    now = utc_now()
+    items: list[dict[str, Any]] = []
+    for position, raw in enumerate(raw_items):
+        if not isinstance(raw, dict):
+            continue
+        content = raw.get("content")
+        items.append({
+            "id": str(raw.get("id") or ""),
+            "sessionId": session_id,
+            "position": int(raw.get("position", position)),
+            "status": str(raw.get("status") or "queued"),
+            "content": content if isinstance(content, str) else "",
+            "attachments": raw.get("attachments") if isinstance(raw.get("attachments"), list) else [],
+            "clientMessageId": raw.get("clientMessageId") if isinstance(raw.get("clientMessageId"), str) else None,
+            "errorCode": raw.get("errorCode") if isinstance(raw.get("errorCode"), str) else None,
+            "errorMessage": raw.get("errorMessage") if isinstance(raw.get("errorMessage"), str) else None,
+            "createdAt": str(raw.get("createdAt") or now),
+            "updatedAt": str(raw.get("updatedAt") or now),
+            "runtime": raw.get("runtime") or runtime or "native",
+            "placement": raw.get("placement") or "queued",
+        })
+    return items
+
+
+def _merge_queue_items(
+    native_items: list[dict[str, Any]],
+    server_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Expose both queue owners without duplicating a retried client message."""
+    merged: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_client_ids: set[str] = set()
+    for item in [*native_items, *server_items]:
+        item_id = str(item.get("id") or "")
+        client_id = item.get("clientMessageId")
+        if item_id in seen_ids or (isinstance(client_id, str) and client_id in seen_client_ids):
+            continue
+        seen_ids.add(item_id)
+        if isinstance(client_id, str):
+            seen_client_ids.add(client_id)
+        merged.append({**item, "position": len(merged)})
+    return merged
 
 
 def _request_runtime_id(

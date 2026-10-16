@@ -10,11 +10,11 @@ from connector.server.runtime_rpc_params import (
     SessionCommandsParams,
     SessionCreateParams,
     SessionInterruptParams,
+    SessionQueueItemParams,
+    SessionReadParams,
     SessionSelectionUpdateParams,
     TurnStartParams,
     TurnSteerParams,
-    SessionReadParams,
-    SessionQueueItemParams,
 )
 from connector.server.runtime_rpc_payloads import (
     command_result_payload,
@@ -116,10 +116,8 @@ async def dispatch_session_queue_update(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     parsed = SessionQueueItemParams.parse(params)
-    if parsed.content is None:
-        raise ValueError("content is required")
     return operation_result_payload(await runtime.update_session_queue(
-        parsed.session_id, parsed.external_session_id, parsed.item_id, parsed.content
+        parsed.session_id, parsed.external_session_id, parsed.item_id, parsed.content, parsed.action
     ))
 
 
@@ -127,7 +125,7 @@ async def dispatch_session_queue_delete(
     runtime: AgentRuntime,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    parsed = SessionQueueItemParams.parse(params)
+    parsed = SessionQueueItemParams.parse(params, require_content=False)
     return operation_result_payload(await runtime.delete_session_queue(
         parsed.session_id, parsed.external_session_id, parsed.item_id
     ))

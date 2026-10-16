@@ -84,6 +84,7 @@ import {
   preserveOptimisticItems,
   timelineClientMessageId,
 } from "@/components/session/optimistic-timeline"
+import { timelinePageMadeProgress } from "@/components/session/request-history-pagination"
 import { nextTimelineResetVersion } from "@/components/session/session-review-history"
 import { buildTurnReviewDisplay, type SessionReviewTarget } from "@/components/session/session-review-model"
 import { SessionReviewCard } from "@/components/session/session-review-card"
@@ -368,6 +369,13 @@ export function SessionDetail({
   const [resolvingActionId, setResolvingActionId] = React.useState<string | null>(null)
   const [showScrollBottom, setShowScrollBottom] = React.useState(false)
   const [loadingOlder, setLoadingOlder] = React.useState(false)
+  const [olderLoadFailed, setOlderLoadFailed] = React.useState(false)
+  const olderRequestScopeRef = React.useRef({ sessionId, resetVersion: state?.timelineResetVersion })
+  if (olderRequestScopeRef.current.sessionId !== sessionId ||
+      olderRequestScopeRef.current.resetVersion !== state?.timelineResetVersion) {
+    olderRequestScopeRef.current = { sessionId, resetVersion: state?.timelineResetVersion }
+  }
+  React.useEffect(() => { setOlderLoadFailed(false) }, [sessionId, state?.timelineResetVersion])
   const [pendingTakeover, setPendingTakeover] = React.useState<boolean | null>(null)
   const interactionTakeoverRef = React.useRef<{
     sessionId: string
@@ -811,9 +819,13 @@ export function SessionDetail({
   }, [])
 
   const loadOlderTimeline = React.useCallback(async () => {
-    if (loadingOlderRef.current || loadingOlder || !state?.hasMore) return
+    if (loadingOlderRef.current || loadingOlder || !state?.hasMore) return true
     const oldestItem = state.items[0]
-    if (!oldestItem) return
+    if (!oldestItem) {
+      setState((current) => current ? { ...current, hasMore: false } : current)
+      return true
+    }
+    const scope = olderRequestScopeRef.current
 
     const viewport = timelineRef.current
     const previousScrollHeight = viewport?.scrollHeight ?? 0
@@ -821,6 +833,7 @@ export function SessionDetail({
 
     loadingOlderRef.current = true
     setLoadingOlder(true)
+    setOlderLoadFailed(false)
     try {
       const older = await dashboardApi.getSessionTimelineBefore(
         token,
@@ -828,9 +841,11 @@ export function SessionDetail({
         oldestItem.orderSeq,
         TIMELINE_PAGE_LIMIT,
       )
+      if (olderRequestScopeRef.current !== scope) return true
+      const hasMore = older.hasMore && timelinePageMadeProgress(older.items, oldestItem.orderSeq)
       setState((current) => {
-        if (!current) return current
-        if (older.items.length === 0) return { ...current, hasMore: older.hasMore, serverTime: older.serverTime }
+        if (!current || current.session.id !== sessionId || current.timelineResetVersion !== scope.resetVersion) return current
+        if (older.items.length === 0) return { ...current, hasMore, serverTime: older.serverTime }
         const items = mergeTimelineItems(older.items, current.items)
         pendingPrependScrollRestoreRef.current = {
           scrollHeight: previousScrollHeight,
@@ -839,13 +854,17 @@ export function SessionDetail({
         return {
           ...current,
           items,
-          hasMore: older.hasMore,
+          hasMore,
           nextSeq: Math.max(current.nextSeq, older.nextSeq),
           serverTime: older.serverTime,
         }
       })
+      return true
     } catch (err) {
+      if (olderRequestScopeRef.current !== scope) return true
+      setOlderLoadFailed(true)
       toast.error(err instanceof Error ? err.message : tSession("loadFailed"))
+      return false
     } finally {
       loadingOlderRef.current = false
       setLoadingOlder(false)
@@ -862,10 +881,10 @@ export function SessionDetail({
   // A first page that does not fill the viewport cannot be scrolled, so the
   // scroll handler above never fires. Pull older pages until it can scroll.
   React.useEffect(() => {
-    if (loading || loadingOlder || !state?.hasMore) return
+    if (loading || loadingOlder || olderLoadFailed || !state?.hasMore) return
     if (!needsOlderTimelinePage(timelineRef.current, state.hasMore)) return
     void loadOlderTimeline()
-  }, [loadOlderTimeline, loading, loadingOlder, state])
+  }, [loadOlderTimeline, loading, loadingOlder, olderLoadFailed, state])
 
   React.useEffect(() => {
     initialScrollDoneRef.current = false
@@ -1624,12 +1643,12 @@ export function SessionDetail({
   const scrollToBottom = React.useCallback(() => {
     pruneAfterScrollCleanupRef.current?.()
     const viewport = timelineRef.current
-    const shouldPrune = (state?.items.length ?? 0) > INITIAL_TIMELINE_LIMIT
+    const shouldPrune = !requestHistoryOpen && (state?.items.length ?? 0) > INITIAL_TIMELINE_LIMIT
     if (!viewport) {
       if (shouldPrune) {
         setState((current) =>
           current && current.items.length > INITIAL_TIMELINE_LIMIT
-            ? { ...current, items: current.items.slice(-INITIAL_TIMELINE_LIMIT) }
+            ? { ...current, items: current.items.slice(-INITIAL_TIMELINE_LIMIT), hasMore: true }
             : current,
         )
       }
@@ -1646,7 +1665,7 @@ export function SessionDetail({
       if (!timelineFollowRef.current?.isFollowing() || distanceFromBottom() > SCROLL_TO_BOTTOM_PRUNE_DISTANCE) return false
       setState((current) =>
         current && current.items.length > INITIAL_TIMELINE_LIMIT
-          ? { ...current, items: current.items.slice(-INITIAL_TIMELINE_LIMIT) }
+          ? { ...current, items: current.items.slice(-INITIAL_TIMELINE_LIMIT), hasMore: true }
           : current,
       )
       return true
@@ -1692,7 +1711,7 @@ export function SessionDetail({
       scheduleCheck()
     }
     timelineFollowRef.current?.resume("smooth")
-  }, [distanceFromBottom, state?.items.length, updateScrollBottomState])
+  }, [distanceFromBottom, requestHistoryOpen, state?.items.length, updateScrollBottomState])
 
   const interactions = React.useMemo(
     () => openInteractions(state?.notices ?? [], session?.id ?? sessionId),
@@ -2008,6 +2027,7 @@ export function SessionDetail({
         ) : null}
 
         <TimelineRequestHistory
+          key={`${sessionId}:${state?.timelineResetVersion ?? 0}`}
           open={requestHistoryOpen}
           onOpenChange={setRequestHistoryOpen}
           entries={requestEntries}

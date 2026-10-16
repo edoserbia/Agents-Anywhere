@@ -10,7 +10,8 @@ import { cn } from "@/lib/utils"
 import type { QueuedMessage } from "@/features/dashboard"
 
 /**
- * Messages Agents Anywhere is holding until the current turn finishes.
+ * Messages waiting in the Agents Anywhere/runtime queue until the current
+ * turn finishes.
  *
  * Shown directly above the composer so a message accepted during a run is
  * visibly held rather than looking lost. A pending row can be edited or

@@ -2,11 +2,10 @@
 
 A session runs one turn at a time. Sending a message while a turn is running
 used to be rejected, so the message was simply lost. The queue accepts it,
-holds it durably, and dispatches it when the current turn finishes.
-
-This applies to every runtime (Codex, Claude, DSH). Messages submitted while a
-turn is running wait in this server queue even when the runtime supports
-mid-turn steering; the queue is only dispatched after the current turn ends.
+holds it durably, and dispatches it when the current turn finishes. Runtimes
+with an authoritative native queue (currently DSH) own the queued item; other
+runtimes use the durable Agents Anywhere fallback queue. The client API exposes
+both through one queue view.
 
 ## Queue behavior
 
@@ -92,9 +91,10 @@ An empty message (no text and no attachment) is rejected with
 
 ## Dispatch
 
-Dispatch is triggered by the observation that a turn ended: the connector's
-runtime-status notification puts the session into `idle` or `error`, and the
-server then hands the queue head to the runtime through the ordinary send path.
+For the Agents Anywhere fallback, dispatch is triggered by the observation
+that a turn ended: the connector's runtime-status notification puts the session
+into `idle` or `error`, and the server then hands the queue head to the runtime
+through the ordinary send path. Native queues are dispatched by the runtime.
 
 Properties the implementation guarantees:
 
@@ -114,7 +114,8 @@ pipeline that observed the status change.
 
 ## Storage
 
-`session_message_queue` (migration `v2_36`):
+`session_message_queue` (migration `v2_36`) is the compatibility fallback
+for runtimes without a native queue:
 
 | Column | Notes |
 | --- | --- |

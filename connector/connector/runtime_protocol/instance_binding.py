@@ -725,10 +725,11 @@ class RuntimeInstance(AgentRuntime):
         session_id: str,
         external_session_id: str | None,
         item_id: str,
-        content: str,
+        content: str | None = None,
+        action: str = "edit",
     ) -> RuntimeOperationResult:
         return await self.native_runtime.update_session_queue(
-            session_id, external_session_id, item_id, content
+            session_id, external_session_id, item_id, content, action
         )
 
     async def delete_session_queue(

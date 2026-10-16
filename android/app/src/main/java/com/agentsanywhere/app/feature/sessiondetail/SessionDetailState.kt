@@ -118,7 +118,8 @@ internal fun SessionDetailState.failSnapshotLoad(message: String?): SessionDetai
 /**
  * Messages waiting in the Agents Anywhere queue.
  *
- * The server owns pending items and dispatches one when the current turn ends.
+ * Pending items are exposed through Agents Anywhere whether the server
+ * compatibility queue or a runtime-native queue owns them.
  */
 data class SessionMessageQueue(
     val items: List<QueuedMessage> = emptyList(),
