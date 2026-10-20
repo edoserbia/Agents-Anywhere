@@ -177,10 +177,10 @@ class StartingSdk:
         return CodexTurnResult(turn_id=f"turn-{len(self.started)}", payload={})
 
 
-def _owner():
+def _owner(sdk: Any = None):
     host = FakeHost()
     states = RuntimeSessionStateCache("codex", host)
-    client, sdk = RecordingClient(), StartingSdk()
+    client, sdk = RecordingClient(), sdk or StartingSdk()
     active: dict[str, str] = {}
     owner = CodexIpcOwnerService(
         client=client,  # type: ignore[arg-type]
@@ -366,6 +366,85 @@ def test_thread_an_owner_announces_after_startup_is_followed_without_restart(tmp
         assert service._extra_candidates == set() and not service._wake.is_set()
 
     asyncio.run(scenario())
+
+
+def test_failed_queue_send_is_retried_until_the_owner_accepts(monkeypatch) -> None:
+    from connector.runtimes.codex.ipc import owner as owner_module
+
+    class FlakySdk:
+        def __init__(self) -> None:
+            self.started: list[Any] = []
+            self.failures = 1
+
+        async def start_turn(self, request):
+            self.started.append(request)
+            if self.failures:
+                self.failures -= 1
+                raise RuntimeError("owner not ready")
+            return CodexTurnResult(turn_id="turn-retry", payload={})
+
+    monkeypatch.setattr(owner_module, "QUEUE_RETRY_DELAYS", (0.01,))
+
+    async def scenario() -> None:
+        sdk = FlakySdk()
+        owner, _client, _, states, _active = _owner(sdk)
+        await states.update(session_id="sess_aa", external_session_id=THREAD, status="idle")
+        await owner._handle_follower(
+            _queue_request(
+                "thread-follower-set-queued-follow-ups-state",
+                state={THREAD: [_message("m1", "收到")]},
+                discardedMessageIds=[],
+            )
+        )
+        # The first delivery failed; the message stays queued and a timer retries
+        # it without waiting for another state event.
+        assert [r.client_message_id for r in sdk.started] == ["m1"]
+        assert owner.queues[THREAD] == [_message("m1", "收到")]
+        for _ in range(100):
+            if len(sdk.started) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert [r.client_message_id for r in sdk.started] == ["m1", "m1"]
+        assert owner.queues == {}
+
+    asyncio.run(scenario())
+
+
+def test_queue_skips_messages_without_text() -> None:
+    async def scenario() -> None:
+        owner, _client, sdk, states, _ = _owner()
+        await states.update(session_id="sess_aa", external_session_id=THREAD, status="idle")
+        await owner._handle_follower(
+            _queue_request(
+                "thread-follower-set-queued-follow-ups-state",
+                state={THREAD: [{"id": "bad", "text": ""}, _message("m2", "有效")]},
+                discardedMessageIds=[],
+            )
+        )
+        assert [r.client_message_id for r in sdk.started] == ["m2"]
+        assert owner.queues == {}
+
+    asyncio.run(scenario())
+
+
+def test_switching_back_to_workspace_write_ignores_empty_writable_roots() -> None:
+    from connector.runtimes.codex.ipc.control import thread_settings_with_overrides
+
+    settings = thread_settings_with_overrides(
+        {
+            "cwd": "/repo",
+            "latestThreadSettings": {"sandboxPolicy": {"type": "dangerFullAccess"}},
+            "currentPermissions": {
+                "sandboxPolicy": {"type": "workspaceWrite", "writableRoots": []},
+            },
+        },
+        model=None,
+        effort=None,
+        approval_policy="on-request",
+        approvals_reviewer=None,
+        sandbox="workspace-write",
+    )
+    assert settings["sandboxPolicy"]["writableRoots"] == ["/repo"]
 
 
 def test_thread_aa_creates_is_announced_to_the_app_sidebar() -> None:

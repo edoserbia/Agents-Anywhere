@@ -597,11 +597,14 @@ async def open_ipc_connection(
     from connector.runtimes.codex.ipc.paths import WINDOWS_PIPE_PATH
 
     loop = asyncio.get_running_loop()
+    connect = getattr(loop, "create_pipe_connection", None)
+    if connect is None:
+        # A selector loop cannot open a named pipe; report it as an OSError so
+        # callers treat it like any other unreachable router.
+        raise OSError("Windows named pipes require a ProactorEventLoop")
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
-    transport, _ = await loop.create_pipe_connection(  # type: ignore[attr-defined]
-        lambda: protocol, WINDOWS_PIPE_PATH
-    )
+    transport, _ = await connect(lambda: protocol, WINDOWS_PIPE_PATH)
     return reader, asyncio.StreamWriter(transport, protocol, reader, loop)
 
 

@@ -50,6 +50,9 @@ from connector.runtimes.codex.sessions.reader import thread_with_raw_turns
 
 DEFAULT_PUBLISH_DELAY = 0.3
 QUEUE_DRAIN_STATUSES = frozenset({"idle", "error"})
+# A failed queued follow-up stays queued; retry without waiting for another
+# state event (the App may never send one while it is unresponsive).
+QUEUE_RETRY_DELAYS = (2.0, 5.0, 15.0, 30.0)
 NEW_THREAD_SOURCE = "codex.thread/start"
 STATE_VERSION_NOTE = "agents-anywhere-owner"
 
@@ -101,6 +104,8 @@ class CodexIpcOwnerService:
     # message once the thread is idle and broadcasts the remaining queue.
     queues: dict[str, list[dict[str, Any]]] = field(default_factory=dict, init=False)
     _draining: set[str] = field(default_factory=set, init=False)
+    _queue_retries: dict[str, asyncio.TimerHandle] = field(default_factory=dict, init=False)
+    _queue_failures: dict[str, int] = field(default_factory=dict, init=False)
     # Threads AA's app-server created, mapped to the status they were last
     # announced with. The App loads its thread list once at startup and only
     # learns about its own new threads afterwards; a thread-unarchived
@@ -150,6 +155,12 @@ class CodexIpcOwnerService:
         for task in list(self._publish_tasks):
             task.cancel()
         self._publish_tasks.clear()
+        for handle in self._queue_retries.values():
+            handle.cancel()
+        self._queue_retries.clear()
+        self._queue_failures.clear()
+        self._draining.clear()
+        self.queues.clear()
         self.followers.clear()
         self._attached = False
 
@@ -396,10 +407,15 @@ class CodexIpcOwnerService:
             state = params.get("state")
             messages = state.get(thread_id) if isinstance(state, Mapping) else None
             discarded = params.get("discardedMessageIds")
+            discarded_ids = (
+                {item for item in discarded if isinstance(item, str)}
+                if isinstance(discarded, list)
+                else set()
+            )
             await self._accept_queue(
                 thread_id,
                 messages if isinstance(messages, list) else [],
-                set(discarded) if isinstance(discarded, list) else set(),
+                discarded_ids,
             )
             result = {"ok": True}
         elif method == "thread-follower-remove-queued-message":
@@ -471,6 +487,9 @@ class CodexIpcOwnerService:
             and isinstance(message.get("id"), str)
             and message["id"] not in discarded
         ]
+        # A new hand-off is a fresh user action: retry immediately instead of
+        # inheriting the backoff from a previous failure.
+        self._queue_failures.pop(thread_id, None)
         await self._set_queue(thread_id, kept)
         logger.info(
             "codex ipc owner queue accepted thread={} messages={} discarded={}",
@@ -485,6 +504,8 @@ class CodexIpcOwnerService:
             self.queues[thread_id] = messages
         else:
             self.queues.pop(thread_id, None)
+            self._cancel_queue_retry(thread_id)
+            self._queue_failures.pop(thread_id, None)
         try:
             await self.client.broadcast(
                 "thread-queued-followups-changed",
@@ -505,17 +526,28 @@ class CodexIpcOwnerService:
 
         if thread_id in self._draining:
             return
-        queue = self.queues.get(thread_id)
-        if not queue or not self._thread_idle(thread_id) or queue[0].get("pausedReason"):
-            return
-        self._draining.add(thread_id)
-        message = queue[0]
-        try:
+        self._cancel_queue_retry(thread_id)
+        while True:
+            queue = self.queues.get(thread_id)
+            if not queue or not self._thread_idle(thread_id) or queue[0].get("pausedReason"):
+                return
+            message = queue[0]
             text = message.get("text")
+            if isinstance(text, str) and text.strip():
+                break
+            # A malformed entry must not block the rest of the queue forever.
+            logger.warning(
+                "codex ipc owner queued follow-up has no text thread={} message={}",
+                thread_id,
+                message["id"],
+            )
+            await self._set_queue(thread_id, queue[1:])
+        self._draining.add(thread_id)
+        try:
             result = await self.sdk.start_turn(
                 CodexStartTurnRequest(
                     thread_id=thread_id,
-                    content=text if isinstance(text, str) else "",
+                    content=text,
                     client_message_id=message["id"],
                 )
             )
@@ -526,9 +558,11 @@ class CodexIpcOwnerService:
                 message["id"],
                 exc,
             )
+            self._schedule_queue_retry(thread_id)
             return
         finally:
             self._draining.discard(thread_id)
+        self._queue_failures.pop(thread_id, None)
         remaining = [item for item in self.queues.get(thread_id, []) if item.get("id") != message["id"]]
         await self._set_queue(thread_id, remaining)
         self.notify_thread(thread_id)
@@ -539,6 +573,29 @@ class CodexIpcOwnerService:
             result.turn_id,
             len(remaining),
         )
+
+    def _cancel_queue_retry(self, thread_id: str) -> None:
+        handle = self._queue_retries.pop(thread_id, None)
+        if handle is not None:
+            handle.cancel()
+
+    def _schedule_queue_retry(self, thread_id: str) -> None:
+        if thread_id in self._queue_retries:
+            return
+        failures = self._queue_failures.get(thread_id, 0)
+        delay = QUEUE_RETRY_DELAYS[min(failures, len(QUEUE_RETRY_DELAYS) - 1)]
+        self._queue_failures[thread_id] = failures + 1
+        loop = asyncio.get_running_loop()
+        self._queue_retries[thread_id] = loop.call_later(delay, self._retry_queue, thread_id)
+
+    def _retry_queue(self, thread_id: str) -> None:
+        self._queue_retries.pop(thread_id, None)
+        if not self.queues.get(thread_id):
+            self._queue_failures.pop(thread_id, None)
+            return
+        task = asyncio.create_task(self._drain_queue(thread_id))
+        self._publish_tasks.add(task)
+        task.add_done_callback(self._publish_tasks.discard)
 
     async def _start_turn(self, thread_id: str, params: Mapping[str, Any]) -> dict[str, Any]:
         turn_start = params.get("turnStart")

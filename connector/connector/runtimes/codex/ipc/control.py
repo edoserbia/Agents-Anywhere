@@ -835,8 +835,10 @@ def _writable_roots(policy: Any) -> list[str] | None:
     if not isinstance(policy, Mapping) or policy.get("type") != "workspaceWrite":
         return None
     roots = policy.get("writableRoots")
-    if isinstance(roots, list) and all(isinstance(root, str) for root in roots):
+    if isinstance(roots, list) and roots and all(isinstance(root, str) for root in roots):
         return list(roots)
+    # An empty list is not a useful policy: the App's workspace-write view
+    # iterates writableRoots, so fall back to the workspace roots instead.
     return None
 
 
