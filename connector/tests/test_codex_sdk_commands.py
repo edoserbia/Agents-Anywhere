@@ -531,3 +531,34 @@ def test_stop_and_disconnect_invalidate_native_writer_and_turn_ownership(
             assert client._threads == {} and client._turns == {}
 
     asyncio.run(run())
+
+
+def test_cached_thread_recovers_after_real_stdio_process_exits(tmp_path):
+    async def run():
+        async with fixture(tmp_path) as (client, wire, _):
+            await client.start_thread(CodexStartThreadRequest())
+            replacements = []
+
+            def factory():
+                native = AsyncCodex(CodexConfig(launch_args_override=(
+                    sys.executable, "-u", str(tmp_path / "app_server.py"), str(tmp_path),
+                )))
+                replacements.append(native)
+                return native
+
+            client._client_factory = factory
+            # The probe is sent to the already-loaded thread. The server
+            # process exits here, as if the stdio owner died while asleep.
+            wire.configure(disconnect=["thread/read"])
+            result = await client.start_turn(CodexStartTurnRequest(
+                thread_id="thread", content="continue after wake", client_message_id="wake-message",
+            ))
+            assert result.turn_id == "ordinary"
+            assert len(replacements) == 1
+            assert client._client is replacements[0]
+            assert len(wire.calls("thread/read")) == 1
+            assert len(wire.calls("thread/resume")) == 1
+            assert len(wire.calls("turn/start")) == 1
+            assert wire.calls("turn/start")[0]["clientUserMessageId"] == "wake-message"
+
+    asyncio.run(run())

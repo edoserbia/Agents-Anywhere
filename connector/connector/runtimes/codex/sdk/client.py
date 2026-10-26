@@ -29,7 +29,7 @@ from openai_codex.generated.v2_all import (
     UserInput,
     WorkspaceWriteSandboxPolicy,
 )
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 from connector.logging import logger
 from connector.runtime_protocol import (
@@ -520,7 +520,9 @@ class CodexSdkClient:
         return CodexThreadTurnsPage(turns=tuple(page.data), next_cursor=page.next_cursor)
 
     async def start_thread(self, request: CodexStartThreadRequest) -> CodexThreadResult:
-        await ensure_codex_initialized(self._client)
+        # Initializing does not create a thread, so it is safe to retry. The
+        # actual thread/start below must not be replayed on a lost response.
+        await self.call_read_with_recovery("initialize", ensure_codex_initialized)
         low_level_client = codex_low_level_client(self._client)
         if low_level_client is not None:
             generation = self._generation
@@ -568,20 +570,38 @@ class CodexSdkClient:
         return CodexThreadResult(thread_id=thread_id, payload=payload)
 
     async def start_turn(self, request: CodexStartTurnRequest) -> CodexTurnResult:
-        await ensure_codex_initialized(self._client)
-        low_level_client = codex_low_level_client(self._client)
+        low_level_client = await self.prepare_thread_for_write(
+            CodexResumeThreadRequest(
+                thread_id=request.thread_id,
+                model=request.model,
+                approval_policy=request.approval_policy,
+                approvals_reviewer=request.approvals_reviewer,
+                sandbox=request.sandbox,
+            )
+        )
         if low_level_client is not None:
-            await self.ensure_thread_resumed_for_turn(low_level_client, request)
             # Recovery may swap the router mid-call; finish on the one we began.
             notifications = self._command_notifications
             if notifications:
                 notifications.begin_turn(request.thread_id)
             turn_id = None
+            failed_client = self._client
             try:
                 started = await self.start_low_level_turn_with_resume_retry(
                     low_level_client, request
                 )
                 turn_id = id_of(started.turn)
+            except Exception as exc:
+                if is_codex_transport_closed_error(exc):
+                    # turn/start may have reached Codex before the response was
+                    # lost. Repair the connection for subsequent commands, but
+                    # never replay this potentially accepted user message.
+                    await self.recover_transport(
+                        operation="turn/start",
+                        failed_client=failed_client,
+                        error=exc,
+                    )
+                raise
             finally:
                 if notifications:
                     notifications.finish_turn(request.thread_id, turn_id)
@@ -657,20 +677,47 @@ class CodexSdkClient:
         return CodexTurnResult(turn_id=id_of(turn), payload=payload)
 
     async def compact_thread(self, thread_id: str) -> CodexCompactResult:
-        await ensure_codex_initialized(self._client)
-        # compact() only acknowledges scheduling; its turn has no SDK stream.
-        # Observe before resume/start so even notifications preceding the ACK
-        # reach the timeline instead of an unconsumed SDK turn queue.
-        self._observe_command_thread(thread_id)
-        low_level_client = codex_low_level_client(self._client)
-        if low_level_client is not None:
-            await self.ensure_thread_resumed(
-                low_level_client,
-                CodexResumeThreadRequest(thread_id=thread_id),
-            )
+        await self.prepare_thread_for_write(
+            CodexResumeThreadRequest(thread_id=thread_id), observe_command=True
+        )
         thread = self._thread_handle(thread_id)
         result = await thread.compact()
         return CodexCompactResult(payload=compact_result(result))
+
+    async def prepare_thread_for_write(
+        self,
+        request: CodexResumeThreadRequest,
+        *,
+        observe_command: bool = False,
+    ) -> Any | None:
+        """Recover only the safe preparation, before sending a user operation.
+
+        SDK initialization is cached, as is our loaded-thread set. Neither is
+        proof that an app-server survived sleep or a broken pipe. Probe cached
+        threads with a metadata-only read; otherwise thread/resume itself probes
+        the transport. Retrying these steps cannot duplicate a turn. Return the
+        low-level client from the successful attempt, not a pre-recovery handle.
+        """
+
+        async def prepare(client: Any) -> Any | None:
+            await ensure_codex_initialized(client)
+            low_level = codex_low_level_client(client)
+            if low_level is not None:
+                read = getattr(low_level, "request", None)
+                if request.thread_id in self._loaded_thread_ids and callable(read):
+                    await read(
+                        "thread/read",
+                        {"threadId": request.thread_id, "includeTurns": False},
+                        response_model=RootModel[dict[str, Any]],
+                    )
+                # Recovery clears the old command router, so observe on every
+                # attempt, before resume notifications can arrive.
+                if observe_command:
+                    self._observe_command_thread(request.thread_id)
+                await self.ensure_thread_resumed(low_level, request)
+            return low_level
+
+        return await self.call_read_with_recovery("thread/resume.prepare", prepare)
 
     async def ensure_thread_resumed(
         self,

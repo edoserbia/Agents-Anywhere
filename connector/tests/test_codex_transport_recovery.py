@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -9,6 +10,7 @@ from test_codex_runtime import FakeHost, _config, _input_request_notification
 
 from connector.runtimes.codex.runtime import CodexRuntime
 from connector.runtimes.codex.sdk.client import CodexSdkClient
+from connector.runtimes.codex.sdk.runtime_client import CodexStartTurnRequest
 
 
 class NativeReadClient:
@@ -31,6 +33,56 @@ class NativeReadClient:
         return {"data": []}
 
 
+class NativeWriteLowLevel:
+    def __init__(self, *, closed: bool = False, fail_turn: bool = False) -> None:
+        self.closed = closed
+        self.fail_turn = fail_turn
+        self.resumes: list[str] = []
+        self.reads: list[str] = []
+        self.turns: list[Any] = []
+
+    async def thread_start(self, params: Any) -> Any:
+        raise AssertionError("recovery must not create a new thread")
+
+    async def thread_resume(self, thread_id: str, params: Any) -> Any:
+        self.resumes.append(thread_id)
+        if self.closed:
+            raise BrokenPipeError(32, "fake app-server transport closed")
+        return SimpleNamespace(thread=SimpleNamespace(id=thread_id))
+
+    async def request(self, method: str, params: dict[str, Any], **kwargs: Any) -> Any:
+        assert method == "thread/read" and params["includeTurns"] is False
+        self.reads.append(params["threadId"])
+        if self.closed:
+            raise BrokenPipeError(32, "fake app-server transport closed")
+        return SimpleNamespace(thread={"id": params["threadId"]})
+
+    async def turn_start(self, thread_id: str, content: Any, *, params: Any) -> Any:
+        self.turns.append(params)
+        if self.fail_turn or self.closed:
+            raise BrokenPipeError(32, "fake response lost after turn/start")
+        return SimpleNamespace(turn=SimpleNamespace(id=f"turn_{len(self.turns)}"))
+
+
+class NativeWriteClient:
+    def __init__(self, *, closed: bool = False, fail_initialize: bool = False,
+                 fail_turn: bool = False) -> None:
+        self._client = NativeWriteLowLevel(closed=closed, fail_turn=fail_turn)
+        self.fail_initialize = fail_initialize
+        self.started = False
+        self.stopped = False
+
+    async def _ensure_initialized(self) -> None:
+        if self.fail_initialize:
+            raise BrokenPipeError(32, "fake initialize transport closed")
+
+    async def start(self, handler: Any) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
 class LiveTurn:
     id = "turn_1"
 
@@ -49,6 +101,87 @@ class LiveTurn:
         }
         self.terminal_delivered.set()
         await self.hold.wait()
+
+
+@pytest.mark.parametrize("stage", ["initialize", "resume", "cached_thread"])
+def test_send_recovers_before_turn_start(stage: str) -> None:
+    async def run() -> None:
+        failed = NativeWriteClient(closed=True, fail_initialize=stage == "initialize")
+        replacement = NativeWriteClient()
+        client = CodexSdkClient(failed, client_factory=lambda: replacement)
+        if stage == "cached_thread":
+            client._loaded_thread_ids.update({"thread_1", "thread_stale"})
+        await client.start(lambda _message: asyncio.sleep(0))
+        try:
+            result = await client.start_turn(CodexStartTurnRequest(
+                thread_id="thread_1", content="continue", client_message_id="message_1"
+            ))
+            assert result.turn_id == "turn_1"
+            assert failed.stopped is True
+            assert replacement.started is True
+            assert failed._client.turns == []
+            assert len(replacement._client.turns) == 1
+            assert replacement._client.turns[0].client_user_message_id == "message_1"
+            assert replacement._client.resumes == ["thread_1"]
+            assert client._loaded_thread_ids == {"thread_1"}
+            if stage == "cached_thread":
+                assert failed._client.reads == ["thread_1"]
+        finally:
+            await client.stop()
+
+    asyncio.run(run())
+
+
+def test_uncertain_turn_start_is_not_replayed_but_next_send_works() -> None:
+    async def run() -> None:
+        failed = NativeWriteClient(fail_turn=True)
+        replacement = NativeWriteClient()
+        client = CodexSdkClient(failed, client_factory=lambda: replacement)
+        await client.start(lambda _message: asyncio.sleep(0))
+        try:
+            with pytest.raises(BrokenPipeError):
+                await client.start_turn(CodexStartTurnRequest(
+                    thread_id="thread_1", content="possibly delivered",
+                    client_message_id="message_uncertain",
+                ))
+            assert len(failed._client.turns) == 1
+            assert replacement._client.turns == []
+            assert failed.stopped and replacement.started
+
+            result = await client.start_turn(CodexStartTurnRequest(
+                thread_id="thread_1", content="explicit next send", client_message_id="message_next"
+            ))
+            assert result.turn_id == "turn_1"
+            assert len(replacement._client.turns) == 1
+            assert replacement._client.turns[0].client_user_message_id == "message_next"
+        finally:
+            await client.stop()
+
+    asyncio.run(run())
+
+
+def test_failed_replacement_resume_is_bounded() -> None:
+    async def run() -> None:
+        failed = NativeWriteClient(closed=True)
+        replacement = NativeWriteClient(closed=True)
+        created: list[NativeWriteClient] = []
+
+        def factory() -> NativeWriteClient:
+            created.append(replacement)
+            return replacement
+
+        client = CodexSdkClient(failed, client_factory=factory)
+        await client.start(lambda _message: asyncio.sleep(0))
+        try:
+            with pytest.raises(BrokenPipeError):
+                await client.start_turn(CodexStartTurnRequest(thread_id="thread_1", content="continue"))
+            assert len(created) == 1
+            assert failed._client.turns == replacement._client.turns == []
+            assert failed._client.resumes == replacement._client.resumes == ["thread_1"]
+        finally:
+            await client.stop()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("is_blocking", [False, True])
@@ -406,6 +539,45 @@ def test_failed_replacement_read_is_not_retried_again() -> None:
                 await client.list_threads(limit=1)
             assert failed.reads == replacement.reads == 1
             assert replacements == [replacement]
+        finally:
+            await client.stop()
+
+    asyncio.run(run())
+
+
+def test_concurrent_sends_share_one_transport_replacement() -> None:
+    async def run() -> None:
+        failed = NativeWriteClient(closed=True)
+        replacement = NativeWriteClient()
+        created: list[NativeWriteClient] = []
+        both_resuming = asyncio.Event()
+        attempts = 0
+
+        async def fail_resume(thread_id: str, params: Any) -> Any:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 2:
+                both_resuming.set()
+            await both_resuming.wait()
+            raise BrokenPipeError(32, "concurrent stale connection")
+
+        def factory() -> NativeWriteClient:
+            created.append(replacement)
+            return replacement
+
+        failed._client.thread_resume = fail_resume  # type: ignore[method-assign]
+        client = CodexSdkClient(failed, client_factory=factory)
+        await client.start(lambda _message: asyncio.sleep(0))
+        try:
+            async with asyncio.timeout(2):
+                results = await asyncio.gather(*(
+                    client.start_turn(CodexStartTurnRequest(thread_id=thread, content="continue"))
+                    for thread in ("thread_a", "thread_b")
+                ))
+            assert len(created) == 1
+            assert len(results) == len(replacement._client.turns) == 2
+            assert set(replacement._client.resumes) == {"thread_a", "thread_b"}
+            assert failed._client.turns == []
         finally:
             await client.stop()
 
