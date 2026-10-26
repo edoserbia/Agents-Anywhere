@@ -228,9 +228,18 @@ def test_projector_publishes_selections_from_owner_settings() -> None:
         }
 
         # The window switches model: only latestThreadSettings patches arrive.
-        changed = _state(latestModel="gpt-5.5", latestReasoningEffort="medium")
+        changed = _state(
+            latestThreadSettings={
+                **_state()["latestThreadSettings"],
+                "model": "gpt-5.5",
+                "effort": "medium",
+            },
+        )
         thread = FollowedThread(thread_id=THREAD, status="following", owner_client_id="owner-1", revision=2, state=changed)
-        await projector.handle(FollowerEvent(kind="patches", thread=thread, patches=({"op": "replace", "path": ["latestThreadSettings", "model"], "value": "gpt-5.5"},)))
+        await projector.handle(FollowerEvent(kind="patches", thread=thread, patches=(
+            {"op": "replace", "path": ["latestThreadSettings", "model"], "value": "gpt-5.5"},
+            {"op": "replace", "path": ["latestThreadSettings", "effort"], "value": "medium"},
+        )))
         assert host.states[-1]["selections"]["model"] == _selection("gpt-5.5", "medium")
 
     asyncio.run(run())

@@ -53,10 +53,10 @@ from connector.runtimes.codex.ipc import (
     CodexIpcSessionProjector,
     CodexIpcTurnController,
     FollowedThread,
+    desktop_app,
     thread_snapshot_from_conversation_state,
 )
 from connector.runtimes.codex.ipc import deeplink as ipc_deeplink
-from connector.runtimes.codex.ipc import desktop_app
 from connector.runtimes.codex.lifecycle.runtime_lifecycle import CodexRuntimeLifecycle
 from connector.runtimes.codex.notifications import CodexNotificationProjector
 from connector.runtimes.codex.notifications.projector import notification_event

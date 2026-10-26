@@ -237,4 +237,3 @@ def test_runtime_probes_owner_before_sdk_path_when_thread_is_held() -> None:
         assert follower2.follow_calls == []
 
     asyncio.run(run())
-

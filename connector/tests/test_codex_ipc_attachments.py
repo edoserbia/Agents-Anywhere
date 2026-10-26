@@ -201,4 +201,3 @@ def test_owner_turns_local_images_into_sdk_attachments() -> None:
         assert [(a.name, a.path, a.media_type) for a in sent.attachments] == [("shot.png", "/tmp/pics/shot.png", "image/png")]
 
     asyncio.run(run())
-
