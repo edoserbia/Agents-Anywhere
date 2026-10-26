@@ -681,6 +681,14 @@
           "label": "Use System Codex",
           "description": "Use the Codex executable from your login shell PATH. If it is unavailable, the bundled Codex is used automatically. Turn this off to always use the bundled Codex."
         },
+        "ipcEnabled": {
+          "label": "Follow Codex App / IDE sessions (IPC)",
+          "description": "Join the Codex desktop app / IDE extension IPC router so threads open in a Codex window are followed and operated through that window. Turn this off to always run threads in the connector's own Codex app-server."
+        },
+        "ipcDeeplinkHandoff": {
+          "label": "Hand locked threads to the Codex App",
+          "description": "When a thread is locked by the running Codex desktop app but no window shows it, open it in the app (codex://threads/…) so the app becomes the owner the connector follows. Only used while IPC is on."
+        },
         "modelGatewayBaseUrl": {
           "label": "Gateway URL",
           "description": "The HTTP or HTTPS base URL exposed by your model gateway."
