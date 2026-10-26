@@ -54,6 +54,7 @@ class RuntimeSupervisor:
         self._locks: dict[str, asyncio.Lock] = {}
         self._entries_guard = asyncio.Lock()
         self._resource_lock = asyncio.Lock()
+        self._closing = False
 
     @property
     def runtimes(self) -> tuple[str, ...]:
@@ -231,6 +232,8 @@ class RuntimeSupervisor:
         values: Mapping[str, Any],
         revision: int | None,
     ) -> AgentRuntime:
+        if self._closing:
+            raise RuntimeUnavailableError("runtime supervisor is shutting down")
         entry = self._entry(instance.runtime_id)
         requested_values = dict(values)
         if (
@@ -332,22 +335,29 @@ class RuntimeSupervisor:
                 native_runtime=native_runtime,
             )
             await bound_runtime.start()
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
+            # A disconnected RPC cancels its runtime.start task. Cancellation is
+            # not an Exception: without this branch a half-started app-server
+            # survives without an entry and can hold writer locks indefinitely.
             cleanup_error = await self._stop_runtime_after_failed_start(
                 entry.provider,
                 native_runtime,
             )
             retained_runtime = bound_runtime or native_runtime
             cleanup_failed = cleanup_error is not None and retained_runtime is not None
-            await self._set_entry(
-                instance.runtime_id,
-                runtime=retained_runtime if cleanup_failed else None,
-                requested_values=requested_values if cleanup_failed else None,
-                resource_claims=claims if cleanup_failed else (),
-                status="error",
-                config=config,
-                error=error_payload(cleanup_error or exc),
-            )
+            cancelled = isinstance(exc, asyncio.CancelledError)
+            try:
+                await self._set_entry(
+                    instance.runtime_id,
+                    runtime=retained_runtime if cleanup_failed else None,
+                    requested_values=requested_values if cleanup_failed else None,
+                    resource_claims=claims if cleanup_failed else (),
+                    status="stopped" if cancelled and not cleanup_failed else "error",
+                    config=config,
+                    error=None if cancelled and not cleanup_failed else error_payload(cleanup_error or exc),
+                )
+            except Exception:  # noqa: BLE001 - retain the original error/cancellation offline
+                logger.exception("runtime startup cleanup status publish failed runtime_id={}", instance.runtime_id)
             raise
 
         startup_complete = True
@@ -367,6 +377,23 @@ class RuntimeSupervisor:
         lock = self._locks[runtime_id]
         async with lock, self._resource_lock:
             await self._stop_locked(runtime_id)
+
+    async def shutdown(self) -> None:
+        """Release native runtimes before this supervisor is discarded.
+
+        This is a Connector lifetime boundary, not a WebSocket reconnect. Do
+        not leave app-servers holding thread writer locks after a local Stop /
+        Start creates a new supervisor in the same Python process. Status
+        publishing is disabled: the backend may already be disconnected and a
+        failed notification must never prevent releasing a native process.
+        """
+
+        self._closing = True
+        for runtime_id in tuple(self._entries):
+            try:
+                await self.stop(runtime_id)
+            except Exception:  # noqa: BLE001 - one failed provider must not skip the rest
+                logger.exception("runtime shutdown failed runtime_id={}", runtime_id)
 
     def _ensure_running_capacity(
         self, instance: RuntimeInstanceSpec, provider: RuntimeProvider
@@ -519,7 +546,7 @@ class RuntimeSupervisor:
             status=next_status,
             error=entry.error if error is MISSING else error,  # type: ignore[arg-type]
         )
-        if status is not None and self._status_sink is not None:
+        if status is not None and self._status_sink is not None and not self._closing:
             await self._status_sink(
                 runtime_id,
                 next_status,

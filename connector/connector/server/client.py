@@ -220,8 +220,20 @@ class BackendRpcClient:
             for task in relay_tasks:
                 task.cancel()
             await asyncio.gather(*relay_tasks, return_exceptions=True)
+            # End local dispatch and scanning before releasing runtime owners.
+            # A Stop/Start reuses this Python process but creates a new client;
+            # without this teardown the discarded client's Codex app-servers
+            # keep their writer locks and the next client conflicts with itself.
+            await self._stop_local_endpoint()
             if self._runtime_sync_task is not None:
                 self._runtime_sync_task.cancel()
+                await asyncio.gather(self._runtime_sync_task, return_exceptions=True)
+                self._runtime_sync_task = None
+            background_tasks = tuple(self._background_tasks)
+            for task in background_tasks:
+                task.cancel()
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+            await self.agent_runtime_supervisor.shutdown()
             try:
                 async with asyncio.timeout(2):
                     await self._timeline_notifications.close()
@@ -233,25 +245,18 @@ class BackendRpcClient:
                 await self._timeline_notifications.abort()
             ingest_flush_task.cancel()
             sync_state_flush_task.cancel()
-            if self._runtime_sync_task is not None:
-                self._runtime_sync_task.cancel()
             try:
                 await ingest_flush_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception as exc:  # noqa: BLE001 - finish cleanup after a failed worker
+                logger.warning("connector ingest worker stopped during shutdown error={}", exc)
             with suppress(asyncio.CancelledError):
                 await sync_state_flush_task
-            if self._runtime_sync_task is not None:
-                try:
-                    await self._runtime_sync_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-                self._runtime_sync_task = None
             try:
                 await self._flush_sync_state()
             except Exception:  # noqa: BLE001
                 logger.exception("final sync state flush failed")
-            await self._stop_local_endpoint()
             if self._http_client is not None:
                 await self._http_client.aclose()
                 self._http_client = None
@@ -319,7 +324,7 @@ class BackendRpcClient:
             )
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 - discovery failures must not stop the RPC loop
             logger.exception(
                 "runtime capability discovery failed; connector RPC remains available"
             )
@@ -531,7 +536,7 @@ class BackendRpcClient:
             task.result()
         except asyncio.CancelledError:
             pass
-        except Exception:
+        except Exception:  # noqa: BLE001 - observe failures from detached background work
             logger.exception("connector background task failed")
 
     async def _start_local_endpoint(self) -> None:
