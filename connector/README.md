@@ -152,7 +152,11 @@ locked by the desktop app but no window shows it, the connector opens
 own app-server. Both IPC following (`ipcEnabled`) and the deep-link handoff
 (`ipcDeeplinkHandoff`) are switches in the Codex runtime config; the IPC
 router is scanned once at start and afterwards only on window activity. See
-[Codex IPC takeover](../docs/codex-ipc-takeover.md). If Claude Code is not on
+[Codex IPC takeover](../docs/codex-ipc-takeover.md). Connector shutdown releases
+native runtimes and writer locks; cancelled runtime startup is cleaned up as well.
+A closed transport is recovered once during safe pre-send preparation, never by
+blindly replaying a possibly accepted turn. See [session recovery](../docs/codex-session-recovery.md).
+If Claude Code is not on
 `PATH`, set:
 
 ```bash
