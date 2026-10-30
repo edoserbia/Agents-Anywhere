@@ -13,6 +13,11 @@
 # artifacts that were not uploaded.
 set -euo pipefail
 
+# Yarn 4.6 rejects the host's npmMinimalAgeGate policy setting ("Unrecognized
+# or legacy configuration setting"). It is not a project setting, and leaving
+# it in the environment makes every release fail at the first `yarn install`.
+unset YARN_NPM_MINIMAL_AGE_GATE pnpm_config_minimum_release_age
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
@@ -83,10 +88,6 @@ edits = [
      r'version: "[0-9.]+"', f'version: "{version}"'),
     ("dsh-bridge-next/package.json",
      r'"version": "[0-9.]+"', f'"version": "{version}"'),
-    ("ios/Agents Anywhere/Agents Anywhere.xcodeproj/project.pbxproj",
-     r'MARKETING_VERSION = [0-9.]+;', f'MARKETING_VERSION = {version};'),
-    ("ios/Agents Anywhere/Agents Anywhere.xcodeproj/project.pbxproj",
-     r'MARKETING_VERSION = [0-9.]+;', f'MARKETING_VERSION = {version};'),
     # The Connector ships as its own installable package, so its version is what
     # `uv tool list` and the desktop app's bundled copy report. Leaving it out
     # made two very different Connectors both claim 0.1.7.2, which is how a
@@ -106,6 +107,18 @@ for path, pattern, replacement in edits:
     if count != 1:
         raise SystemExit(f"could not bump {path}: pattern {pattern!r} matched {count} times")
     io.open(path, "w", encoding="utf-8").write(updated)
+
+# Debug and Release configurations each carry a MARKETING_VERSION, and they
+# can drift (the Release target was still on an older value). Bump every one,
+# not just the first, so the shipped archive cannot claim a stale version.
+ios_project = "ios/Agents Anywhere/Agents Anywhere.xcodeproj/project.pbxproj"
+text = io.open(ios_project, encoding="utf-8").read()
+updated, count = re.subn(
+    r'MARKETING_VERSION = [0-9.]+;', f'MARKETING_VERSION = {version};', text
+)
+if count == 0:
+    raise SystemExit(f"could not bump {ios_project}: no MARKETING_VERSION found")
+io.open(ios_project, "w", encoding="utf-8").write(updated)
 print(f"   versionCode {current_code} -> {next_code}")
 PY
 fi
@@ -151,12 +164,27 @@ for artifact in "$APK" "$DMG" "$WIN" "$LINUX" "$DEB" "$CLI"; do
 done
 
 echo "==> uploading artifacts to $REMOTE:$DOWNLOAD_DIR"
-scp -q "$APK" "$REMOTE:$DOWNLOAD_DIR/agents-anywhere-${VERSION}-debug.apk"
-scp -q "$DMG" "$REMOTE:$DOWNLOAD_DIR/Agents Anywhere-${VERSION}-universal.dmg"
-scp -q "$WIN" "$REMOTE:$DOWNLOAD_DIR/Agents Anywhere-${VERSION}-x64.exe"
-scp -q "$LINUX" "$REMOTE:$DOWNLOAD_DIR/Agents Anywhere-${VERSION}-x86_64.AppImage"
-scp -q "$DEB" "$REMOTE:$DOWNLOAD_DIR/Agents Anywhere-${VERSION}-x86_64.deb"
-scp -q "$CLI" "$REMOTE:$DOWNLOAD_DIR/Agents Anywhere-Connector-${VERSION}-linux-x86_64.tar.gz"
+# Publishing is idempotent: a retry after a slow or interrupted transfer must
+# not re-send gigabytes that already match. The byte-for-byte verification
+# below still runs for every artifact.
+upload_if_changed() {
+  local local_path="$1" remote_name="$2"
+  local local_hash remote_hash
+  local_hash="$(shasum -a 256 "$local_path" | cut -d' ' -f1)"
+  remote_hash="$(ssh "$REMOTE" "if [ -f '$DOWNLOAD_DIR/$remote_name' ]; then shasum -a 256 '$DOWNLOAD_DIR/$remote_name' | cut -d' ' -f1; fi")"
+  if [[ -n "$remote_hash" && "$local_hash" == "$remote_hash" ]]; then
+    echo "   $remote_name already current"
+    return
+  fi
+  scp -q "$local_path" "$REMOTE:$DOWNLOAD_DIR/$remote_name"
+}
+
+upload_if_changed "$APK" "agents-anywhere-${VERSION}-debug.apk"
+upload_if_changed "$DMG" "Agents Anywhere-${VERSION}-universal.dmg"
+upload_if_changed "$WIN" "Agents Anywhere-${VERSION}-x64.exe"
+upload_if_changed "$LINUX" "Agents Anywhere-${VERSION}-x86_64.AppImage"
+upload_if_changed "$DEB" "Agents Anywhere-${VERSION}-x86_64.deb"
+upload_if_changed "$CLI" "Agents Anywhere-Connector-${VERSION}-linux-x86_64.tar.gz"
 
 echo "==> verifying the uploads byte for byte"
 for pair in \
