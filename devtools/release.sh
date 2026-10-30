@@ -293,7 +293,7 @@ html = f"""<!doctype html>
 </head>
 <body>
   <h1>Agents Anywhere 客户端</h1>
-  <p class="sub">版本 {version} · 服务端同步升级至 {version}</p>
+  <p class="sub">客户端版本 {version} · 服务端 API 保持兼容</p>
 
   <div class="fix">
     <h3>{version} 更新</h3>

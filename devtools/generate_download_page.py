@@ -43,7 +43,7 @@ h1{{font-size:1.7rem;margin-bottom:.2rem}} h2{{font-size:1.15rem;margin:0 0 .4re
 code{{background:#f3f4f6;padding:.1rem .3rem;border-radius:4px;font-size:.85em}} li{{margin:.15rem 0}}
 @media(prefers-color-scheme:dark){{body{{background:#0b0b0c;color:#f3f4f6}}.card,.release{{border-color:#2a2a2e}}.sub,.note,.card p{{color:#aaa}}.btn{{background:#f3f4f6;color:#111827}}code{{background:#1f1f23}}}}
 </style></head><body>
-<h1>Agents Anywhere 客户端下载</h1><p class="sub">当前版本 {html.escape(version)} · 服务端同步升级至 {html.escape(version)}</p>
+<h1>Agents Anywhere 客户端下载</h1><p class="sub">客户端版本 {html.escape(version)} · 服务端 API 保持兼容</p>
 <section class="current"><h2>{html.escape(version)} 本次更新</h2>{markdown_body(current)}</section>
 <div class="card"><h2>macOS 桌面客户端（Universal）</h2><p>支持 Apple Silicon 与 Intel。</p><a class="btn" href="Agents%20Anywhere-{version}-universal.dmg" download>下载 DMG</a></div>
 <div class="card"><h2>Windows 桌面客户端</h2><p>Windows 安装程序。</p><a class="btn" href="Agents%20Anywhere-{version}-x64.exe" download>下载 EXE</a></div>
