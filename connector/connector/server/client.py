@@ -60,6 +60,7 @@ from connector.server.urls import (
 
 INGEST_ONLY_NOTIFICATION_METHODS = frozenset({"timeline.sync"})
 SYNC_STATE_FLUSH_INTERVAL_SECONDS = 1.0
+INGEST_RESTART_RESET_SECONDS = 60.0
 
 
 class BackendRpcClient:
@@ -150,7 +151,7 @@ class BackendRpcClient:
         # point of the local channel is that it keeps working while the public
         # link does not.
         await self._start_local_endpoint()
-        ingest_flush_task = asyncio.create_task(self._ingest.flush_loop())
+        ingest_flush_task = asyncio.create_task(self._run_ingest_worker())
         sync_state_flush_task = asyncio.create_task(self._sync_state_flush_loop())
         try:
             while True:
@@ -164,7 +165,13 @@ class BackendRpcClient:
                         )
                         if ingest_flush_task in done:
                             await ingest_flush_task
-                            raise RuntimeError("connector ingest worker stopped")
+                            logger.error(
+                                "connector ingest worker exited; restarting it"
+                            )
+                            ingest_flush_task = asyncio.create_task(
+                                self._run_ingest_worker()
+                            )
+                            continue
                         await connection_task
                     finally:
                         connection_task.cancel()
@@ -207,9 +214,7 @@ class BackendRpcClient:
                         self.config.reconnect_seconds,
                     )
                     await asyncio.sleep(self.config.reconnect_seconds)
-                except Exception:
-                    if ingest_flush_task.done():
-                        raise
+                except Exception:  # noqa: BLE001 - reconnect after any transient failure
                     logger.exception(
                         "connector loop failed; reconnecting in {}s",
                         self.config.reconnect_seconds,
@@ -258,8 +263,45 @@ class BackendRpcClient:
             except Exception:  # noqa: BLE001
                 logger.exception("final sync state flush failed")
             if self._http_client is not None:
-                await self._http_client.aclose()
+                with suppress(Exception):
+                    await self._http_client.aclose()
                 self._http_client = None
+
+    async def _run_ingest_worker(self) -> None:
+        """Keep the ingest worker alive across transient failures.
+
+        The worker shares the HTTP pool with the reconnect loop, which replaces
+        that pool on every connection attempt, and it calls into helpers that
+        can fail with an exception it does not classify as a network error
+        (observed: ``anyio.ClosedResourceError``). That used to terminate
+        ``run_forever`` and leave the Connector stopped until someone pressed
+        Connect. Only a rejected credential is terminal here; every other
+        failure is retried with backoff so a link blip cannot stop ingest.
+        """
+
+        initial_delay = max(0.1, float(self.config.reconnect_seconds))
+        delay = initial_delay
+        while True:
+            started_at = asyncio.get_running_loop().time()
+            try:
+                await self._ingest.flush_loop()
+                return
+            except asyncio.CancelledError:
+                raise
+            except ConnectorAuthenticationError:
+                raise
+            except Exception:  # noqa: BLE001 - restart the worker, keep the Connector up
+                logger.exception(
+                    "connector ingest worker failed; restarting in {}s", delay
+                )
+                await asyncio.sleep(delay)
+                if (
+                    asyncio.get_running_loop().time() - started_at
+                    >= INGEST_RESTART_RESET_SECONDS
+                ):
+                    delay = initial_delay
+                else:
+                    delay = min(30.0, delay * 2)
 
     async def run_once(self) -> None:
         access_token = await self.ensure_access_token(force=True)

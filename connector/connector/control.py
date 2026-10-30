@@ -33,6 +33,11 @@ from connector.server.pairing import (
 ControlNotifier = Callable[[str, Any], Awaitable[None]]
 
 
+RUNTIME_RESTART_INITIAL_SECONDS = 3.0
+RUNTIME_RESTART_MAX_SECONDS = 30.0
+RUNTIME_RESTART_RESET_SECONDS = 60.0
+
+
 class ConnectorController:
     def __init__(
         self,
@@ -171,17 +176,49 @@ class ConnectorController:
             self.lease.release()
 
     async def _run_runtime(self, config: ConnectorConfig) -> None:
+        """Run the backend client, restarting after unexpected failures.
+
+        ``run_forever`` handles link failures itself, but an exception from a
+        helper task (a closed resource stream, a library bug) used to end the
+        runtime and leave the Connector stopped until the user pressed
+        Connect. A transient failure must not require a human. Credential
+        rejection remains terminal: retrying it would only hammer the Server.
+        """
+
+        delay = RUNTIME_RESTART_INITIAL_SECONDS
         try:
-            await self.client_factory(config).run_forever()
-        except asyncio.CancelledError:
-            raise
-        except ConnectorAuthenticationError as exc:
-            self._auth_failed = True
-            self._last_error = str(exc)
-            logger.error("connector authentication failed: {}", exc)
-        except Exception as exc:
-            self._last_error = str(exc) or exc.__class__.__name__
-            logger.exception("connector runtime failed")
+            while True:
+                started_at = asyncio.get_running_loop().time()
+                try:
+                    await self.client_factory(config).run_forever()
+                except asyncio.CancelledError:
+                    raise
+                except ConnectorAuthenticationError as exc:
+                    self._auth_failed = True
+                    self._last_error = str(exc)
+                    logger.error("connector authentication failed: {}", exc)
+                    return
+                except Exception as exc:  # noqa: BLE001 - retry, don't require a click
+                    self._last_error = str(exc) or exc.__class__.__name__
+                    logger.exception(
+                        "connector runtime failed; restarting in {}s", delay
+                    )
+                    try:
+                        await self._emit_state()
+                    except Exception:  # noqa: BLE001 - state is best-effort here
+                        logger.exception("connector state publish failed")
+                    await asyncio.sleep(delay)
+                    if (
+                        asyncio.get_running_loop().time() - started_at
+                        >= RUNTIME_RESTART_RESET_SECONDS
+                    ):
+                        delay = RUNTIME_RESTART_INITIAL_SECONDS
+                    else:
+                        delay = min(RUNTIME_RESTART_MAX_SECONDS, delay * 2)
+                    continue
+                else:
+                    # run_forever only returns after an orderly stop.
+                    return
         finally:
             if self._runtime_task is asyncio.current_task():
                 self._runtime_task = None

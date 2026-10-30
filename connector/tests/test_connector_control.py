@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, ClassVar
 
+import anyio
+
 from connector.control import ConnectorController, config_to_payload
 from connector.core.config import ConnectorConfig
 from connector.core.json_rpc import JsonRpcStdioServer
@@ -119,6 +121,56 @@ def test_connector_controller_marks_auth_failure(tmp_path) -> None:
     assert state["status"] == "expired credential"
     assert state["authFailed"] is True
     assert "credential" in state["lastError"]
+
+
+def test_connector_controller_restarts_after_unexpected_runtime_failure(
+    tmp_path, monkeypatch
+) -> None:
+    """A dead runtime is retried without asking the user to press Connect."""
+
+    monkeypatch.setattr("connector.control.RUNTIME_RESTART_INITIAL_SECONDS", 0.01)
+    monkeypatch.setattr("connector.control.RUNTIME_RESTART_MAX_SECONDS", 0.01)
+
+    class FlakyBackendRpcClient:
+        attempts: ClassVar[int] = 0
+
+        def __init__(self, config: ConnectorConfig) -> None:
+            self.config = config
+
+        async def run_forever(self) -> None:
+            type(self).attempts += 1
+            if type(self).attempts == 1:
+                raise anyio.ClosedResourceError()
+            await asyncio.Event().wait()
+
+    async def exercise() -> dict[str, Any]:
+        FlakyBackendRpcClient.attempts = 0
+        controller = ConnectorController(
+            config_path=tmp_path / "connector.json",
+            client_factory=FlakyBackendRpcClient,  # type: ignore[arg-type]
+        )
+        await controller.save_config(
+            {
+                "serverUrl": "http://127.0.0.1:8000/",
+                "connectorId": "conn_1",
+                "connectorToken": "cxt_secret",
+            }
+        )
+        await controller.start()
+        for _ in range(100):
+            if FlakyBackendRpcClient.attempts >= 2:
+                break
+            await asyncio.sleep(0.01)
+        state = controller.get_state()
+        await controller.shutdown()
+        return state
+
+    state = asyncio.run(exercise())
+
+    assert FlakyBackendRpcClient.attempts >= 2
+    assert state["running"] is True
+    assert state["status"] == "running"
+    assert "ClosedResourceError" in state["lastError"]
 
 
 def test_connector_controller_getters_accept_json_rpc_params(tmp_path) -> None:

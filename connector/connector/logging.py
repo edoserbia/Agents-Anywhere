@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import traceback
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from loguru import logger as logger
-
 
 RpcLogNotifier = Callable[[str, Any], Awaitable[None]]
 DEFAULT_LOG_FORMAT = (
@@ -57,7 +57,14 @@ class RpcLogSink:
         }
         exception = record.get("exception")
         if exception is not None:
-            payload["exception"] = str(exception)
+            # Keep the frames: the previous repr only said which exception was
+            # raised, not where, which made a production disconnect impossible
+            # to attribute without reproducing it.
+            payload["exception"] = "".join(
+                traceback.format_exception(
+                    exception.type, exception.value, exception.traceback
+                )
+            )
 
         task = asyncio.create_task(self.notifier("connector/log", payload))
         self._tasks.add(task)

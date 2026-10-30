@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any, Literal, Self
 
+import anyio
 import httpx
 import pytest
 from connector.core.config import ConnectorConfig
@@ -2135,6 +2136,54 @@ def test_pending_or_failed_capability_discovery_does_not_block_rpc(
 
 def test_connector_runtime_reconnects_quietly_on_websocket_close(monkeypatch) -> None:
     asyncio.run(_exercise_websocket_close_reconnect(monkeypatch))
+
+
+def test_ingest_worker_failure_does_not_stop_the_backend_loop(monkeypatch) -> None:
+    """A library-level failure in the ingest worker must not end the runtime.
+
+    Production incident: after a websocket drop, an ``anyio.ClosedResourceError``
+    escaped ``flush_loop``; ``run_forever`` re-raised it, left the Connector
+    stopped, and the user had to press Connect. The worker is replaceable, the
+    backend loop is not.
+    """
+
+    async def exercise() -> None:
+        client = _client(reconnect_seconds=0.01)
+        attempts = 0
+        restarted = asyncio.Event()
+
+        async def flaky_flush() -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise anyio.ClosedResourceError()
+            restarted.set()
+            await asyncio.Event().wait()
+
+        async def idle_connection() -> None:
+            await asyncio.Event().wait()
+
+        async def noop(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(client._ingest, "flush_loop", flaky_flush)
+        monkeypatch.setattr(client, "run_once", idle_connection)
+        monkeypatch.setattr(client, "_start_local_endpoint", noop)
+        monkeypatch.setattr(client, "_stop_local_endpoint", noop)
+        monkeypatch.setattr(client, "_reset_http_client", noop)
+        monkeypatch.setattr(client.agent_runtime_supervisor, "shutdown", noop)
+
+        task = asyncio.create_task(client.run_forever())
+        try:
+            await asyncio.wait_for(restarted.wait(), 2)
+            assert attempts >= 2
+            assert not task.done(), "an ingest failure must not end the runtime"
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(exercise())
 
 
 def test_access_token_rejection_reconnects_without_invalidating_saved_credential(monkeypatch) -> None:
