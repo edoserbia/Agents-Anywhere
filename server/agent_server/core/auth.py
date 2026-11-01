@@ -10,7 +10,10 @@ import time
 from typing import Any
 
 DEFAULT_EXPIRES_IN = 900
-DEFAULT_USER_EXPIRES_IN = 60 * 60 * 24 * 7
+# Desktop clients keep this bearer token in localStorage and have no refresh
+# grant. A seven-day lifetime forced a password login every week; ninety days
+# matches a normal desktop session while still bounding a leaked token.
+DEFAULT_USER_EXPIRES_IN = 60 * 60 * 24 * 90
 
 
 def _secret() -> bytes:
