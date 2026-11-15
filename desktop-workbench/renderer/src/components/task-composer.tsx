@@ -531,7 +531,9 @@ export function TaskComposer() {
     void refresh()
     window.addEventListener("focus", onVisible)
     document.addEventListener("visibilitychange", onVisible)
-    const timer = window.setInterval(() => { void refresh() }, 5_000)
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh()
+    }, 30_000)
     return () => {
       cancelled = true
       window.removeEventListener("focus", onVisible)

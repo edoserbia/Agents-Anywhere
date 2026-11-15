@@ -525,7 +525,12 @@ export function TaskComposer() {
     void refresh()
     window.addEventListener("focus", onVisible)
     document.addEventListener("visibilitychange", onVisible)
-    const timer = window.setInterval(() => { void refresh() }, 5_000)
+    // The permission catalog changes only when an agent or connector is
+    // reconfigured, so a slow safety-net poll is enough; focus/visibility
+    // already force a refresh when the user comes back to the tab.
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh()
+    }, 30_000)
     return () => {
       cancelled = true
       window.removeEventListener("focus", onVisible)

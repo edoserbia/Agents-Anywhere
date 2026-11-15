@@ -148,6 +148,9 @@ function remoteStateFromOptimisticState(optimisticState: SessionLocalTimelineSta
 
 const INITIAL_TIMELINE_LIMIT = 100
 const TIMELINE_PAGE_LIMIT = 100
+// Queue reads are a fallback for clients that miss a server-side push; keep
+// them infrequent so a long turn does not generate thousands of requests.
+const QUEUE_POLL_INTERVAL_MS = 8_000
 const LOAD_OLDER_SCROLL_THRESHOLD = 96
 const SCROLL_TO_BOTTOM_PRUNE_DISTANCE = 180
 const INITIAL_SCROLL_LAYOUT_QUIET_MS = 120
@@ -1244,8 +1247,26 @@ export function SessionDetail({
 
   React.useEffect(() => {
     if (!session?.id || (!turnInProgress && queuedMessages.length === 0)) return
-    const timer = window.setInterval(() => void refreshQueue(), 2000)
-    return () => window.clearInterval(timer)
+    let cancelled = false
+    // Queue mutations are rare compared with timeline events, so poll gently:
+    // a multi-hour turn used to cost ~10k requests per open client. Hidden
+    // tabs stop polling entirely and catch up through the listeners below.
+    const tick = () => {
+      if (cancelled || document.visibilityState !== "visible") return
+      void refreshQueue()
+    }
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refreshQueue()
+    }
+    document.addEventListener("visibilitychange", onVisible)
+    window.addEventListener("focus", onVisible)
+    const timer = window.setInterval(tick, QUEUE_POLL_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      document.removeEventListener("visibilitychange", onVisible)
+      window.removeEventListener("focus", onVisible)
+      window.clearInterval(timer)
+    }
   }, [session?.id, turnInProgress, queuedMessages.length, refreshQueue])
 
   const handleUpdateQueued = React.useCallback(

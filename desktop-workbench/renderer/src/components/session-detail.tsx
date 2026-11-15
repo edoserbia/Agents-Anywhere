@@ -1254,8 +1254,25 @@ export function SessionDetail({
 
   React.useEffect(() => {
     if (!session?.id || (!turnInProgress && queuedMessages.length === 0)) return
-    const timer = window.setInterval(() => void refreshQueue(), 2000)
-    return () => window.clearInterval(timer)
+    let cancelled = false
+    // Queue reads are a fallback for missed pushes: poll gently and skip
+    // entirely while the window is hidden (focus/visibility refresh below).
+    const tick = () => {
+      if (cancelled || document.visibilityState !== "visible") return
+      void refreshQueue()
+    }
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refreshQueue()
+    }
+    document.addEventListener("visibilitychange", onVisible)
+    window.addEventListener("focus", onVisible)
+    const timer = window.setInterval(tick, 8_000)
+    return () => {
+      cancelled = true
+      document.removeEventListener("visibilitychange", onVisible)
+      window.removeEventListener("focus", onVisible)
+      window.clearInterval(timer)
+    }
   }, [session?.id, turnInProgress, queuedMessages.length, refreshQueue])
 
   const handleUpdateQueued = React.useCallback(
