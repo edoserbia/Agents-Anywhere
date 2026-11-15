@@ -8,12 +8,14 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 mkdir -p "$STAGE/agents-anywhere-connector"
-cp -R "$ROOT/connector" "$STAGE/agents-anywhere-connector/connector"
-# Ship sources only. A local `uv sync` leaves a multi-hundred-megabyte `.venv`
-# in the tree, and copying it silently turned a ~0.5 MiB bundle into ~230 MiB.
-find "$STAGE/agents-anywhere-connector/connector" -type d \
-  \( -name __pycache__ -o -name .pytest_cache -o -name .ruff_cache -o -name .venv -o -name release \) \
-  -prune -exec rm -rf {} +
+# Exclude generated trees before copying, rather than copying a potentially
+# multi-gigabyte .venv only to remove it again afterwards.
+mkdir -p "$STAGE/agents-anywhere-connector/connector"
+tar -C "$ROOT/connector" \
+  --exclude=.venv --exclude=release --exclude=__pycache__ \
+  --exclude=.pytest_cache --exclude=.ruff_cache --exclude='*.pyc' \
+  --exclude=uv.lock --exclude=.DS_Store \
+  -cf - . | tar -C "$STAGE/agents-anywhere-connector/connector" -xf -
 cat > "$STAGE/agents-anywhere-connector/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
 set -euo pipefail

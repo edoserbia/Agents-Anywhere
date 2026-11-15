@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
+import argparse
 import html
 import pathlib
 import re
-import sys
 
-version, server_url, output_dir = sys.argv[1:]
+parser = argparse.ArgumentParser(description="Generate a download page for uploaded platforms only.")
+parser.add_argument("version")
+parser.add_argument("server_url")
+parser.add_argument("output_dir")
+parser.add_argument("--platforms", default="mac,win,linux,connector,android")
+parser.add_argument("--android-apk-name", help="Published APK basename (defaults to the legacy debug APK name)")
+args = parser.parse_args()
+version, server_url, output_dir = args.version, args.server_url, args.output_dir
+android_apk_name = args.android_apk_name or f"agents-anywhere-{version}-debug.apk"
+if pathlib.Path(android_apk_name).name != android_apk_name or not android_apk_name.endswith(".apk"):
+    parser.error("--android-apk-name must be an APK basename")
+platforms = set(args.platforms.split(","))
+if not platforms or not platforms <= {"mac", "win", "linux", "connector", "android"}:
+    parser.error("--platforms must be a comma-separated list of mac,win,linux,connector,android")
 root = pathlib.Path(__file__).resolve().parents[1]
 notes_dir = root / "docs" / "releases"
 
@@ -32,6 +45,14 @@ for path in release_files:
     release_version = path.stem
     history.append(f'<section class="release"><h2>版本 {html.escape(release_version)}</h2>{markdown_body(path)}</section>')
 
+cards = {
+    'mac': f'''<div class="card"><h2>macOS 桌面客户端（Universal）</h2><p>支持 Apple Silicon 与 Intel。</p><a class="btn" href="Agents%20Anywhere-{version}-universal.dmg" download>下载 DMG</a></div>''',
+    'win': f'''<div class="card"><h2>Windows 桌面客户端</h2><p>Windows 安装程序。</p><a class="btn" href="Agents%20Anywhere-{version}-x64.exe" download>下载 EXE</a></div>''',
+    'linux': f'''<div class="card"><h2>Linux 桌面客户端</h2><p>Ubuntu / Debian 推荐安装包；其他发行版可使用便携版。</p><a class="btn" href="Agents%20Anywhere-{version}-x86_64.deb" download>下载 DEB</a><a class="btn" href="Agents%20Anywhere-{version}-x86_64.AppImage" download>下载 AppImage</a></div>''',
+    'connector': f'''<div class="card"><h2>Linux 命令行 Connector</h2><p>无桌面或远程 Linux 设备使用。下载后解压并运行 <code>install.sh</code>，再执行 <code>anywhere-cli pair</code>。</p><a class="btn" href="Agents%20Anywhere-Connector-{version}-linux-x86_64.tar.gz" download>下载 Connector</a></div>''',
+    'android': f'''<div class="card"><h2>Android 客户端（APK）</h2><p>可直接安装的 APK。</p><a class="btn" href="{html.escape(android_apk_name, quote=True)}" download>下载 APK</a></div>''',
+}
+
 page = f'''<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Agents Anywhere 下载</title><style>
@@ -45,11 +66,11 @@ code{{background:#f3f4f6;padding:.1rem .3rem;border-radius:4px;font-size:.85em}}
 </style></head><body>
 <h1>Agents Anywhere 客户端下载</h1><p class="sub">客户端版本 {html.escape(version)} · 服务端 API 保持兼容</p>
 <section class="current"><h2>{html.escape(version)} 本次更新</h2>{markdown_body(current)}</section>
-<div class="card"><h2>macOS 桌面客户端（Universal）</h2><p>支持 Apple Silicon 与 Intel。</p><a class="btn" href="Agents%20Anywhere-{version}-universal.dmg" download>下载 DMG</a></div>
-<div class="card"><h2>Windows 桌面客户端</h2><p>Windows 安装程序。</p><a class="btn" href="Agents%20Anywhere-{version}-x64.exe" download>下载 EXE</a></div>
-<div class="card"><h2>Linux 桌面客户端</h2><p>Ubuntu / Debian 推荐安装包；其他发行版可使用便携版。</p><a class="btn" href="Agents%20Anywhere-{version}-x86_64.deb" download>下载 DEB</a><a class="btn" href="Agents%20Anywhere-{version}-x86_64.AppImage" download>下载 AppImage</a></div>
-<div class="card"><h2>Linux 命令行 Connector</h2><p>无桌面或远程 Linux 设备使用。下载后解压并运行 <code>install.sh</code>，再执行 <code>anywhere-cli pair</code>。</p><a class="btn" href="Agents%20Anywhere-Connector-{version}-linux-x86_64.tar.gz" download>下载 Connector</a></div>
-<div class="card"><h2>Android 客户端（APK）</h2><p>可直接安装的 APK。</p><a class="btn" href="agents-anywhere-{version}-debug.apk" download>下载 APK</a></div>
+{cards["mac"] if "mac" in platforms else ""}
+{cards["win"] if "win" in platforms else ""}
+{cards["linux"] if "linux" in platforms else ""}
+{cards["connector"] if "connector" in platforms else ""}
+{cards["android"] if "android" in platforms else ""}
 <div class="card"><h2>更新记录</h2><p>查看当前版本和所有历史版本的完整变化。</p><a class="btn" href="CHANGELOG.html">打开 changelog</a> <a class="btn" href="CHANGELOG.md">下载 Markdown</a></div>
 <div class="card"><h2>服务端 Web 控制台</h2><a class="btn" href="{html.escape(server_url)}" target="_blank" rel="noreferrer">打开 Web 控制台</a></div>
 <p class="note">校验和：<a href="SHA256SUMS.txt">SHA256SUMS.txt</a></p><h2>历史版本</h2>{''.join(history)}</body></html>'''

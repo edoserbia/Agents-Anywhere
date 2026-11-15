@@ -21,9 +21,9 @@ unset YARN_NPM_MINIMAL_AGE_GATE pnpm_config_minimum_release_age
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# closex.cc is the production host. The previous host (124.220.147.199) is kept
-# only as a rollback target; override AA_REMOTE to publish there.
-REMOTE="${AA_REMOTE:-aa-new}"
+# Publish through the production domain. The historical aa-new SSH alias may
+# still resolve to a retired host; override AA_REMOTE only intentionally.
+REMOTE="${AA_REMOTE:-root@closex.cc}"
 DOWNLOAD_DIR="${AA_DOWNLOAD_DIR:-/opt/aa-downloads}"
 SERVER_URL="${AA_SERVER_URL:-https://closex.cc}"
 PAGE_URL="${AA_PAGE_URL:-https://closex.cc/download}"

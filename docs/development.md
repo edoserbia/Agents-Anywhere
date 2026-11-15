@@ -152,4 +152,18 @@ devtools/release.sh 2.0.4
 - 读者手动展开的块不被自动收起覆盖：显式选择优先于默认行为。
 - 两端的判断依据相同——运行时状态是否处于活动态；新增状态时必须同步更新两处。
 
+### closex.cc 定向发布（macOS / Linux Connector / Android）
 
+当前生产主机和验证边界见 [部署主机](deployment-hosts.md)。仅发布这三个产物时使用：
+
+```bash
+./devtools/release-closex.sh 2.1.2
+# 构建已完成，继续上传 / 发布：
+./devtools/release-closex.sh 2.1.2 --no-build
+```
+
+该入口不构建 Windows、Linux 桌面或 iOS，不提升这些端的 PATCH 版本。
+先手动更新本次四个组件的版本位置（Desktop、Renderer、Connector、Android）及 Android `versionCode`，再运行脚本。
+默认远端为 `root@closex.cc`；不要继续使用仍指向历史主机的 `aa-new` 别名。
+上传支持断点续传，完整 SHA256 校验通过后才发布下载页，并验证域名 Range 下载内容。
+Android 构建 `assembleRelease`，显式沿用旧 debug 签名证书以便覆盖安装；该包非 debuggable，也不是正式发行证书签名。
