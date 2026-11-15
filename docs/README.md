@@ -8,7 +8,7 @@
 | 查看 2.0.3 安装包和发布边界 | [2.0.3 发布说明](releases/2.0.3.md)；历史版本见 [2.0.0](releases/2.0.0.md) |
 | 部署自己的服务 | [Docker](../docker/README.md)、[Server](../server/README.md) |
 | 升级已有部署或从 v1 迁移 | [升级指南](upgrading.md) |
-| 查看生产主机与部署约束 | [部署主机](deployment-hosts.md) |
+| 查看生产主机、工作设备与定向发布 | [部署主机](deployment-hosts.md)、[2.1.2 发布说明](releases/2.1.2.md) |
 | 版本号含义与发版规则 | [版本号规则](versioning.md) |
 | 源码运行与 headless 验证 | [开发指南](development.md) |
 | Desktop 开发、打包、签名 | [Desktop Workbench](../desktop-workbench/README.md) |

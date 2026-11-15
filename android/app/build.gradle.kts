@@ -6,7 +6,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-val officialServerUrl = "https://web.agents-anywhere.com"
+val officialServerUrl = "https://closex.cc"
 val localSettings = Properties().apply {
     rootProject.file("local.properties").takeIf { it.isFile }?.inputStream()?.use { load(it) }
 }
@@ -27,8 +27,8 @@ android {
         applicationId = "com.agentsanywhere.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 44
-        versionName = "2.1.1"
+        versionCode = 45
+        versionName = "2.1.2"
         buildConfigField("String", "OFFICIAL_SERVER_URL", officialServerUrl.asBuildConfigString())
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -42,6 +42,11 @@ android {
             buildConfigField("String", "OFFICIAL_SERVER_URL", debugServerUrl.asBuildConfigString())
         }
         release {
+            // Explicit opt-in preserves the old APK certificate for this
+            // self-hosted distribution without changing normal release signing.
+            if (providers.gradleProperty("agentsAnywhere.signReleaseWithDebugKey").orNull == "true") {
+                signingConfig = signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

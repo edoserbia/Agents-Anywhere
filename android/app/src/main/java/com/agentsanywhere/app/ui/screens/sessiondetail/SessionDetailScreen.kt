@@ -1295,11 +1295,13 @@ fun SessionDetailScreen(
         }
         val activeSessionId = sessionId
         while (true) {
-            delay(2_000)
             if (sessionId != activeSessionId || !appVisible) break
+            // Catch up immediately on foreground entry, then poll gently.
+            // LaunchedEffect cancels this serial loop when the app is hidden.
             controller.loadQueue(activeSessionId).onSuccess { queueState ->
                 state = state.copy(queue = queueState)
             }
+            delay(8_000)
         }
     }
 

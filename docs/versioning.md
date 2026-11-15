@@ -52,7 +52,7 @@ Agents Anywhere 的产品版本使用 `MAJOR.MINOR.PATCH`，三段各有明确�
 
 | 端 | 文件 | 字段 |
 | --- | --- | --- |
-| Server | `server/pyproject.toml`、`server/agent_server/app.py` | `version`（两处都要改；`/health` 返回 `app.py` 中的值） |
+| Server | `server/pyproject.toml`、`server/agent_server/core/version.py` | `version` / `SERVER_VERSION`（两处保持一致；`/api/v2/health` 返回该常量） |
 | Desktop | `desktop-workbench/package.json`、`desktop-workbench/renderer/package.json` | `version` |
 | Android | `android/app/build.gradle.kts` | `versionName`、`versionCode` |
 | iOS | `ios/Agents Anywhere/Agents Anywhere.xcodeproj/project.pbxproj` | `MARKETING_VERSION` |

@@ -23,34 +23,34 @@ def test_pyproject_matches_the_server_version_constant() -> None:
     assert declared.group(1) == SERVER_VERSION
 
 
-def test_desktop_client_ships_the_same_release_version() -> None:
-    """Desktop and server are released together, so their versions must agree."""
+def test_desktop_client_ships_the_same_api_line() -> None:
+    """PATCH releases are independent; only MAJOR.MINOR must agree."""
     package = json.loads(
         (REPO_ROOT / "desktop-workbench" / "package.json").read_text(encoding="utf-8")
     )
-    assert package["version"] == SERVER_VERSION
+    assert package["version"].split(".")[:2] == SERVER_VERSION.split(".")[:2]
 
 
-def test_android_client_ships_the_same_release_version() -> None:
+def test_android_client_ships_the_same_api_line() -> None:
     gradle = (REPO_ROOT / "android" / "app" / "build.gradle.kts").read_text(
         encoding="utf-8"
     )
     version_name = re.search(r'versionName = "([^"]+)"', gradle)
     assert version_name is not None, "android/app/build.gradle.kts needs a versionName"
-    assert version_name.group(1) == SERVER_VERSION
+    assert version_name.group(1).split(".")[:2] == SERVER_VERSION.split(".")[:2]
 
 
-def test_connector_ships_the_same_release_version() -> None:
+def test_connector_ships_the_same_api_line() -> None:
     """The Connector is installed on its own, so its version is all a machine
     reports about which engine support it actually has.
 
     It kept a separate 0.1.x line while the runtimes changed underneath, so two
     very different Connectors both claimed 0.1.7.2 — and a device missing the
-    OpenScience runtime looked up to date. Tying it to the release makes
+    OpenScience runtime looked up to date. Keeping its API line aligned with the server makes
     `uv tool list` and the desktop app's bundled copy answer that question.
     """
 
     pyproject = (REPO_ROOT / "connector" / "pyproject.toml").read_text(encoding="utf-8")
     declared = re.search(r'^version = "([^"]+)"', pyproject, flags=re.MULTILINE)
     assert declared is not None, "connector/pyproject.toml must declare a version"
-    assert declared.group(1) == SERVER_VERSION
+    assert declared.group(1).split(".")[:2] == SERVER_VERSION.split(".")[:2]

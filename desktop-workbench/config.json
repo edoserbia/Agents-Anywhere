@@ -1,12 +1,12 @@
 {
   "cloud": {
-    "serverUrl": "https://web.agents-anywhere.com",
-    "oauthWebOrigin": "https://web.agents-anywhere.com"
+    "serverUrl": "https://closex.cc",
+    "oauthWebOrigin": "https://closex.cc"
   },
   "apiNamespace": "/api/v2",
   "healthTimeoutMs": 10000,
   "updates": {
-    "downloadUrl": "https://downloads.example.invalid/agents-anywhere-desktop"
+    "downloadUrl": "https://closex.cc/download/"
   },
   "oauth": {
     "protocol": "agents-anywhere-desktop",

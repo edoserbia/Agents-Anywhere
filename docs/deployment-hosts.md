@@ -1,223 +1,145 @@
-# 部署主机
+# 部署主机与设备
 
-Agents Anywhere 的两台主机，以及新主机上与既有服务共存的约束。
+最后核对：**2026-11-15**。本页记录非敏感运维信息；SSH 密码、账号密码、Connector token、签名密钥和 `.env` 内容不得写入仓库。
 
-## 生产主机（新）
+## 当前生产主机
 
 | 项目 | 值 |
 | --- | --- |
-| 地址 | `156.225.23.215` |
-| 域名 | `closex.cc`（A 记录已指向本机） |
-| 登录 | `ssh root@156.225.23.215`，密码 `5uqdxSatJBGH` |
-| 免密钥 | 已配置：`ssh aa-new` 直接登录（`~/.ssh/config` 中 `Host aa-new`） |
-| 系统 | Ubuntu 22.04 LTS，2 vCPU / 1.9 GB 内存 / 29 GB 磁盘 |
-| API 与控制台 | `https://closex.cc`（Caddy 终止 TLS） |
-| 客户端下载页 | `http://closex.cc:4001` |
+| 用途 | Agents Anywhere 生产中转服务、API、Web 控制台、客户端下载 |
+| 地址 | `116.204.134.150` |
+| 域名 | `closex.cc`，2026-11-15 实测 A 记录指向该 IP |
+| SSH | `ssh root@116.204.134.150`；凭据由维护者独立保管 |
+| API 与控制台 | `https://closex.cc`，API namespace `/api/v2` |
+| 客户端下载页 | `https://closex.cc/download/` |
+| 运维账号 | `edoserbia@163.com`；密码不记录在项目中 |
+| 系统与资源 | Ubuntu Linux x86_64，约 2 GB 内存、20 GB 根磁盘、2 GB swap |
 | 部署目录 | `/opt/agents-anywhere` |
+| Compose 文件 | `/opt/agents-anywhere/docker/docker-compose.postgres.yml` |
+| Compose 项目 | `agents-anywhere` |
+| 环境文件 | `/opt/agents-anywhere/.env`（保持权限 `600`） |
 | 下载目录 | `/opt/aa-downloads` |
+| 下载服务 | `aa-downloads.service`，脚本 `/opt/aa-downloads-server.py`，支持 HTTP Range |
+| 完整迁移备份 | `/root/mig/aa-next.dump` 和 `/root/mig/aa-next.dump.enc`；包含敏感数据，不得公开 |
 
-### 服务端口
+**客户端和 Connector 一律填写 `https://closex.cc`，不填写服务器 IP。** 域名迁移已保留数据库及签名密钥，已有配对无需重建；只有账号会话过期时才需要重新登录。
 
-| 端口 | 用途 |
+### 服务与端口
+
+| 端口 / 容器 | 用途 |
 | --- | --- |
-| 4000 | Agents Anywhere API 与 Web 控制台（容器 `8000` 映射到主机 `4000`，与旧主机一致） |
-| 4001 | 客户端下载页（systemd `aa-downloads.service`） |
-| 5432 / 6379 | PostgreSQL 与 Redis，**仅容器网络内可达，不对主机暴露** |
+| `80` / `443`，`sub2api-caddy` | Caddy TLS 与路由；同机其他业务也依赖它 |
+| `4000`，`agents-anywhere-server-next-1` | API 与静态 Web；容器内 `8000` |
+| `4001`，`aa-downloads.service` | 安装包静态服务，通过域名 `/download/` 访问 |
+| `agents-anywhere-postgres-next-1` | PostgreSQL；`5432` 仅容器内部 |
+| `agents-anywhere-redis-next-1` | Redis；`6379` 仅容器内部 |
 
-### 本机已有的其他服务（请勿删改）
+当前容器内存上限：Server `1600m`、PostgreSQL `700m`、Redis `256m`、迁移任务 `512m`。这是 2026-11-15 的现状记录，**不是可同时占满的内存预算**；本机还承载其他服务，变更前检查实际内存与 swap，不要照搬历史主机的限制。
 
-新主机并非空机，部署 Agents Anywhere 时必须与下列服务共存：
+### 同机服务与 Caddy 约束
 
-| 服务 | 说明 | 端口 |
-| --- | --- | --- |
-| `vpn-sing-box.service` | VPN（VLESS），`closex.cc` 的 `/vpn/ws/...` 路径 | `172.18.0.1:10000` |
-| `vpn-subscription.service` | Clash 订阅合并服务，`/vpn/sub/...` 路径 | `172.18.0.1:8790` |
-| `sub2api-caddy`（容器） | Caddy 反向代理，承载 TLS 与上述路由 | `80`、`443` |
-| `sub2api` 等（容器） | 另一套 Web 服务 | 容器内部 |
+`sub2api-caddy`、`vpn-sing-box.service`、`vpn-subscription.service` 和 MeshVPN 等为既有业务。更新 Agents Anywhere 时不得删除其单元文件、数据或路由，不得重启整套 Caddy 容器。
 
-**约束**：这些服务的单元文件、容器与数据都不要改动。Agents Anywhere 只使用 4000 与 4001。
-
-### Caddy 路由
-
-配置文件 `/root/apps/tokenoffer/deploy/Caddyfile` 由 `sub2api-caddy` 容器 bind-mount 使用。
-
-改动前请先备份，并用 Caddy 自身校验后再热加载（**不要重启容器**，重启会中断 VPN）：
+Caddy 主配置：`/root/apps/tokenoffer/deploy/Caddyfile`（容器 bind mount）。如确需变更：
 
 ```bash
-ssh aa-new
 cp /root/apps/tokenoffer/deploy/Caddyfile /root/apps/tokenoffer/deploy/Caddyfile.bak-$(date +%Y%m%d-%H%M%S)
-# 编辑后校验
-docker cp /root/apps/tokenoffer/deploy/Caddyfile sub2api-caddy:/tmp/cf
-docker exec sub2api-caddy caddy validate --config /tmp/cf --adapter caddyfile
-# 热加载（不重启容器）
+docker cp /root/apps/tokenoffer/deploy/Caddyfile sub2api-caddy:/tmp/aa-caddy-check
+docker exec sub2api-caddy caddy validate --config /tmp/aa-caddy-check --adapter caddyfile
 docker exec sub2api-caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
-# 确认 VPN 未受影响
-curl -s -o /dev/null -w '%{http_code}\n' "https://closex.cc/vpn/sub/<原有路径>"
 ```
 
-当前配置中，`/vpn/*` 由原有 matcher 处理（**顺序与内容未改动**），其余路径（catch-all）反向代理到 Agents Anywhere：
+保留现有 `/vpn/*` 路由及兼容重写。容器中的代理地址应使用**实际 Docker 网络网关**，不能把 `127.0.0.1` 当作宿主机。
 
-```
-handle {
-    reverse_proxy 172.18.0.1:4000
-}
-```
+`/download` 必须 301 重定向到 `/download/`，否则相对安装包链接会被解析到根目录，可能下载到返回 200 的 Web HTML，而不是真正的安装包。验收应跟随最终 URL、核对文件大小和 SHA256；不能只检查 HTTP 200。
 
-注意反向代理目标是 **`172.18.0.1`（主机在容器网络中的网关）**，不是 `127.0.0.1`——容器内的 loopback 指向容器自身，用 `127.0.0.1` 会得到 502。
+### 环境和数据库约束
 
-### 部署步骤
+- 保留 `POSTGRES_PASSWORD` 与 `AGENT_SERVER_SECRET`，不要因迁移或重新登录而更换。
+- `AGENT_SERVER_PUBLIC_ORIGIN=https://closex.cc`；CORS 根据实际客户端配置，不把密码写入 URL。
+- 不使用 `--reset-data`、不删除 Compose volumes，也不把生产数据库 URL 带入本地测试进程。
+- 新主机刚迁入时，磁盘上的部署源码落后于运行容器。**运行中的容器才是当时的生产代码基线**：数据库包含 `v2_44_jupiter`，直接用旧 `/opt/agents-anywhere/server` 构建可能缺迁移文件。
+- 部署新 Server 前先对照运行容器、完整源码和数据库 revision。不要重跑旧数据库导入或覆盖增量会话。
 
-服务端镜像在旧主机上构建（新主机无法访问 Docker Hub，拉不到 `node:22-bookworm-slim` 等基础镜像），再传到新主机：
+## 工作设备
+
+三台设备在 2026-11-15 已确认使用域名且在线。各自的 Connector ID、Runtime 配置和历史保留；不把多台设备绑定成同一个 ID。
+
+| 设备 | SSH | 类型与服务 | 当前生效的配对配置 |
+| --- | --- | --- | --- |
+| `underground` | `ssh mac@192.168.124.31` | Intel macOS，`/Applications/Agents Anywhere.app` 2.1.2，桌面内置 Connector | `~/Library/Application Support/Agents Anywhere/connector/connector.json` |
+| `2080ti-server` | `ssh jupiter@10.66.0.20` | Linux CLI 2.1.2，systemd `anywhere-cli.service` | `~/.agents-anywhere/connector.json` |
+| `jupiter-B365M-POWER` | `ssh jupiter@192.168.124.9` | Linux CLI **2.1.0（兼容性保留）**，systemd `anywhere-connector.service`；另有用户级 `dsh-desktop.service` | `~/.agents-anywhere/dsh-bridge-next/connector/connector.json` |
+
+注意：B365 上 `~/.agents-anywhere/connector.json` 是旧副本，不是服务实际使用的配置。2080ti 上还留有旧桌面客户端配置，不应启动另一个内置 Connector 与 systemd 服务争用身份。
+
+### Linux 更新与回滚
+
+新版源码和独立虚拟环境放在 `~/.agents-anywhere/releases/connector-2.1.2/`。安装成功后再通过 systemd drop-in 切换 `ExecStart`，继续使用上表中**原来的配置文件**。原环境保留，便于移除 drop-in 后回滚，不在运行中直接覆盖旧 venv。
+
+- 2080ti 当前使用 `/etc/systemd/system/anywhere-cli.service.d/20-connector-2.1.2.conf`。
+- **B365 已回滚至原 `~/.agents-anywhere/dsh-bridge-next/connector-venv/`（2.1.0）**：该机内置 DSH 插件使用 MeshCall / `dsh-bridge/connector.json`，本仓库 2.1.2 Connector 则使用 `endpoint.json` / JSON-RPC Bridge，试运行不能连接其 DSH。新版 drop-in 已撤销，副本保存为 `~/.agents-anywhere/releases/connector-2.1.2/20-connector-2.1.2.conf.disabled`。不要未核对协议就重新启用，也不要对 DSH Desktop 内置插件叠加独立 npm 安装。
+- B365 的 DSH 插件账号已刷新登录到 `https://closex.cc`，账号文件及登录前备份权限均为 0600。三机配对 token 未旋转。
 
 ```bash
-# 1. 在旧主机构建（build context 位于 /tmp/aa-ctx）
-ssh aa-server 'cd /tmp/aa-ctx && sudo docker build \
-  --build-arg GIT_MIRROR=https://ghproxy.net/https://github.com/ \
-  --build-arg APT_MIRROR=https://mirrors.tencent.com/debian \
-  --build-arg PIP_INDEX_URL=https://mirrors.tencent.com/pypi/simple \
-  --build-arg YARN_REGISTRY=https://registry.npmmirror.com \
-  -f docker/Dockerfile -t agents-anywhere-server:release-<版本> .'
-
-# 2. 传到新主机
-ssh aa-server 'sudo docker save agents-anywhere-server:release-<版本> | gzip -1' \
-  | ssh aa-new 'gunzip | docker load'
-
-# 3. 在新主机切换镜像并重建
-ssh aa-new 'cd /opt/agents-anywhere
-  sed -i "s|image: agents-anywhere-server:.*|image: agents-anywhere-server:release-<版本>|g" docker/docker-compose.postgres.yml
-  docker compose --env-file .env -f docker/docker-compose.postgres.yml -p agents-anywhere up -d --no-build --force-recreate migrate-next server-next'
+systemctl status anywhere-cli.service           # 2080ti
+systemctl status anywhere-connector.service     # B365
+# 以各自原配置、日志和 systemd 状态为准；不要输出其中的 token。
 ```
 
-### 环境变量
+Connector 应直接访问 `closex.cc`。两台 Linux 主机的代理曾导致 TLS reset；保留原服务中清空代理变量或 `NO_PROXY` 的直连配置，不随手加入 HTTP(S) 代理。
 
-`/opt/agents-anywhere/.env`（权限 `600`）：
+更新前检查是否有运行中的任务。桌面升级需完整退出旧客户端，再打开新版，才会加载新的内置 Connector；仅替换应用文件不等于进程已更新。升级结束后同时核对域名登录、Connector 在线状态和 Runtime 列表。
 
-| 变量 | 说明 |
-| --- | --- |
-| `POSTGRES_PASSWORD` | 数据库密码。**必须与旧主机一致**，否则迁移过来的数据无法访问。 |
-| `AGENT_SERVER_SECRET` | 令牌签名密钥。**必须与旧主机一致**，否则所有已登录设备与连接器令牌立即失效。 |
-| `AGENTS_ANYWHERE_WEB_PORT` | 主机映射端口，`4000`。 |
-| `AGENT_SERVER_PUBLIC_ORIGIN` | `https://closex.cc`，用于生成对外链接。 |
-| `AGENT_SERVER_CORS_ORIGINS` | 允许的来源，含域名与直连 IP。 |
+### B365 DSH 恢复记录
 
-## 旧主机（回滚目标）
+2026-11-15 排查发现 `/dev/urandom` 缺失，DSH Electron zygote 启动时因无法打开它而崩溃。已恢复标准字符设备 `1:9`、权限 `0666`，没有关闭 Chromium sandbox。另仅清理已退出 PID 的 `SingletonLock` / `SingletonCookie` / `SingletonSocket` 符号链接，没有删除浏览器 profile 或会话。
 
-| 项目 | 值 |
-| --- | --- |
-| 地址 | `124.220.147.199`（`ssh aa-server`） |
-| 部署目录 | `/opt/agents-anywhere` |
-| 构建上下文 | `/tmp/aa-ctx`（含绕过 GitHub 访问的 git mirror 参数） |
+保留用户级 `dsh-desktop.service`，新增 `~/.config/systemd/user/dsh-desktop.service.d/20-logging.conf` 将输出写入 `~/.agents-anywhere/logs/dsh-desktop-service.log`。该机 DSH Desktop Host 自身日志位于 `~/.config/DSH Desktop/logs/`，不是旧 `~/.dsh/logs/`。20:15（Asia/Shanghai）复查用户服务 active，Codex / DSH 均 running、error=null。
 
-旧主机仍保留原有部署与数据，可随时回滚。**注意**：迁移后两边数据会各自累积，回滚会丢失迁移之后在新主机产生的会话。
+## 2026-11-15 连接与流量检查
 
-## 资源限制与加固
+- 已使用运维账号成功登录新主机的域名 API，并确认上述三台设备在线。
+- 本机 `/private/tmp` 的带宽排查会话已确认：Web / Desktop 的会话队列曾每 2 秒读取一次，权限目录每 5 秒一次。
+- 现有修复把队列改为 **8 秒**、权限目录改为 **30 秒**；页面隐藏时不轮询，恢复可见或窗口 focus 时刷新。Web 版已部署，macOS 需要安装新版才能生效。
+- Android 原先仍有 2 秒队列轮询；2.1.2 同步改为前台 8 秒，回到前台立即读取一次。
+- 本次不新增 WebSocket 队列事件，避免在兼容补丁中改变跨端协议。8 秒是兜底轮询频率，不声称已完全消除请求。
 
-新主机只有 1.9 GB 内存，且与 VPN 共用。以下限制让 Agents Anywhere 出问题时**只影响自己**——否则宿主机 OOM killer 会挑选占用最大的进程杀掉，可能命中 VPN。
+## 2026-11-15 磁盘清理
 
-### 容器内存上限
+按维护者要求，仅删除确认可重建或重复的文件：
 
-`docker/docker-compose.postgres.yml` 中为 AA 的三个容器设置了 `mem_limit`（同时设置 `memswap_limit`，避免用 swap 绕过限制）：
+1. `/root/mig/chunk.0` 至 `chunk.7`：拼接后的 SHA256 与完整 `/root/mig/aa-next.dump.enc` 一致，删除重复传输分片（约 420 MB）。
+2. `aa-web-build:latest`：确认没有容器使用后删除这个临时构建镜像，**未执行全局 Docker prune**。
 
-| 容器 | 上限 | 依据 |
-| --- | --- | --- |
-| `server-next` | 900m | 实测稳定约 287 MB（2 个 event worker），留约 3 倍余量 |
-| `postgres-next` | 700m | 实测约 113 MB，其中大部分是可回收文件缓存；数据库 427 MB |
-| `redis-next` | 256m | `maxmemory` 为 192 MB，上限略高于它 |
-| `migrate-next` | 512m | 仅迁移时运行 |
+清理前根分区约剩 **1.7 GB**；清理后约剩 **4.5 GB**。完整 dump、加密 dump、数据库卷、附件卷、生产镜像和其他服务均保留。该数字为上传新版安装包之前的快照；三个安装包发布后约剩 **3.9 GB**（根分区使用率 81%）。完整迁移备份权限已收紧至 `0600`。
 
-超出上限时 Docker 只杀该容器（`restart: unless-stopped` 会自动拉起），VPN 不受影响。
+## 定向构建与下载发布
 
-### journald
-
-`/etc/systemd/journald.conf` 原本**没有任何容量上限**，日志已涨到 2.7 GB，`systemd-journald` 进程占用 152 MB 内存。主要来源不是 AA（24 小时仅 1 行），而是：
-
-| 来源 | 24h 行数 |
-| --- | --- |
-| sing-box（VPN） | 65,448 |
-| sshd | 25,245（其中 6,283 次密码失败、3,231 次非法用户） |
-
-现配置：`SystemMaxUse=500M`、`RuntimeMaxUse=64M`、`MaxRetentionSec=30day`，并启用限流。生效后 journald 内存降到约 52 MB，磁盘占用 2.7 GB → 465 MB。
-
-### Docker 日志轮转
-
-`/etc/docker/daemon.json` 设置 `max-size=20m`、`max-file=3`。注意：
-
-- `systemctl reload docker` **不会**应用 `log-opts`，必须 `systemctl restart docker`。
-- 所有容器都是 `unless-stopped`，重启 Docker 后会自动拉起；sing-box 是 systemd 服务，不受影响。
-- 已存在的容器保留旧日志配置，需重建才生效。
-
-改动前 `sub2api-caddy` 的日志已达 87 MB（约 7.6 MB/天）。清理时用 `truncate -s 0`，**不要删文件**——容器按 inode 持有该文件，删除后空间要等重启才释放。
-
-### SSH 防护
-
-`fail2ban`（`jail.local`，`sshd` jail，`mode = aggressive`，`maxretry = 5`，`bantime = 1h`）。日志显示主机持续遭受 SSH 爆破。
-
-**`ignoreip` 只保留 loopback**，不列出任何运维地址：
-
-```
-ignoreip = 127.0.0.1/8 ::1
-```
-
-这样所有 IP 一视同仁，封禁判断不依赖运维方从哪个网络接入。因为本机使用**密钥登录**（`ssh -v` 可确认 `Authenticated to ... using "publickey"`），正常操作不会产生密码失败，也就不会被封。
-
-### 如果被误封
-
-出口 IP 没有白名单，所以下列情况可能触发封禁：
-
-- 人为用密码登录并连续输错 5 次；
-- 所在网络出口 IP 与攻击源重合（NAT / 共享出口）。
-
-被封后按 1 小时自动解封，或从控制台 VNC 进入执行：
+本次用户要求的产物只有：macOS Universal DMG、Linux Connector 源码包、Android Release APK。**不构建 Windows、Linux 桌面、iOS。** 版本与签名边界见 [2.1.2 发布说明](releases/2.1.2.md)。
 
 ```bash
-fail2ban-client set sshd unbanip <你的IP>
-fail2ban-client status sshd          # 查看当前封禁列表
+# 先按 PATCH 规则更新 Desktop / Renderer / Connector / Android 版本并写发布说明。
+# 需要 SSH 已认证；默认发布目标为 root@closex.cc，不再依赖历史 aa-new 别名。
+./devtools/release-closex.sh 2.1.2
+
+# 已构建好的同版本产物：跳过构建，继续断点上传、验证并发布页面。
+./devtools/release-closex.sh 2.1.2 --no-build
 ```
 
-注意 `ignoreip` 是**豁免名单**（名单内的 IP 永不被封），不是访问控制——它不限制任何人访问。若确实需要免封，把地址加回该行即可。
+可用 `AA_REMOTE`、`AA_DOWNLOAD_DIR`、`AA_SERVER_URL`、`AA_PAGE_URL` 覆盖部署目标；已有 SSH ControlMaster 时可设置 `AA_SSH_CONTROL_PATH`。脚本不保存或传递密码。
 
-### 临时关闭
+- 安装包先上传到隐藏 staging 目录，支持断点续传；完整 SHA256 通过后才替换正式文件。
+- 三个产物就绪后才原子替换下载首页；页面不展示未上传的平台。
+- `SHA256SUMS.txt` 提供完整哈希；公开域名下载另验证 Range 内容，避免在低带宽链路重复下载整个 DMG。
+- Android 使用普通非 debuggable Release APK，显式沿用原 debug 证书以允许覆盖旧版本，不是模拟器专用包或正式发行证书包。
+- 2026-11-15 发布完成：三个产物完整服务端 SHA256 和公网 Range 内容均通过；大小 / 哈希见发布说明。临时 HTTPS 上传入口已撤销（PUT 501），上传 token 文件已删除，过期 timer 已停止，不保留对外写入口。
 
-需要完全停掉防护时：
+## 历史主机（不是当前生产目标）
 
-```bash
-systemctl stop fail2ban        # 立即停止（已封禁的 IP 会一并解封）
-systemctl disable fail2ban     # 可选：取消开机自启
-```
-
-### 下载页必须能真正下到文件
-
-下载页的链接是**相对路径**（`href="agents-anywhere-….apk"`），所以页面 URL 的**结尾斜杠决定了浏览器把它解析到哪里**：
-
-| 页面 URL | 浏览器解析出的链接 | 结果 |
+| 地址 | 历史用途 | 注意 |
 | --- | --- | --- |
-| `/download`（无斜杠） | `/agents-anywhere-….apk` | 被 catch-all 用 Web 控制台的 HTML 兜底，得到 **17 KB 的网页** |
-| `/download/`（有斜杠） | `/download/agents-anywhere-….apk` | 正确的 47 MB 安装包 |
+| `156.225.23.215` | 2026-09-16 至本次迁移前的生产主机；本机历史 SSH 别名 `aa-new` 仍可能指向它 | 不再作为默认发布目标，不把新包误传到该机 |
+| `124.220.147.199` | 更早的主机；历史别名 `aa-server` | 数据、服务存续状态需另行核实，不能直接宣称可无损回滚 |
 
-这个问题很隐蔽：错误的链接同样返回 **HTTP 200**，文件也有内容，只是内容是网页——下载下来才发现在浏览器里打不开。因此 Caddy 中有一条 `redir /download /download/ permanent` 做规范化。
-
-注意实现方式：必须用**裸 `redir` 指令**，不能写成 `handle` 块。Caddy 按自身优先级排序指令，`handle` 块之间是互斥的，实测放在 `handle` 链里的重定向不会生效。
-
-`devtools/release.sh` 现在会按浏览器的方式验证：跟随重定向取到页面最终 URL，据此解析相对链接，下载后用 `cmp` 与本地构建产物逐字节比对。**只检查链接返回 200 是不够的**，这正是本次漏检的原因。
-
-### 加固后的实测结果
-
-| 指标 | 加固前 | 加固后 |
-| --- | --- | --- |
-| journald 内存 | 152 MB | 52 MB |
-| journald 磁盘 | 2.7 GB | 465 MB |
-| 根分区占用 | 14 GB (48%) | 12 GB (40%) |
-| 容器内存上限 | 无 | server 900m / pg 700m / redis 256m |
-| SSH 爆破防护 | 无 | fail2ban，`ignoreip` 仅 loopback |
-| swap 换页 | — | `si=0 so=0`，无压力 |
-
-所有改动均先备份到 `/root/aa-hardening-backup-<时间戳>/`。
-
-## 迁移记录（2026-09-16）
-
-从旧主机迁到新主机：
-
-- 传输 `pg_dump`（99,358,786 字节）与 Docker 镜像，MD5 / SHA256 均逐字节校验一致。
-- 恢复后数据：1 个账号、2 个连接器、945 个会话、22 万余条时间线条目、192 个项目。
-- 附件存储卷为空（无上传文件），因此只需迁移数据库。
-- 数据库密码与签名密钥沿用旧值，**已登录设备与连接器无需重新登录**。
+2026-11-15 已切换域名并继续写入新主机。任何切回旧主机的操作都必须先同步新产生的数据；不能直接回滚旧数据库而丢失新会话。
