@@ -22,6 +22,8 @@ fun String.asBuildConfigString(): String = "\"" + replace("\\", "\\\\")
 android {
     namespace = "com.agentsanywhere.app"
     compileSdk = 36
+    // Exercise the ordinary signed Release APK with a separate instrumentation APK.
+    testBuildType = providers.gradleProperty("agentsAnywhere.testBuildType").orElse("debug").get()
 
     defaultConfig {
         applicationId = "com.agentsanywhere.app"

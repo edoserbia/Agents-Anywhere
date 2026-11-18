@@ -83,7 +83,7 @@ internal fun List<RuntimeSelectionOption>.groupByModelLabel(): List<ModelOptionG
     groupBy(RuntimeSelectionOption::modelLabel).map { (label, options) -> ModelOptionGroup(label, options) }
 
 internal fun List<RuntimeSelectionOption>.groupByProvider(): List<ProviderOptionGroup> {
-    val providers = mapNotNull(RuntimeSelectionOption::providerLabel).distinct()
+    val providers = map(RuntimeSelectionOption::providerLabel).distinct()
     if (providers.size <= 1) return listOf(ProviderOptionGroup(null, groupByModelLabel()))
     // Providers first, then the models inside each one: grouping by model name
     // across the whole catalog would merge two providers that serve the same
@@ -91,6 +91,13 @@ internal fun List<RuntimeSelectionOption>.groupByProvider(): List<ProviderOption
     return groupBy(RuntimeSelectionOption::providerLabel)
         .map { (provider, options) -> ProviderOptionGroup(provider, options.groupByModelLabel()) }
 }
+
+/** Resolve a row only within its provider/model group, never across the catalog. */
+internal fun ModelOptionGroup.displayOption(selectedId: String?): RuntimeSelectionOption =
+    (options.firstOrNull { it.selectionId == selectedId }
+        ?: options.firstOrNull { it.enabled && it.default }
+        ?: options.firstOrNull { it.enabled }
+        ?: options.first()).let { it.copy(label = it.modelLabel) }
 
 @Composable
 internal fun SessionRuntimeSettingsSheet(
@@ -112,8 +119,8 @@ internal fun SessionRuntimeSettingsSheet(
 ) {
     var page by remember(runtimeLabel) { mutableStateOf(RuntimeSettingsPage.Model) }
     val palette = AABottomSheetDefaults.colors()
-    val groupedModels = remember(modelOptions) { modelOptions.groupByModelLabel() }
     val providerGroups = remember(modelOptions) { modelOptions.groupByProvider() }
+    val groupedModels = remember(providerGroups) { providerGroups.flatMap { it.models } }
     val selectedModelGroup = groupedModels.firstOrNull { group ->
         group.options.any { it.selectionId == selectedModelId }
     } ?: groupedModels.firstOrNull()
@@ -143,7 +150,6 @@ internal fun SessionRuntimeSettingsSheet(
     ) {
         when (page) {
             RuntimeSettingsPage.Model -> ModelPage(
-                groups = groupedModels,
                 providerGroups = providerGroups,
                 providerExpanded = providerExpanded,
                 onToggleProvider = { provider ->
@@ -184,7 +190,6 @@ internal fun SessionRuntimeSettingsSheet(
 
 @Composable
 private fun ModelPage(
-    groups: List<ModelOptionGroup>,
     providerGroups: List<ProviderOptionGroup>,
     providerExpanded: (String?) -> Boolean,
     onToggleProvider: (String) -> Unit,
@@ -200,7 +205,6 @@ private fun ModelPage(
     onSelect: (String) -> Unit,
 ) {
     ModelOptions(
-        groups = groups,
         providerGroups = providerGroups,
         providerExpanded = providerExpanded,
         onToggleProvider = onToggleProvider,
@@ -226,7 +230,6 @@ private fun ModelPage(
 
 @Composable
 private fun ModelOptions(
-    groups: List<ModelOptionGroup>,
     providerGroups: List<ProviderOptionGroup>,
     providerExpanded: (String?) -> Boolean,
     onToggleProvider: (String) -> Unit,
@@ -238,24 +241,13 @@ private fun ModelOptions(
     onRetry: () -> Unit,
     onSelect: (String) -> Unit,
 ) {
-    val rows = groups.map { group ->
-        val current = group.options.firstOrNull { it.selectionId == selectedId }
-        val option = current
-            ?: group.options.firstOrNull { it.enabled && it.default }
-            ?: group.options.firstOrNull { it.enabled }
-            ?: group.options.first()
-        group to option.copy(label = option.modelLabel)
-    }
-    val selectedIds = groups
-        .firstOrNull { group -> group.options.any { option -> option.selectionId == selectedId } }
-        ?.options
-        ?.mapTo(mutableSetOf()) { it.selectionId }
-        .orEmpty()
-    val modelRow: @Composable (RuntimeSelectionOption, Modifier) -> Unit = { option, modifier ->
+    val empty = providerGroups.all { it.models.isEmpty() }
+    val modelRow: @Composable (ModelOptionGroup, Modifier) -> Unit = { group, modifier ->
+        val option = group.displayOption(selectedId)
         AABottomSheetItem(
             text = option.label,
             supportingText = option.disabledReason,
-            selected = option.selectionId == selectedId || option.selectionId in selectedIds,
+            selected = option.selectionId == selectedId,
             enabled = !busy && !loading && option.enabled,
             modifier = modifier,
             onClick = { onSelect(option.selectionId) },
@@ -264,19 +256,19 @@ private fun ModelOptions(
     val grouped = providerGroups.any { it.label != null }
 
     when {
-        loading && rows.isEmpty() -> SheetLoading(palette = palette)
-        errorMessage != null && rows.isEmpty() -> SheetError(
+        loading && empty -> SheetLoading(palette = palette)
+        errorMessage != null && empty -> SheetError(
             message = errorMessage,
             retryEnabled = !busy && !loading,
             onRetry = onRetry,
         )
-        rows.isEmpty() -> SheetEmpty(palette = palette)
+        empty -> SheetEmpty(palette = palette)
         else -> Column(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             if (!grouped) {
-                rows.forEach { (_, option) -> modelRow(option, Modifier) }
+                providerGroups.flatMap { it.models }.forEach { modelRow(it, Modifier) }
                 return@Column
             }
             providerGroups.forEach { provider ->
@@ -284,21 +276,21 @@ private fun ModelOptions(
                 if (label == null) {
                     // A runtime that named some providers but not others keeps
                     // the unnamed ones visible, just without a header to fold.
-                    rows.filter { (group, _) -> provider.models.any { it === group } }
-                        .forEach { (_, option) -> modelRow(option, Modifier) }
+                    provider.models.forEach { modelRow(it, Modifier) }
                     return@forEach
                 }
                 val expanded = providerExpanded(label)
                 ProviderSectionHeader(
                     label = label,
-                    count = provider.models.sumOf { it.options.size },
+                    count = provider.models.size,
                     expanded = expanded,
                     palette = palette,
                     onClick = { onToggleProvider(label) },
                 )
                 if (!expanded) return@forEach
-                rows.filter { (group, _) -> provider.models.any { it === group } }
-                    .forEach { (_, option) -> modelRow(option, Modifier.padding(start = 12.dp)) }
+                // Render this provider's own groups: separately created groups
+                // are not referentially equal, and model names can be shared.
+                provider.models.forEach { modelRow(it, Modifier.padding(start = 12.dp)) }
             }
         }
     }

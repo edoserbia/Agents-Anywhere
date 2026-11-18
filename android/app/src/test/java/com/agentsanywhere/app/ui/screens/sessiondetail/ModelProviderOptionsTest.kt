@@ -124,4 +124,45 @@ class ModelProviderOptionsTest {
         assertEquals(null, none.groupByProvider().single().label)
         assertTrue(none.groupByProvider().single().models.size == 2)
     }
+    @Test
+    fun `same name rows and effort options stay scoped to their provider`() {
+        val options = catalog(
+            model("alpha/shared", "Shared · Alpha", "alpha", "Alpha", "Shared",
+                reasoningItems = listOf(reasoning("low", "Low", "alpha-low"), reasoning("high", "High", "alpha-high"))),
+            model("beta/shared", "Shared · Beta", "beta", "Beta", "Shared",
+                reasoningItems = listOf(reasoning("low", "Low", "beta-low"), reasoning("high", "High", "beta-high"))),
+        ).selectionOptions()
+        val groups = options.groupByProvider().flatMap { it.models }
+        assertEquals(2, groups.size)
+        assertEquals("alpha-high", groups[0].displayOption("alpha-high").selectionId)
+        assertEquals("beta-low", groups[1].displayOption("alpha-high").selectionId)
+        assertEquals(listOf("beta-low", "beta-high"), groups[1].options.map { it.selectionId })
+        assertEquals("Shared", groups[1].displayOption("beta-high").label)
+    }
+
+    @Test
+    fun `a named and unnamed provider do not merge same name models`() {
+        val options = catalog(
+            model("plain/shared", "Shared", null, null, "Shared"),
+            model("alpha/shared", "Shared · Alpha", "alpha", "Alpha", "Shared"),
+        ).selectionOptions()
+        val groups = options.groupByProvider()
+        assertEquals(listOf(null, "Alpha"), groups.map { it.label })
+        assertEquals(listOf("sel_plain/shared", "sel_alpha/shared"), groups.map { it.models.single().displayOption(null).selectionId })
+    }
+
+    @Test
+    fun `row prefers selected then enabled default then enabled fallback`() {
+        val original = catalog(model("a", "A", null, null)).selectionOptions().single()
+        val group = ModelOptionGroup("A", listOf(
+            original.copy(selectionId = "disabled-default", default = true, enabled = false),
+            original.copy(selectionId = "fallback"),
+            original.copy(selectionId = "default", default = true),
+        ))
+        assertEquals("default", group.displayOption(null).selectionId)
+        assertEquals("fallback", group.displayOption("fallback").selectionId)
+        assertEquals("fallback", group.copy(options = group.options.take(2)).displayOption(null).selectionId)
+        assertEquals("disabled-default", group.copy(options = group.options.take(1)).displayOption(null).selectionId)
+    }
+
 }

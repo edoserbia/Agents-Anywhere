@@ -14,6 +14,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.agentsanywhere.app.feature.sessions.ProjectDeviceAgentFilter
 import com.agentsanywhere.app.feature.sessions.ProjectSessionStatusFilter
 import com.agentsanywhere.app.model.AgentDevice
 import com.agentsanywhere.app.model.AgentProject
@@ -45,6 +46,11 @@ private class FakeStore : HomePreferenceStore {
     override fun getString(key: String): String? = null
 
     override fun putString(key: String, value: String) = Unit
+
+    override fun remove(key: String) {
+        booleans.remove(key)
+        sets.remove(key)
+    }
 }
 
 /**
@@ -123,6 +129,8 @@ class DestinationStateRestorationTest {
                         onSessionLongPress = { _, _ -> },
                         onOpenSession = {},
                         devices = devices,
+                        agentRuntimes = emptyList(),
+                        deviceAgentFilter = ProjectDeviceAgentFilter(),
                     )
                 } else {
                     Text("session detail")

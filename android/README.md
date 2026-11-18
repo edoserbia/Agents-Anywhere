@@ -17,11 +17,11 @@ Native Android client for Agents Anywhere.
 4. Connect an Android phone with USB debugging enabled.
 5. Run the `app` configuration.
 
-## Install 2.0.0
+## Install 2.1.2
 
 Download the Android APK from the [release download table](../README.md#下载与入口).
 The client supports Android 8.0+ (API 26), sessions, devices, runtime configuration,
-approvals, files and terminals through the v2 API. Cloud is the default service;
+approvals, files and terminals through the v2 API. `https://closex.cc` is the default service;
 a self-hosted address can be selected in the login flow.
 
 ## Build from the command line
@@ -36,8 +36,11 @@ Use JDK 17 and the Android SDK matching `compileSdk` in `app/build.gradle.kts`
 ```
 
 On Windows use `gradlew.bat`. Outputs are under `app/build/outputs/apk/`.
-The checked-in release build type does not define a signing configuration;
-`assembleRelease` alone does not produce a distributable signed update. Apply the
+The normal release build type does not define a signing configuration;
+`assembleRelease` alone does not produce a distributable signed update.
+The self-hosted distribution can explicitly reuse the existing debug certificate
+with `-PagentsAnywhere.signReleaseWithDebugKey=true`; the application is still a
+non-debuggable Release build, not an officially release-key-signed application. Apply the
 release signing process with the existing keystore and keep that identity for
 future updates. Do not commit passwords or keystores. Changing the signature
 prevents an in-place update of an installed app signed with another key.
@@ -53,8 +56,8 @@ numerically. This also runs on launch with an existing login and when the saved
 server changes. Login screens and sessions without a saved server never check
 for updates; no default server is substituted. Signing out cancels pending
 checks and downloads and clears the visible update state.
-`AppConfig.UPDATE_DOWNLOAD_URL` is the fixed APK address and currently contains
-an explicit `.invalid` placeholder that must be replaced before distribution.
+`AppConfig.UPDATE_DOWNLOAD_URL` is the fixed APK address:
+`https://closex.cc/download/agents-anywhere-2.1.2.apk`.
 
 **Ignore this version** saves the target version per server in the private
 `app-updates` SharedPreferences file. The same version stays quiet on later
@@ -63,3 +66,34 @@ red dot beside **Check for updates** whenever a newer version exists. Tapping it
 reopens the dialog even for an ignored version. Outside taps and Back do not
 close the prompt. Downloads show progress and continue through the existing APK
 installer flow.
+
+## Model picker regression tests
+
+Run the picker UI tests on a **phone** emulator (`Medium_Phone_API_36.0`), not a
+tablet. Use the same ordinary Release APK that will be published; the second APK
+below is an instrumentation test harness, not another application build.
+
+```bash
+JAVA_HOME=$(/usr/libexec/java_home -v 17) ./gradlew \
+  testReleaseUnitTest assembleRelease assembleReleaseAndroidTest \
+  -PagentsAnywhere.testBuildType=release \
+  -PagentsAnywhere.signReleaseWithDebugKey=true
+adb -s emulator-5554 install -r app/build/outputs/apk/release/app-release.apk
+adb -s emulator-5554 install -r -t app/build/outputs/apk/androidTest/release/app-release-androidTest.apk
+adb -s emulator-5554 shell am instrument -w -r \
+  -e class com.agentsanywhere.app.ui.screens.sessiondetail.ModelProviderPickerTest \
+  com.agentsanywhere.app.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Adjust the device serial to the running phone emulator. These offline fixtures
+exercise the real settings sheet without logging in or changing production
+sessions: provider expansion/collapse, selection callbacks, duplicate model names,
+provider-specific reasoning options, unnamed providers and long-list scrolling.
+The optional `agentsAnywhere.testBuildType` property defaults to `debug` for the
+existing instrumentation tests; only the model picker suite above is selected in
+the Release command.
+
+The Android-only rebuild on November 18, 2026 keeps versionName `2.1.2` and
+versionCode `45` at the user's request. The automatic update prompt only detects
+higher versions, so download and manually install the replacement APK over the
+existing same-signature installation; do not uninstall or clear app data.
