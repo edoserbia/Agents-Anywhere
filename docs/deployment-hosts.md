@@ -135,6 +135,16 @@ Connector 应直接访问 `closex.cc`。两台 Linux 主机的代理曾导致 TL
 - Android 使用普通非 debuggable Release APK，显式沿用原 debug 证书以允许覆盖旧版本，不是模拟器专用包或正式发行证书包。
 - 2026-11-15 发布完成：三个产物完整服务端 SHA256 和公网 Range 内容均通过；大小 / 哈希见发布说明。临时 HTTPS 上传入口已撤销（PUT 501），上传 token 文件已删除，过期 timer 已停止，不保留对外写入口。
 
+## 2026-11-18 Android 模型选择器同版本重发
+
+- 仅修复并重发 Android 2.1.2 / 45：供应商下的模型直接按所属分组渲染，不再用两份分组对象的引用相等性过滤；同名模型的选择和推理级别限定到供应商。完整记录见 [2.1.2 发布说明](releases/2.1.2.md)。
+- 使用 **手机** AVD `Medium_Phone_API_36.0`（API 36，1080×2400），没有在平板上执行测试。106 项 Release 单测及 5 项真实 Compose Sheet 仪器回归通过；应用为同一个普通多架构、非 debuggable Release APK，测试载体 APK 不发布。
+- `/opt/aa-downloads/agents-anywhere-2.1.2.apk` 已通过隐藏 staging 上传、完整 SHA256 校验后原子替换。APK 大小 `41549644` 字节，SHA256 `40e42bd57b55cb398027bea28e959a915bf560d34f258e1cb272c0c9184a1209`。macOS / Connector 哈希匹配，跳过上传，安装包没有变化。
+- 公网完整下载 APK 与本地逐字节一致；将该公网文件覆盖安装到手机模拟器后，5 项 UI 回归再次通过。下载页、CHANGELOG、SHA256SUMS 均已更新，`/download` 最终仍为 `/download/`，APK Range 返回 206 与正确总长度。
+- 下载目录递归检查只剩这一份 Android APK，没有其他历史 Android 包需要删除；旧同版本内容已被替换，隐藏 staging 已移除。当前根分区约余 **1.7 GB**（92% 使用），足以完成本次替换，因此没有删除备份、数据库或其他服务文件。
+- 下载服务保持 active，域名 `/api/v2/health` 为 ok。本次未更新或重启 Server、三台 Connector 和本机桌面客户端，也没有创建新的对外上传入口。
+- 用户要求保持版本号不变，因此不会触发版本比较式的更新弹窗。需手动下载并覆盖安装，保留原签名，不卸载、不清空数据；测试未覆盖生产会话写回和真机。
+
 ## 历史主机（不是当前生产目标）
 
 | 地址 | 历史用途 | 注意 |
