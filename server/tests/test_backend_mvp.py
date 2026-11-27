@@ -12476,3 +12476,159 @@ def test_deleting_an_unknown_timeline_item_is_idempotent_and_stays_hidden(tmp_pa
     )
     assert timeline.status_code == 200, timeline.text
     assert "tl_never_existed" not in {entry["id"] for entry in timeline.json()["items"]}
+
+
+def test_a_deleted_timeline_item_stays_deleted_across_a_complete_snapshot(tmp_path):
+    """A full Runtime snapshot must not resurrect an item the reader deleted.
+
+    ``timeline.sync`` with ``complete=True`` replaces the session's timeline.
+    The runtime keeps reporting the deleted item, so it arrives inside that
+    snapshot; the reader's mark has to win.
+    """
+    client = make_client(tmp_path)
+    _, access_token, session_id, headers = create_connector_and_session(client)
+
+    item = {
+        "id": "tl_snapshot_delete_me",
+        "sessionId": session_id,
+        "turnId": "turn_1",
+        "type": "message",
+        "status": "done",
+        "role": "user",
+        "content": {"text": "remove me", "format": "markdown"},
+        "source": {"runtime": "codex", "sessionId": "thr_1", "itemId": "item_del"},
+        "orderSeq": 1,
+        "revision": 1,
+        "contentHash": "sha256:snapshot-delete-me",
+    }
+
+    with client.websocket_connect(
+        "/connector/ws", headers={"Authorization": f"Bearer {access_token}"}
+    ) as ws:
+        ws.send_json(
+            {"type": "notification", "method": "timeline.itemUpsert",
+             "params": {"sessionId": session_id, "item": item}}
+        )
+        wait_for_item_update(client, session_id, headers, 0)
+
+    def visible_ids(mode: str, **extra):
+        params = {"mode": mode, "limit": 50, **extra}
+        response = client.get(
+            f"/sessions/{session_id}/timeline", headers=headers, params=params
+        )
+        assert response.status_code == 200, response.text
+        return {entry["id"] for entry in response.json()["items"]}
+
+    assert "tl_snapshot_delete_me" in visible_ids("latest")
+    deleted = client.delete(
+        f"/sessions/{session_id}/timeline/tl_snapshot_delete_me", headers=headers
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert "tl_snapshot_delete_me" not in visible_ids("latest")
+
+    replacement = client.post(
+        "/connector/ingest",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json={
+            "notifications": [
+                {
+                    "method": "timeline.sync",
+                    "params": {
+                        "sessionId": session_id,
+                        "complete": True,
+                        "items": [{**item, "revision": 2, "contentHash": "sha256:snapshot-updated"}],
+                    },
+                }
+            ]
+        },
+    )
+    assert replacement.status_code == 200, replacement.text
+
+    assert "tl_snapshot_delete_me" not in visible_ids("latest"), (
+        "a complete snapshot must not resurrect a deleted item"
+    )
+    assert "tl_snapshot_delete_me" not in visible_ids("changes", afterSeq=0)
+
+
+def test_a_deleted_item_stays_deleted_in_another_session_of_the_same_thread(tmp_path):
+    """Deleting must follow the runtime thread, not one session record.
+
+    A Codex thread can be reachable through two AA sessions: the id the scanner
+    derives and the id a session keeps when it was created from a client. A mark
+    stored only against ``session_id`` let the same message reappear as soon as
+    the reader opened the thread through the other session.
+    """
+    client = make_client(tmp_path)
+    connector_id, access_token, first_session, headers = create_connector_and_session(client)
+
+    meta = client.get(f"/sessions/{first_session}/meta", headers=headers).json()["session"]
+    thread_id = meta["externalSessionId"]
+
+    sibling = client.post(
+        "/sessions",
+        headers=headers,
+        json={
+            "connectorId": connector_id,
+            "projectId": meta.get("projectId"),
+            "runtime": "codex",
+            "externalSessionId": thread_id,
+            "title": "Same thread, other session",
+            "cwd": "/repo",
+        },
+    )
+    assert sibling.status_code == 200, sibling.text
+    second_session = sibling.json()["session"]["id"]
+    assert second_session != first_session
+
+    item = {
+        "id": "tl_shared_thread_item",
+        "sessionId": first_session,
+        "turnId": "turn_1",
+        "type": "message",
+        "status": "done",
+        "role": "user",
+        "content": {"text": "delete me everywhere", "format": "markdown"},
+        "source": {"runtime": "codex", "sessionId": thread_id, "itemId": "item_shared"},
+        "orderSeq": 1,
+        "revision": 1,
+        "contentHash": "sha256:shared-item",
+    }
+
+    def push(session_id: str, payload: dict[str, Any]) -> None:
+        with client.websocket_connect(
+            "/connector/ws", headers={"Authorization": f"Bearer {access_token}"}
+        ) as ws:
+            ws.send_json(
+                {"type": "notification", "method": "timeline.itemUpsert",
+                 "params": {"sessionId": session_id, "item": payload}}
+            )
+        wait_for_item_update(client, session_id, headers, 0)
+
+    def visible_ids(session_id: str) -> set[str]:
+        response = client.get(
+            f"/sessions/{session_id}/timeline",
+            headers=headers,
+            params={"mode": "latest", "limit": 50},
+        )
+        assert response.status_code == 200, response.text
+        return {entry["id"] for entry in response.json()["items"]}
+
+    push(first_session, item)
+    assert "tl_shared_thread_item" in visible_ids(first_session)
+    push(second_session, {**item, "sessionId": second_session})
+    assert "tl_shared_thread_item" in visible_ids(second_session)
+
+    deleted = client.delete(
+        f"/sessions/{first_session}/timeline/tl_shared_thread_item", headers=headers
+    )
+    assert deleted.status_code == 200, deleted.text
+
+    assert "tl_shared_thread_item" not in visible_ids(first_session)
+    assert "tl_shared_thread_item" not in visible_ids(second_session), (
+        "deleting in one session must hide the item in every session of the thread"
+    )
+
+    # And it stays hidden when the runtime reports it again for the sibling.
+    push(second_session, {**item, "sessionId": second_session, "revision": 2,
+                          "contentHash": "sha256:shared-item-2"})
+    assert "tl_shared_thread_item" not in visible_ids(second_session)

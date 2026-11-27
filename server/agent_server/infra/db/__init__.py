@@ -26,6 +26,7 @@ from agent_server.infra.db.schema import (
     sessions,
     timeline_item_hides,
     timeline_items,
+    timeline_thread_hides,
     users,
 )
 
@@ -57,5 +58,6 @@ __all__ = [
     "sessions",
     "timeline_item_hides",
     "timeline_items",
+    "timeline_thread_hides",
     "users",
 ]

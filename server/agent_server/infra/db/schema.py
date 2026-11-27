@@ -571,6 +571,32 @@ timeline_item_hides = Table(
     PrimaryKeyConstraint("session_id", "item_id"),
 )
 
+# A runtime thread can be reachable through more than one AA session (the scanner
+# derives its own id, and a session created from the client keeps the id the client
+# chose). Readers expect a deleted message to stay deleted in every session that
+# shows the same thread, so the mark also lives at thread scope.
+timeline_thread_hides = Table(
+    "timeline_thread_hides",
+    metadata,
+    Column(
+        "connector_id",
+        Text,
+        ForeignKey("connectors.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("runtime", Text, nullable=False),
+    Column("external_session_id", Text, nullable=False),
+    Column("item_id", Text, nullable=False),
+    Column("hidden_at", Text, nullable=False),
+    PrimaryKeyConstraint("connector_id", "runtime", "external_session_id", "item_id"),
+    Index(
+        "ix_timeline_thread_hides_thread",
+        "connector_id",
+        "runtime",
+        "external_session_id",
+    ),
+)
+
 
 session_shares = Table(
     "session_shares",

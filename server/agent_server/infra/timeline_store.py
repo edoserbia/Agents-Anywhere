@@ -3,14 +3,21 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from agent_server.core.models import TimelineItem
 from agent_server.core.utc import utc_now
-from agent_server.infra.db import timeline_item_hides, timeline_items
+from agent_server.infra.db import (
+    sessions as sessions_t,
+)
+from agent_server.infra.db import (
+    timeline_item_hides,
+    timeline_items,
+    timeline_thread_hides,
+)
 from agent_server.infra.db.engine import SQLITE_BACKEND
 
 
@@ -229,6 +236,9 @@ class SqlTimelineStore:
                     timeline_items.select()
                     .where(
                         timeline_items.c.hidden_at.is_(None),
+                        timeline_items.c.id.not_in(
+                            _thread_hidden_ids_select(session_id)
+                        ),
                         timeline_items.c.session_id == session_id,
                         timeline_items.c.updated_seq > after_seq,
                     )
@@ -246,6 +256,11 @@ class SqlTimelineStore:
                 await conn.execute(
                     timeline_items.select()
                     .where(timeline_items.c.hidden_at.is_(None))
+                    .where(
+                        timeline_items.c.id.not_in(
+                            _thread_hidden_ids_select(session_id)
+                        )
+                    )
                     .where(timeline_items.c.session_id == session_id)
                     .order_by(
                         timeline_items.c.order_seq.desc(),
@@ -268,6 +283,11 @@ class SqlTimelineStore:
                 await conn.execute(
                     timeline_items.select()
                     .where(timeline_items.c.hidden_at.is_(None))
+                    .where(
+                        timeline_items.c.id.not_in(
+                            _thread_hidden_ids_select(session_id)
+                        )
+                    )
                     .where(
                         timeline_items.c.session_id == session_id,
                         timeline_items.c.order_seq < before_order_seq,
@@ -299,6 +319,15 @@ class SqlTimelineStore:
         does not exist in this session.
         """
         async with self._engine.begin() as conn:
+            thread = (
+                await conn.execute(
+                    select(
+                        sessions_t.c.connector_id,
+                        sessions_t.c.runtime,
+                        sessions_t.c.external_session_id,
+                    ).where(sessions_t.c.id == session_id)
+                )
+            ).first()
             result = await conn.execute(
                 update(timeline_items)
                 .where(
@@ -307,6 +336,19 @@ class SqlTimelineStore:
                 )
                 .values(hidden_at=utc_now() if hidden else None)
             )
+            # The same runtime thread can be opened through another AA session —
+            # a derived scan id versus the id a client created it with — so the
+            # mark follows the thread instead of one session row.
+            if thread is not None and thread.external_session_id:
+                await _write_thread_hide(
+                    conn,
+                    backend=self._backend,
+                    connector_id=thread.connector_id,
+                    runtime=thread.runtime,
+                    external_session_id=thread.external_session_id,
+                    item_id=item_id,
+                    hidden=hidden,
+                )
             if hidden:
                 if self._backend == SQLITE_BACKEND:
                     statement = sqlite_insert(timeline_item_hides).values(
@@ -358,7 +400,15 @@ class SqlTimelineStore:
                     )
                 )
             ).all()
-        return {row[0] for row in rows} | {row[0] for row in tombstones}
+        async with self._engine.connect() as conn:
+            thread_hides = (
+                await conn.execute(_thread_hidden_ids_select(session_id))
+            ).all()
+        return (
+            {row[0] for row in rows}
+            | {row[0] for row in tombstones}
+            | {row[0] for row in thread_hides}
+        )
 
     def _row_values(self, item: TimelineItem) -> dict[str, Any]:
         return {
@@ -377,3 +427,74 @@ class SqlTimelineStore:
 def _item_time(item: TimelineItem) -> str | None:
     values = [value for value in (item.createdAt, item.completedAt, item.updatedAt) if value]
     return max(values) if values else None
+
+
+def _thread_hidden_ids_select(session_id: str):
+    """Item ids hidden for the runtime thread this session belongs to."""
+
+    identity = (
+        select(
+            sessions_t.c.connector_id.label("connector_id"),
+            sessions_t.c.runtime.label("runtime"),
+            sessions_t.c.external_session_id.label("external_session_id"),
+        )
+        .where(sessions_t.c.id == session_id)
+        .subquery()
+    )
+    return (
+        select(timeline_thread_hides.c.item_id)
+        .select_from(
+            timeline_thread_hides.join(
+                identity,
+                and_(
+                    timeline_thread_hides.c.connector_id == identity.c.connector_id,
+                    timeline_thread_hides.c.runtime == identity.c.runtime,
+                    timeline_thread_hides.c.external_session_id
+                    == identity.c.external_session_id,
+                ),
+            )
+        )
+    )
+
+
+async def _write_thread_hide(
+    conn: AsyncConnection,
+    *,
+    backend: str,
+    connector_id: str,
+    runtime: str,
+    external_session_id: str,
+    item_id: str,
+    hidden: bool,
+) -> None:
+    if not hidden:
+        await conn.execute(
+            delete(timeline_thread_hides).where(
+                timeline_thread_hides.c.connector_id == connector_id,
+                timeline_thread_hides.c.runtime == runtime,
+                timeline_thread_hides.c.external_session_id == external_session_id,
+                timeline_thread_hides.c.item_id == item_id,
+            )
+        )
+        return
+    values = {
+        "connector_id": connector_id,
+        "runtime": runtime,
+        "external_session_id": external_session_id,
+        "item_id": item_id,
+        "hidden_at": utc_now(),
+    }
+    if backend == SQLITE_BACKEND:
+        statement = sqlite_insert(timeline_thread_hides).values(**values)
+        statement = statement.prefix_with("OR IGNORE")
+    else:
+        statement = pg_insert(timeline_thread_hides).values(**values)
+        statement = statement.on_conflict_do_nothing(
+            index_elements=[
+                "connector_id",
+                "runtime",
+                "external_session_id",
+                "item_id",
+            ]
+        )
+    await conn.execute(statement)
