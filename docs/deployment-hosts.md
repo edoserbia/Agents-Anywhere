@@ -145,6 +145,23 @@ Connector 应直接访问 `closex.cc`。两台 Linux 主机的代理曾导致 TL
 - 下载服务保持 active，域名 `/api/v2/health` 为 ok。本次未更新或重启 Server、三台 Connector 和本机桌面客户端，也没有创建新的对外上传入口。
 - 用户要求保持版本号不变，因此不会触发版本比较式的更新弹窗。需手动下载并覆盖安装，保留原签名，不卸载、不清空数据；测试未覆盖生产会话写回和真机。
 
+## 2026-11-27 2.1.3 部署（Server 热修挂载）
+
+本次 Server 更新只含 Python 代码与一个纯新增迁移，没有新依赖：
+
+- 迁移 `v2_45_jupiter` 已应用，`alembic_version = v2_45_jupiter`，新表
+  `timeline_thread_hides` 已建；`CURRENT_SCHEMA_REVISION` / `CURRENT_SCHEMA_VERSION`
+  同步为 `v2_45_jupiter` / `2.45`。
+- `/api/v2/health` 返回 `2.1.3`（容器内、公网各验证一次）。
+- **没有重建镜像**：生产根分区已用到 90%（2.2 GB 可用），在机上重新构建 server 镜像
+  会把磁盘顶满并波及同机的 Caddy / VPN。改为在 Compose 里给 `migrate-next` 和
+  `server-next` 增加只读挂载 `/opt/agents-anywhere/server:/app/server:ro`，让容器直接
+  运行同步过去的新代码与迁移脚本；镜像仍是 `agents-anywhere-server:release-2.1.0`。
+  Compose 备份：`docker/docker-compose.postgres.yml.bak-before-2.1.3-*`。
+- 迁移前完整备份：`/root/backups/aa-db-20261127-052326.sql.gz`（654 MB，`pg_dump
+  --clean --if-exists`）。
+- 后续重建镜像时应删除该挂载并回到标准流程；重建前先清理旧镜像/构建缓存腾出空间。
+
 ## 历史主机（不是当前生产目标）
 
 | 地址 | 历史用途 | 注意 |
