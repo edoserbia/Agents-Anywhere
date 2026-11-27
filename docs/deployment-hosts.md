@@ -149,9 +149,10 @@ Connector 应直接访问 `closex.cc`。两台 Linux 主机的代理曾导致 TL
 
 本次 Server 更新只含 Python 代码与一个纯新增迁移，没有新依赖：
 
-- 迁移 `v2_45_jupiter` 已应用，`alembic_version = v2_45_jupiter`，新表
-  `timeline_thread_hides` 已建；`CURRENT_SCHEMA_REVISION` / `CURRENT_SCHEMA_VERSION`
-  同步为 `v2_45_jupiter` / `2.45`。
+- 迁移 `v2_45_jupiter`（建表）与 `v2_46_jupiter`（把旧删除标记回填到线程作用域）已
+  应用，`alembic_version = v2_46_jupiter`；`CURRENT_SCHEMA_REVISION` /
+  `CURRENT_SCHEMA_VERSION` 同步为 `v2_46_jupiter` / `2.46`。回填后线程级标记 28 行，
+  仍缺线程级标记的旧会话级删除为 0。
 - `/api/v2/health` 返回 `2.1.3`（容器内、公网各验证一次）。
 - **没有重建镜像**：生产根分区已用到 90%（2.2 GB 可用），在机上重新构建 server 镜像
   会把磁盘顶满并波及同机的 Caddy / VPN。改为在 Compose 里给 `migrate-next` 和
