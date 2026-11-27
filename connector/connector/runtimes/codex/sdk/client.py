@@ -38,6 +38,7 @@ from connector.runtime_protocol import (
     RuntimeInvalidRequestError,
 )
 from connector.runtimes.codex.domain.input_requests import CODEX_REQUEST_USER_INPUT
+from connector.runtimes.codex.domain.writer_lock import describe_thread_writer
 from connector.runtimes.codex.runtime_helpers import soft_codex_unavailable_reason
 from connector.runtimes.codex.sdk.binary import (
     codex_launch_command,
@@ -147,8 +148,10 @@ class CodexSdkClient:
         sdk: Any | None = None,
         model_gateway: ModelGateway | None = None,
         client_factory: Callable[[], Any] | None = None,
+        writer_hint: Callable[[str], str | None] | None = None,
     ) -> None:
         self._client = client
+        self._writer_hint = writer_hint
         self._sdk = sdk
         self._model_gateway = model_gateway
         self._client_factory = client_factory
@@ -754,7 +757,8 @@ class CodexSdkClient:
             if exc.code == -32600 and "already has an active writer" in exc.message:
                 raise RuntimeConflictError(
                     "该 Codex 会话正由其他进程持有写入权限，AA 尚未接管。"
-                    "请先在原 Codex 客户端释放该会话；若仍被占用，退出对应客户端后重试。"
+                    + self._writer_hint_message(request.thread_id)
+                    + "请先在原 Codex 客户端释放该会话；若仍被占用，退出对应客户端后重试。"
                     "本次消息尚未发送。"
                 ) from exc
             raise
@@ -766,6 +770,20 @@ class CodexSdkClient:
             self._remember_thread(thread)
         if thread_id is not None:
             self._loaded_thread_ids.add(thread_id)
+
+    def _writer_hint_message(self, thread_id: str) -> str:
+        """Name the client holding the thread so "release it" is actionable.
+
+        A hint must never mask the conflict itself: any failure here is dropped.
+        """
+
+        if self._writer_hint is None:
+            return ""
+        try:
+            holder = self._writer_hint(thread_id)
+        except Exception:  # noqa: BLE001 - diagnostic only
+            return ""
+        return f"当前占用者：{holder}。" if holder else ""
 
     def _observe_command_thread(self, thread_id: str) -> None:
         if self._command_notifications:
@@ -1230,11 +1248,17 @@ def sdk_client_from_config(config: RuntimeConfig) -> CodexRuntimeClient:
 
     client = create_client()
     model_gateway = model_gateway_from_config(config.values.get("modelGateway"))
+    codex_home = config.values.get("codexHome")
     return CodexSdkClient(
         client,
         sdk=sdk,
         model_gateway=model_gateway,
         client_factory=create_client,
+        writer_hint=(
+            (lambda thread_id: describe_thread_writer(codex_home, thread_id))
+            if isinstance(codex_home, str) and codex_home
+            else None
+        ),
     )
 
 
