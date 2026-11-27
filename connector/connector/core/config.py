@@ -18,6 +18,10 @@ class ConnectorConfig:
     reconnect_seconds: float = 3
     sync_existing_on_connect: bool = True
     sync_interval_seconds: float = 30
+    # How often a session that is still running — and therefore has no live
+    # stream of its own — is re-read so its timeline keeps advancing. 0 disables
+    # the active read and restores the old freeze-until-idle behaviour.
+    active_session_sync_interval_seconds: float = 120
     state_path: str | None = None
 
     @classmethod
@@ -53,6 +57,9 @@ class ConnectorConfig:
                 True,
             ),
             sync_interval_seconds=float(os.environ.get("AGENT_CONNECTOR_SYNC_INTERVAL_SECONDS", "30")),
+            active_session_sync_interval_seconds=float(
+                os.environ.get("AGENT_CONNECTOR_ACTIVE_SYNC_INTERVAL_SECONDS", "120")
+            ),
             state_path=os.environ.get("AGENT_CONNECTOR_STATE_FILE"),
         )
 
@@ -72,6 +79,9 @@ class ConnectorConfig:
             reconnect_seconds=float(data.get("reconnectSeconds", 3)),
             sync_existing_on_connect=bool(data.get("syncExistingOnConnect", True)),
             sync_interval_seconds=float(data.get("syncIntervalSeconds", 30)),
+            active_session_sync_interval_seconds=float(
+                data.get("activeSessionSyncIntervalSeconds", 120)
+            ),
             state_path=(
                 data.get("statePath")
                 if isinstance(data.get("statePath"), str)
@@ -92,6 +102,7 @@ class ConnectorConfig:
                     "reconnectSeconds": self.reconnect_seconds,
                     "syncExistingOnConnect": self.sync_existing_on_connect,
                     "syncIntervalSeconds": self.sync_interval_seconds,
+                    "activeSessionSyncIntervalSeconds": self.active_session_sync_interval_seconds,
                     "statePath": self.state_path,
                 },
                 ensure_ascii=False,

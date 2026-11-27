@@ -36,7 +36,23 @@ SyncStateFlusher = Callable[[], Awaitable[bool]]
 ACTIVE_SESSION_SYNC_SKIP_STATUSES: frozenset[RuntimeStatus] = frozenset(
     {"waiting", "pending", "running", "waiting_approval", "stopping"}
 )
+# Sessions attached through the Codex IPC follower stream their own timeline
+# items, so the scanner must stay out of their way. Every other active session —
+# a turn a CLI or the Codex app-server daemon is writing from another process —
+# is only observable by reading it, and skipping that read is what froze its
+# timeline for as long as the turn ran.
+LIVE_STREAM_ATTACHMENTS: frozenset[str] = frozenset({"ipc"})
+# A slow read must not be repeated at the same rate: the effective interval
+# grows with the measured cost of the previous read.
+ACTIVE_SYNC_READ_BACKOFF = 4.0
+ACTIVE_SYNC_MIN_INTERVAL_SECONDS = 30.0
 VALIDATION_ERROR_LOG_LIMIT = 5
+
+
+def _monotonic() -> float:
+    """Clock for the active-session read schedule; tests replace it."""
+
+    return time.monotonic()
 
 
 class RuntimeSyncRunner:
@@ -66,6 +82,9 @@ class RuntimeSyncRunner:
         self._last_active_session_updates: dict[
             str, tuple[SessionMeta, SessionState]
         ] = {}
+        # session_id -> (monotonic started_at, read duration) of the last
+        # timeline read taken while the session was active.
+        self._active_sync_progress: dict[str, tuple[float, float]] = {}
 
     async def sync_existing_loop(self) -> None:
         if not self.config.sync_existing_on_connect:
@@ -304,33 +323,41 @@ class RuntimeSyncRunner:
         )
         active = state is not None and state.status in ACTIVE_SESSION_SYNC_SKIP_STATUSES
         if active and not recovering:
-            active_update = (session, state)
-            if (
-                self._last_active_session_updates.get(session.session_id)
-                == active_update
-            ):
-                logger.debug(
-                    "existing session sync suppressed unchanged active session runtime={} session_id={} status={}",
+            if not self._active_session_needs_sync(session, state):
+                active_update = (session, state)
+                if (
+                    self._last_active_session_updates.get(session.session_id)
+                    == active_update
+                ):
+                    logger.debug(
+                        "existing session sync suppressed unchanged active session runtime={} session_id={} status={}",
+                        session.runtime,
+                        session.session_id,
+                        state.status,
+                    )
+                    return
+                await self._ingest_scanner_notifications(
+                    [
+                        _session_meta_notification(session),
+                        _session_state_notification(state),
+                    ]
+                )
+                self._last_active_session_updates[session.session_id] = active_update
+                logger.info(
+                    "existing session sync deferred active session runtime={} session_id={} status={}",
                     session.runtime,
                     session.session_id,
                     state.status,
                 )
                 return
-            await self._ingest_scanner_notifications(
-                [
-                    _session_meta_notification(session),
-                    _session_state_notification(state),
-                ]
-            )
-            self._last_active_session_updates[session.session_id] = active_update
             logger.info(
-                "existing session sync deferred active session runtime={} session_id={} status={}",
+                "existing session timeline sync for active session without live stream runtime={} session_id={} status={}",
                 session.runtime,
                 session.session_id,
                 state.status,
             )
-            return
         self._last_active_session_updates.pop(session.session_id, None)
+        active_read_started = _monotonic()
         read_started_at = time.monotonic()
         prepared = await runtime.prepare_session_timeline_sync(
             session.session_id,
@@ -358,7 +385,9 @@ class RuntimeSyncRunner:
                 read_elapsed_ms,
             )
         deferred_replacement = recovering and active and snapshot is not None and snapshot.complete
-        if recovering and active and snapshot is not None:
+        if active and snapshot is not None:
+            # A turn that is still running can keep adding items: an active
+            # read is never the final timeline, so it must not replace one.
             snapshot = replace(snapshot, complete=False)
         notices = await runtime.get_session_notices(
             session.session_id,
@@ -399,7 +428,53 @@ class RuntimeSyncRunner:
         )
         # Keep this recovery generation pending until deletion reconciliation is
         # safe; otherwise an unchanged inventory marker could suppress its retry.
+        if active:
+            # Remember what this read cost, so the next active read waits longer
+            # for a timeline that is expensive to project.
+            self._active_sync_progress[session.session_id] = (
+                active_read_started,
+                max(read_elapsed_ms / 1000.0, 0.0),
+            )
         return not deferred_replacement
+
+    def _active_session_needs_sync(
+        self,
+        session: SessionMeta,
+        state: SessionState | None,
+    ) -> bool:
+        """Whether an active session still has to be read because nothing streams it.
+
+        An active session that the IPC follower projects has a live item stream;
+        reading it again would duplicate what already arrived. Every other active
+        session is only observable through a read, so leaving it unread keeps its
+        timeline frozen for as long as the turn runs.
+
+        Side effects:
+        - records the first observation of an active session without reading it:
+          recovery reads the timeline right after a restart, and repeating that
+          read immediately would double the cost of every startup
+        """
+
+        attachment = (
+            state.metadata.get("attachment") if state is not None else None
+        )
+        if attachment in LIVE_STREAM_ATTACHMENTS:
+            return False
+        interval = self.config.active_session_sync_interval_seconds
+        if interval <= 0:
+            return False
+        now = _monotonic()
+        progress = self._active_sync_progress.get(session.session_id)
+        if progress is None:
+            self._active_sync_progress[session.session_id] = (now, 0.0)
+            return False
+        started_at, read_seconds = progress
+        effective = max(
+            ACTIVE_SYNC_MIN_INTERVAL_SECONDS,
+            interval,
+            read_seconds * ACTIVE_SYNC_READ_BACKOFF,
+        )
+        return now - started_at >= effective
 
     async def _ingest_scanner_notifications(
         self,

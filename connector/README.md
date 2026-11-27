@@ -152,7 +152,18 @@ locked by the desktop app but no window shows it, the connector opens
 own app-server. Both IPC following (`ipcEnabled`) and the deep-link handoff
 (`ipcDeeplinkHandoff`) are switches in the Codex runtime config; the IPC
 router is scanned once at start and afterwards only on window activity. See
-[Codex IPC takeover](../docs/codex-ipc-takeover.md). Connector shutdown releases
+[Codex IPC takeover](../docs/codex-ipc-takeover.md).
+
+A session that is still running is only ever *read* — no Codex window streams it
+unless the follower attached to it. The background scanner therefore re-reads an
+active session that has no IPC stream instead of waiting for it to go idle, which
+is what used to freeze its timeline for the whole length of a turn: a Codex CLI
+or app-server daemon runs the turn in another process, so nothing else reports
+the new items. The read interval is `activeSessionSyncIntervalSeconds` (default
+120 seconds, `0` disables it and restores the old wait-for-idle behaviour) and
+grows with the measured cost of the previous read, so a multi-hundred-megabyte
+thread is read less often than a small one. Active reads publish
+`complete=false`: a running turn is never the final timeline. Connector shutdown releases
 native runtimes and writer locks; cancelled runtime startup is cleaned up as well.
 A closed transport is recovered once during safe pre-send preparation, never by
 blindly replaying a possibly accepted turn. See [session recovery](../docs/codex-session-recovery.md).
@@ -203,6 +214,7 @@ The server can ask an online connector to perform local work:
 | `AGENT_CONNECTOR_ID` | Connector id used when `--connector-id` is omitted. |
 | `AGENT_CONNECTOR_TOKEN` | Connector token used when `--connector-token` is omitted. |
 | `AGENT_CONNECTOR_STATE_FILE` | Legacy sync state source; its parent is the root for new `<connectorId>/<runtimeId>/` directories. Defaults to `~/.agents-anywhere/connector-state.json`. Config `statePath` takes precedence. |
+| `AGENT_CONNECTOR_ACTIVE_SYNC_INTERVAL_SECONDS` | Re-read interval for sessions that are still running and have no live IPC stream. Defaults to `120`; `0` disables it. Config `activeSessionSyncIntervalSeconds` takes precedence. |
 | `AGENT_CONNECTOR_KV_FILE` | Legacy KV copy source. Defaults to `~/.agents-anywhere/connector-kv.json`; new runtime writes use the instance's `kv.json`. |
 | `AGENT_CONNECTOR_ATTACHMENTS_ROOT` | Runtime attachment download directory. Defaults to `~/.agents-anywhere/attachments`. |
 | `CLAUDE_BIN` | Explicit Claude Code CLI path. |

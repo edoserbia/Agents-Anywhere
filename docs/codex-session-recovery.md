@@ -25,6 +25,26 @@
 - 正式 turn/start 的响应如果在断线中丢失，消息可能已被接受。AA 修复连接供后续
   命令使用，但不会自动重发该消息，避免重复执行；应先确认会话历史再决定是否重试。
 
+## 运行中会话的时间线
+
+扫描器过去只同步空闲会话：状态是 `running` 时只推会话状态，不读时间线。这在有实时
+通道时是对的——Codex 窗口经 IPC follower 推送，Connector 自己发起的 turn 经 SDK 通知
+推送——但当 Codex CLI 或 `codex app-server` managed daemon 在另一个进程里跑同一个
+thread 时，两条通道都不存在，时间线会一直停在上一次成功同步。
+
+2.1.3 起，没有 IPC 实时流的运行中会话按 `activeSessionSyncIntervalSeconds`（默认 120
+秒，`0` 关闭）做增量读取，读得慢的会话自动降频（`max(30 秒, 配置值, 4 × 上次读取
+耗时)`），并且运行中读到的快照一律以 `complete=false` 发布，不会覆盖完整快照。有 IPC
+follower 的会话不参与。这条路径只解决“读”，不解除写锁互斥：写入仍需要持有者释放会话。
+
+## 写锁冲突点名占用者
+
+`thread/resume` 报 `already has an active writer` 时，错误信息会用
+`$CODEX_HOME/thread-writer-locks/<thread-id>.lock` 的持有进程补一句
+`当前占用者：<name> (pid N: <command>)`。锁文件在持有者退出后仍留在磁盘上，所以只有
+确实仍被打开时才点名；定位失败时退回原提示。排查时仍可用
+`lsof ~/.codex/thread-writer-locks/<thread-id>.lock` 交叉核对。
+
 ## 升级既有故障实例
 
 代码升级不会热替换正在运行的 Python/Codex 进程。旧版本已经遗留的持锁者也不

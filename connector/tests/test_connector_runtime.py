@@ -3681,6 +3681,125 @@ def test_failed_session_does_not_repeat_successful_recovery_but_changes_still_sy
     asyncio.run(run())
 
 
+def test_active_session_without_live_stream_is_read_on_its_interval():
+    from unittest.mock import AsyncMock, patch
+
+    clock = {"now": 1000.0}
+
+    async def run():
+        reads = 0
+
+        class Runtime(FakeAgentRuntime):
+            async def list_sessions(self, **kwargs):
+                return (SessionMeta(session_id="session", external_session_id="external", runtime="codex",
+                                    metadata={"sync": {"changed": True, "requires_timeline_sync": True}}),)
+
+            async def get_session_state(self, *args):
+                return SessionState(session_id="session", external_session_id="external",
+                                    runtime="codex", status="running")
+
+            async def prepare_session_timeline_sync(self, *args):
+                nonlocal reads
+                reads += 1
+                return PreparedSessionTimelineSync(
+                    snapshot=RuntimeTimelineSnapshot(session_id="session", external_session_id="external",
+                                                     runtime="codex", items=(), complete=True),
+                    commit=AsyncMock())
+
+        runtime = Runtime()
+        ingest = AsyncMock()
+        runner = RuntimeSyncRunner(config=_client().config, supervisor=FakeRuntimeSupervisor(runtime),
+            host=RecordingRuntimeHost(), preferences_reader=dict,
+            send_notification=unused_notification_sender, ingest_notifications=ingest)
+
+        # The first observation only starts the clock: recovery owns that read.
+        await runner.sync_existing_once()
+        assert reads == 0
+        clock["now"] += 10
+        await runner.sync_existing_once()
+        assert reads == 0
+        # Nothing streams this session, so the interval must produce a read.
+        clock["now"] += 120
+        await runner.sync_existing_once()
+        assert reads == 1
+        timeline = next(n for n in ingest.call_args.args[0] if n["method"] == "timeline.sync")
+        assert timeline["params"]["complete"] is False
+        # Within the interval the scanner leaves it alone again.
+        clock["now"] += 60
+        await runner.sync_existing_once()
+        assert reads == 1
+        clock["now"] += 60
+        await runner.sync_existing_once()
+        assert reads == 2
+
+    with patch("connector.server.runtime_sync._monotonic", side_effect=lambda: clock["now"]):
+        asyncio.run(run())
+
+
+def test_active_session_followed_by_ipc_is_never_read():
+    from unittest.mock import AsyncMock, patch
+
+    async def run():
+        reads = 0
+
+        class Runtime(FakeAgentRuntime):
+            async def list_sessions(self, **kwargs):
+                return (SessionMeta(session_id="session", external_session_id="external", runtime="codex",
+                                    metadata={"sync": {"changed": True, "requires_timeline_sync": True}}),)
+
+            async def get_session_state(self, *args):
+                return SessionState(session_id="session", external_session_id="external", runtime="codex",
+                                    status="running", metadata={"attachment": "ipc", "source": "codex.ipc"})
+
+            async def prepare_session_timeline_sync(self, *args):
+                nonlocal reads
+                reads += 1
+                return PreparedSessionTimelineSync(snapshot=None, commit=AsyncMock())
+
+        runner = RuntimeSyncRunner(config=_client().config, supervisor=FakeRuntimeSupervisor(Runtime()),
+            host=RecordingRuntimeHost(), preferences_reader=dict,
+            send_notification=unused_notification_sender, ingest_notifications=AsyncMock())
+        clock = {"now": 1000.0}
+        with patch("connector.server.runtime_sync._monotonic", side_effect=lambda: clock["now"]):
+            await runner.sync_existing_once()
+            clock["now"] += 10_000
+            await runner.sync_existing_once()
+        assert reads == 0
+
+    asyncio.run(run())
+
+
+def test_active_session_read_interval_backs_off_with_read_cost():
+    from unittest.mock import AsyncMock, patch
+
+    async def run():
+        class Runtime(FakeAgentRuntime):
+            async def list_sessions(self, **kwargs):
+                return ()
+
+        runner = RuntimeSyncRunner(config=_client().config, supervisor=FakeRuntimeSupervisor(Runtime()),
+            host=RecordingRuntimeHost(), preferences_reader=dict,
+            send_notification=unused_notification_sender, ingest_notifications=AsyncMock())
+        session = SessionMeta(session_id="session", external_session_id="external", runtime="codex")
+        state = SessionState(session_id="session", external_session_id="external",
+                             runtime="codex", status="running")
+        clock = {"now": 1000.0}
+        with patch("connector.server.runtime_sync._monotonic", side_effect=lambda: clock["now"]):
+            assert runner._active_session_needs_sync(session, state) is False
+            runner._active_sync_progress["session"] = (1000.0, 60.0)
+            clock["now"] = 1200.0
+            assert runner._active_session_needs_sync(session, state) is False
+            clock["now"] = 1240.0
+            assert runner._active_session_needs_sync(session, state) is True
+            # A disabled interval keeps the old behaviour.
+            from dataclasses import replace
+            disabled = replace(runner.config, active_session_sync_interval_seconds=0)
+            runner.config = disabled
+            assert runner._active_session_needs_sync(session, state) is False
+
+    asyncio.run(run())
+
+
 def test_active_recovery_does_not_commit_a_deferred_timeline_replacement():
     from unittest.mock import AsyncMock
 
