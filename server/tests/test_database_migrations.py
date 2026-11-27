@@ -1126,9 +1126,9 @@ def test_unversioned_runtime_schema_is_classified_by_actual_columns(
     )
 
 
-def test_current_schema_version_is_v2_45_jupiter() -> None:
-    assert CURRENT_SCHEMA_REVISION == "v2_45_jupiter"
-    assert CURRENT_SCHEMA_VERSION == "2.45"
+def test_current_schema_version_is_v2_46_jupiter() -> None:
+    assert CURRENT_SCHEMA_REVISION == "v2_46_jupiter"
+    assert CURRENT_SCHEMA_VERSION == "2.46"
 
 
 def test_v2_41_drops_the_sidebar_order_table(tmp_path) -> None:
