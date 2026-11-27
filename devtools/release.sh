@@ -99,7 +99,7 @@ edits = [
     ("android/app/build.gradle.kts",
      r'versionName = "[0-9.]+"', f'versionName = "{version}"'),
     ("android/app/src/main/java/com/agentsanywhere/app/config/AppConfig.kt",
-     r'agents-anywhere-[0-9.]+-debug\.apk', f'agents-anywhere-{version}-debug.apk'),
+     r'agents-anywhere-[0-9.]+(?:-debug)?\.apk', f'agents-anywhere-{version}.apk'),
 ]
 for path, pattern, replacement in edits:
     text = io.open(path, encoding="utf-8").read()
